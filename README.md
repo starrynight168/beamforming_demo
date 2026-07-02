@@ -29,6 +29,23 @@ beamforming_demo/
   results/
 ```
 
+## 环境
+
+推荐使用 Conda：
+
+```bash
+conda env create -f environment.yml
+conda activate beamforming-demo
+```
+
+也可以在已有 Python 环境中安装依赖：
+
+```bash
+pip install -r requirements.txt
+```
+
+默认配置使用 CUDA 12.8 版 PyTorch。若机器没有 NVIDIA GPU，请按 PyTorch 官网说明安装 CPU 版 `torch`。
+
 ## 准备数据
 
 如果 `data/*.h5` 已存在，可以直接运行。需要重新从 `PICMUS/` 打包算法输入数据时：
