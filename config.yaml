@@ -1,0 +1,108 @@
+algorithms:
+  - das
+  - mv
+  - esbmv
+  - gcfmv
+  - cmsaw
+  - fdmas
+
+algorithm_labels:
+  das: DAS
+  mv: MV
+  esbmv: ESBMV
+  gcfmv: GCF-MV
+  cmsaw: CMSAW
+  fdmas: F-DMAS
+
+params:
+  select_angles: center
+  f_number: 1.5
+  dr: 60
+  dynamic_aperture: true
+  tgc: true
+  tgc_alpha: 0.5
+  window: rect
+  interp: cubic
+
+algorithm_params:
+  das: {}
+
+  mv:
+    mv_dl: 0.0
+    fbss: true
+    subarray_ratio: 0.25
+    temporal_win: 9
+
+  esbmv:
+    mv_dl: 0.0
+    fbss: true
+    subarray_ratio: 0.25
+    temporal_win: 9
+    num_eig: 0
+    eig_threshold: 0.05
+
+  gcfmv:
+    mv_dl: 0.0
+    fbss: true
+    subarray_ratio: 0.25
+    temporal_win: 9
+    gcf_low_bins: 1
+    gcf_power: 2.0
+
+  cmsaw:
+    mv_dl: 0.0
+    fbss: true
+    subarray_ratio: 0.25
+    temporal_win: 9
+    baseline_mv: mv.npy
+    lmax_ratio: 0.5
+    min_subarray_len: 2
+    delta_max: 1.0
+    gamma: 0.5
+    clip_percentile: 90.0
+    depth_smooth_rows: 1
+
+  fdmas: {}
+
+scenes:
+  - id: simulation_contrast_speckle
+    h5_path: data/simulation.h5
+    sample_idx: 0
+    phantom_mode: contrast_speckle
+    phantom_source: simulation
+    has_gt: true
+
+  - id: simulation_resolution_distorsion
+    h5_path: data/simulation.h5
+    sample_idx: 1
+    phantom_mode: resolution_distorsion
+    phantom_source: simulation
+    has_gt: true
+
+  - id: experiments_contrast_speckle
+    h5_path: data/experiments.h5
+    sample_idx: 0
+    phantom_mode: contrast_speckle
+    phantom_source: experiments
+    has_gt: true
+
+  - id: experiments_resolution_distorsion
+    h5_path: data/experiments.h5
+    sample_idx: 1
+    phantom_mode: resolution_distorsion
+    phantom_source: experiments
+    has_gt: true
+
+  - id: carotid_cross
+    h5_path: data/in_vivo.h5
+    sample_idx: 0
+    phantom_mode: in_vivo
+    phantom_source: in_vivo
+    has_gt: false
+
+  - id: carotid_long
+    h5_path: data/in_vivo.h5
+    sample_idx: 1
+    phantom_mode: in_vivo
+    phantom_source: in_vivo
+    has_gt: false

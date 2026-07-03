@@ -1,0 +1,8 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
+numpy==2.4.3
+h5py==3.16.0
+hdf5plugin==6.0.0
+matplotlib==3.10.8
+scipy==1.17.1
+PyYAML==6.0.3
