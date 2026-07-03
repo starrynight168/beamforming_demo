@@ -615,11 +615,22 @@ def save_bar_plot(path, metrics_to_plot):
     if not metrics_to_plot:
         return
 
+    max_plots_per_page = 6
+    if len(metrics_to_plot) > max_plots_per_page:
+        root, ext = os.path.splitext(path)
+        for page_idx, start in enumerate(range(0, len(metrics_to_plot), max_plots_per_page), start=1):
+            page_path = path if page_idx == 1 else f"{root}_page{page_idx}{ext}"
+            save_bar_plot(page_path, metrics_to_plot[start:start + max_plots_per_page])
+        return
+
     n_plots = len(metrics_to_plot)
-    cols = min(n_plots, 3)
+    max_methods = max(len(item[3]) for item in metrics_to_plot)
+    cols = 1 if max_methods > 8 else min(n_plots, 3)
     rows_grid = (n_plots + cols - 1) // cols
 
-    fig, axes = plt.subplots(rows_grid, cols, figsize=(5 * cols, 4 * rows_grid), dpi=150)
+    panel_width = 6.2 if max_methods > 6 else 5.0
+    panel_height = max(3.6, 0.42 * max_methods + 1.4) if max_methods > 6 else 4.0
+    fig, axes = plt.subplots(rows_grid, cols, figsize=(panel_width * cols, panel_height * rows_grid), dpi=150)
     if n_plots == 1:
         axes = [axes]
     else:
@@ -641,13 +652,13 @@ def save_bar_plot(path, metrics_to_plot):
         use_horizontal = len(m_list) > 6
         positions = np.arange(len(m_list))
         if use_horizontal:
-            bars = ax.barh(positions, vals, color=colors, height=0.55, edgecolor='black', linewidth=0.8)
+            bars = ax.barh(positions, vals, color=colors, height=0.62, edgecolor='black', linewidth=0.8)
             ax.set_yticks(positions)
-            ax.set_yticklabels(m_list, fontsize=8)
+            ax.set_yticklabels(m_list, fontsize=8 if len(m_list) <= 12 else 7)
             ax.invert_yaxis()
         else:
             bars = ax.bar(m_list, vals, color=colors, width=0.5, edgecolor='black', linewidth=0.8)
-            ax.tick_params(axis='x', labelrotation=25)
+            ax.tick_params(axis='x', labelrotation=25 if len(m_list) <= 5 else 35)
         ax.set_title(title, fontsize=11, fontweight='bold', pad=10)
         ax.grid(axis='x' if use_horizontal else 'y', linestyle='--', alpha=0.5)
         ax.set_axisbelow(True)
@@ -709,12 +720,15 @@ def save_group_metric_plot(path, group_rows, metric_keys, title_prefix):
     n_plots = len(available_metrics)
     cols = min(n_plots, 2)
     rows_grid = (n_plots + cols - 1) // cols
-    fig, axes = plt.subplots(rows_grid, cols, figsize=(6.2 * cols, 4.0 * rows_grid), dpi=160)
+    panel_width = max(6.2, 1.15 * len(groups) + 0.35 * len(methods) + 3.0)
+    panel_height = 4.4 if len(methods) <= 8 else 5.0
+    fig, axes = plt.subplots(rows_grid, cols, figsize=(panel_width * cols, panel_height * rows_grid), dpi=160)
     axes = np.asarray(axes).reshape(-1)
 
     x = np.arange(len(groups))
-    bar_width = min(0.78 / max(len(methods), 1), 0.12)
+    bar_width = min(0.78 / max(len(methods), 1), 0.13)
     offsets = (np.arange(len(methods)) - (len(methods) - 1) / 2.0) * bar_width
+    show_value_labels = len(methods) <= 8 and len(groups) <= 4
 
     for ax_idx, (key, title) in enumerate(available_metrics):
         ax = axes[ax_idx]
@@ -735,7 +749,7 @@ def save_group_metric_plot(path, group_rows, metric_keys, title_prefix):
                 linewidth=0.5,
             )
             for bar, value in zip(bars, values):
-                if np.isfinite(value):
+                if show_value_labels and np.isfinite(value):
                     ax.annotate(
                         f"{value:.{metric_precision(title, key)}f}",
                         xy=(bar.get_x() + bar.get_width() / 2.0, value),
@@ -763,7 +777,7 @@ def save_group_metric_plot(path, group_rows, metric_keys, title_prefix):
 
     handles, labels = axes[0].get_legend_handles_labels()
     if handles:
-        fig.legend(handles, labels, loc="upper center", ncol=min(len(methods), 7), fontsize=8, frameon=False)
+        fig.legend(handles, labels, loc="upper center", ncol=min(len(methods), 6), fontsize=8, frameon=False)
         fig.subplots_adjust(top=0.88)
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight", facecolor="white")
