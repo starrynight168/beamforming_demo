@@ -51,6 +51,11 @@ pip install -r requirements.txt
 
 ## 准备数据
 
+**重要**：原始数据 `PICMUS` 文件夹因大小限制未包含在代码仓库中，请从以下链接下载压缩包：
+- `PICMUS` 数据压缩包：https://drive.google.com/file/d/1CQxjvpwGHDyzwHSJQux-mkXLl97mul-f/view?usp=drive_link
+
+下载后，将压缩包解压，并用其中的 `PICMUS` 文件夹**替换**项目根目录下的 `PICMUS/` 文件夹（如果已存在）。确保解压后的路径结构（如 `PICMUS/simulation/...`）与 `data/pack_data.py` 脚本中的预期路径一致。
+
 如果 `data/*.h5` 已存在，可以直接运行。需要重新从 `PICMUS/` 打包算法输入数据时：
 
 ```bash
@@ -68,6 +73,9 @@ python check_data.py
 - `data/simulation.h5`: simulation contrast/speckle 和 resolution/distortion
 - `data/experiments.h5`: experiments contrast/speckle 和 resolution/distortion
 - `data/in_vivo.h5`: carotid cross 和 carotid long
+
+**备用下载**：如果上述链接访问不便，也可以从以下项目文件夹链接获取完整工程（包含数据）：
+https://drive.google.com/drive/folders/1HeaowzynJdmK188EPwCqfgtj5zPGieH8?usp=drive_link
 
 ## 单独运行一个算法
 
