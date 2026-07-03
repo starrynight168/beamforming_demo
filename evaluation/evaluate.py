@@ -89,7 +89,11 @@ def load_method_names(args, comparison_path, n_panels, has_gt):
                 methods = [m.strip().lower() for m in method_text.split(",") if m.strip()]
                 names = [label_map.get(m, m.upper()) for m in methods]
         if names is None:
-            names = DEFAULT_METHODS[:n_panels]
+            n_methods = n_panels - 1 if has_gt else n_panels
+            if n_methods <= len(DEFAULT_METHODS):
+                names = DEFAULT_METHODS[:n_methods]
+            else:
+                names = DEFAULT_METHODS + [f"Method{i + 1}" for i in range(len(DEFAULT_METHODS), n_methods)]
     if has_gt:
         names = ["GT"] + names
     if len(names) != n_panels:
@@ -355,6 +359,54 @@ def standard_contrast_score(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padd
     return float(round(value * 10.0) / 10.0)
 
 
+def contrast_roi_metrics(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padding=1.0):
+    if not lateral_resolution_mm or not np.isfinite(lateral_resolution_mm):
+        return None
+    x = x_mm[None, :]
+    z = z_mm[:, None]
+    radius = roi["diameter_mm"] / 2.0
+    rin = radius - padding * lateral_resolution_mm
+    rout1 = radius + padding * lateral_resolution_mm
+    rout2 = 1.2 * math.sqrt(max(rin ** 2 + rout1 ** 2, 0.0))
+    if rin <= 0 or rout2 <= rout1:
+        return None
+    dist2 = (x - roi["x_mm"]) ** 2 + (z - roi["z_mm"]) ** 2
+    inside_db = db_img[dist2 <= rin ** 2]
+    outside_db = db_img[(dist2 >= rout1 ** 2) & (dist2 <= rout2 ** 2)]
+    inside_db = inside_db[np.isfinite(inside_db)]
+    outside_db = outside_db[np.isfinite(outside_db)]
+    if inside_db.size < 8 or outside_db.size < 8:
+        return None
+
+    inside_env = db_to_envelope(inside_db)
+    outside_env = db_to_envelope(outside_db)
+    mu_in = float(np.mean(inside_env))
+    mu_out = float(np.mean(outside_env))
+    var_in = float(np.var(inside_env))
+    var_out = float(np.var(outside_env))
+    cnr = abs(mu_out - mu_in) / math.sqrt(var_in + var_out + 1e-24)
+    cr_db = 20.0 * math.log10((mu_out + 1e-12) / (mu_in + 1e-12))
+    residual_db = 20.0 * math.log10((mu_in + 1e-12) / (mu_out + 1e-12))
+
+    combined = np.concatenate([inside_env, outside_env])
+    lo, hi = float(np.min(combined)), float(np.max(combined))
+    if hi <= lo:
+        gcnr = np.nan
+    else:
+        hist_in, bins = np.histogram(inside_env, bins=128, range=(lo, hi), density=False)
+        hist_out, _ = np.histogram(outside_env, bins=bins, density=False)
+        p_in = hist_in.astype(np.float64) / max(float(hist_in.sum()), 1.0)
+        p_out = hist_out.astype(np.float64) / max(float(hist_out.sum()), 1.0)
+        gcnr = 1.0 - float(np.sum(np.minimum(p_in, p_out)))
+
+    return {
+        "CR_dB": float(cr_db),
+        "CNR": float(cnr),
+        "gCNR": float(gcnr),
+        "cyst_residual_dB": float(residual_db),
+    }
+
+
 def standard_speckle_quality(env, x_mm, z_mm, roi, lateral_resolution_mm, axial_resolution_mm):
     if not lateral_resolution_mm or not axial_resolution_mm:
         return None
@@ -376,6 +428,8 @@ def standard_speckle_quality(env, x_mm, z_mm, roi, lateral_resolution_mm, axial_
         "speckle_pass": 1.0 if ks.pvalue >= 0.05 else 0.0,
         "speckle_KS_D": float(ks.statistic),
         "speckle_KS_p": float(ks.pvalue),
+        "speckle_SNR": float(np.mean(sample) / (np.std(sample) + 1e-12)),
+        "ENL": float((np.mean(sample) ** 2) / (np.var(sample) + 1e-24)),
     }
 
 
@@ -393,7 +447,40 @@ def compute_6db_resolution(coord, profile_db):
     return float(coord_interp[valid[-1]] - coord_interp[valid[0]])
 
 
-def target_resolution(db_img, x_mm, z_mm, target, window_mm, target_idx=None):
+def profile_sidelobe_metrics(profile_db):
+    profile = np.asarray(profile_db, dtype=np.float64)
+    profile = profile[np.isfinite(profile)]
+    if profile.size < 5:
+        return np.nan, np.nan
+
+    peak_idx = int(np.argmax(profile))
+    peak_db = float(profile[peak_idx])
+    main_threshold = peak_db - 6.0
+
+    left = peak_idx
+    while left > 0 and profile[left - 1] >= main_threshold:
+        left -= 1
+    right = peak_idx
+    while right < profile.size - 1 and profile[right + 1] >= main_threshold:
+        right += 1
+
+    main = profile[left:right + 1]
+    side = np.concatenate([profile[:left], profile[right + 1:]])
+    if main.size == 0 or side.size == 0:
+        return np.nan, np.nan
+
+    peak_env = float(np.max(db_to_envelope(main)))
+    side_env = db_to_envelope(side)
+    main_env = db_to_envelope(main)
+    if peak_env <= 0:
+        return np.nan, np.nan
+
+    pslr = 20.0 * math.log10((float(np.max(side_env)) + 1e-12) / (peak_env + 1e-12))
+    islr = 10.0 * math.log10((float(np.sum(side_env ** 2)) + 1e-24) / (float(np.sum(main_env ** 2)) + 1e-24))
+    return float(pslr), float(islr)
+
+
+def target_resolution(db_img, x_mm, z_mm, target, window_mm, target_idx=None, source="simulation"):
     x_mask = np.abs(x_mm - target["x_mm"]) <= window_mm
     z_mask = np.abs(z_mm - target["z_mm"]) <= window_mm
     patch = db_img[np.ix_(z_mask, x_mask)]
@@ -406,9 +493,13 @@ def target_resolution(db_img, x_mm, z_mm, target, window_mm, target_idx=None):
     ix = int(x_ids[px])
     axial = compute_6db_resolution(z_mm[z_mask], patch[:, px])
     lateral = compute_6db_resolution(x_mm[x_mask], patch[pz, :])
+    PSLR_axial_dB, ISLR_axial_dB = profile_sidelobe_metrics(patch[:, px])
+    PSLR_lateral_dB, ISLR_lateral_dB = profile_sidelobe_metrics(patch[pz, :])
+    PSLR_dB = mean_or_nan([PSLR_axial_dB, PSLR_lateral_dB])
+    ISLR_dB = mean_or_nan([ISLR_axial_dB, ISLR_lateral_dB])
     peak_offset = math.sqrt((x_mm[ix] - target["x_mm"]) ** 2 + (z_mm[iz] - target["z_mm"]) ** 2)
     distortion_pass = np.nan
-    if target_idx is not None and target_idx in {1, 5, 8, 9, 14, 15, 20}:
+    if source == "simulation" and target_idx is not None and target_idx in {1, 5, 8, 9, 14, 15, 20}:
         corrected_z = target["z_mm"] + 0.2
         inside = (
             abs(x_mm[ix] - target["x_mm"]) < 0.2957
@@ -422,6 +513,12 @@ def target_resolution(db_img, x_mm, z_mm, target, window_mm, target_idx=None):
         "peak_z_mm": float(z_mm[iz]),
         "FWHM_axial_mm": axial,
         "FWHM_lateral_mm": lateral,
+        "PSLR_axial_dB": float(PSLR_axial_dB),
+        "PSLR_lateral_dB": float(PSLR_lateral_dB),
+        "PSLR_dB": float(PSLR_dB),
+        "ISLR_axial_dB": float(ISLR_axial_dB),
+        "ISLR_lateral_dB": float(ISLR_lateral_dB),
+        "ISLR_dB": float(ISLR_dB),
         "distortion_mm": float(peak_offset),
         "distortion_pass": distortion_pass,
     }
@@ -432,7 +529,7 @@ def mean_or_nan(values):
     return float(np.mean(values)) if values else np.nan
 
 
-def save_roi_plot(path, gt_display, x_mm, z_mm, rois, targets):
+def save_roi_plot(path, gt_display, x_mm, z_mm, rois, targets, target_rows=None, peak_method=None):
     fig, ax = plt.subplots(figsize=(6, 8), dpi=220)
     ax.imshow(
         gt_display,
@@ -442,15 +539,73 @@ def save_roi_plot(path, gt_display, x_mm, z_mm, rois, targets):
         extent=[x_mm[0], x_mm[-1], z_mm[-1], z_mm[0]],
         aspect="equal",
     )
-    for roi in rois:
-        ax.add_patch(plt.Circle((roi["x_mm"], roi["z_mm"]), roi["diameter_mm"] / 2.0, fill=False, color="red"))
+    for idx, roi in enumerate(rois, start=1):
+        ax.add_patch(plt.Circle((roi["x_mm"], roi["z_mm"]), roi["diameter_mm"] / 2.0, fill=False, color="red", linewidth=0.9))
+        ax.text(roi["x_mm"], roi["z_mm"], str(idx), color="yellow", fontsize=6, ha="center", va="center")
     if targets:
-        ax.scatter([t["x_mm"] for t in targets], [t["z_mm"] for t in targets], marker="+", c="cyan", s=20)
+        ax.scatter([t["x_mm"] for t in targets], [t["z_mm"] for t in targets], marker="+", c="cyan", s=20, label="target")
+        for idx, target in enumerate(targets, start=1):
+            ax.text(target["x_mm"] + 0.25, target["z_mm"] - 0.25, str(idx), color="cyan", fontsize=5)
+    if target_rows:
+        if peak_method is None:
+            non_gt = [row["method"] for row in target_rows if row.get("method") != "GT"]
+            peak_method = non_gt[0] if non_gt else target_rows[0].get("method")
+        peaks = [row for row in target_rows if row.get("method") == peak_method]
+        if peaks:
+            ax.scatter(
+                [row["peak_x_mm"] for row in peaks],
+                [row["peak_z_mm"] for row in peaks],
+                marker="x",
+                c="yellow",
+                s=14,
+                linewidths=0.8,
+                label=f"{peak_method} peak",
+            )
+            for row in peaks:
+                ax.plot(
+                    [row["target_x_mm"], row["peak_x_mm"]],
+                    [row["target_z_mm"], row["peak_z_mm"]],
+                    color="yellow",
+                    linewidth=0.35,
+                    alpha=0.65,
+                )
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(loc="lower right", fontsize=6, framealpha=0.7)
     ax.set_xlabel("Lateral (mm)")
     ax.set_ylabel("Depth (mm)")
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
+
+
+def metric_precision(title, key):
+    key_l = key.lower()
+    title_l = title.lower()
+    if "gcnr" in key_l or "ssim" in key_l or "ratio" in key_l or "rate" in title_l:
+        return 4
+    if "fwhm" in key_l or "distortion" in key_l or "sharpness" in key_l or "contrast" in key_l:
+        return 4
+    if "cnr" in key_l or "snr" in key_l or "enl" in key_l or "entropy" in key_l:
+        return 3
+    if "psnr" in key_l or key_l.endswith("_db") or "(db)" in title_l:
+        return 2
+    return 3
+
+
+def zoom_limits(values):
+    finite = np.asarray([v for v in values if np.isfinite(v)], dtype=np.float64)
+    if finite.size < 2:
+        return None
+    vmin = float(np.min(finite))
+    vmax = float(np.max(finite))
+    if vmax <= vmin:
+        return None
+    pad = 0.12 * (vmax - vmin)
+    lower = vmin - pad
+    upper = vmax + pad
+    if vmin >= 0.0 and lower < 0.0:
+        lower = 0.0
+    return lower, upper
 
 
 def save_bar_plot(path, metrics_to_plot):
@@ -500,7 +655,7 @@ def save_bar_plot(path, metrics_to_plot):
         for bar in bars:
             value = bar.get_width() if use_horizontal else bar.get_height()
             if np.isfinite(value):
-                label = f'{value:.3f}' if 'SSIM' in title or 'Rate' in title or 'mm' in title else f'{value:.1f}'
+                label = f"{value:.{metric_precision(title, key)}f}"
                 if use_horizontal:
                     ax.annotate(label,
                                 xy=(value, bar.get_y() + bar.get_height() / 2),
@@ -522,6 +677,99 @@ def save_bar_plot(path, metrics_to_plot):
     plt.close(fig)
 
 
+def save_group_metric_plot(path, group_rows, metric_keys, title_prefix):
+    if not group_rows:
+        return
+
+    groups = []
+    methods = []
+    for row in group_rows:
+        if row["group"] not in groups:
+            groups.append(row["group"])
+        if row["method"] not in methods:
+            methods.append(row["method"])
+
+    available_metrics = [
+        (key, title) for key, title in metric_keys
+        if any(np.isfinite(row.get(key, np.nan)) for row in group_rows)
+    ]
+    if not available_metrics:
+        return
+
+    color_map = {
+        "GT": "#333333",
+        "DAS": "#4C72B0",
+        "MV": "#55A868",
+        "ESBMV": "#8172B3",
+        "GCF-MV": "#64B5CD",
+        "CMSAW": "#FF7F0E",
+        "F-DMAS": "#C44E52",
+    }
+
+    n_plots = len(available_metrics)
+    cols = min(n_plots, 2)
+    rows_grid = (n_plots + cols - 1) // cols
+    fig, axes = plt.subplots(rows_grid, cols, figsize=(6.2 * cols, 4.0 * rows_grid), dpi=160)
+    axes = np.asarray(axes).reshape(-1)
+
+    x = np.arange(len(groups))
+    bar_width = min(0.78 / max(len(methods), 1), 0.12)
+    offsets = (np.arange(len(methods)) - (len(methods) - 1) / 2.0) * bar_width
+
+    for ax_idx, (key, title) in enumerate(available_metrics):
+        ax = axes[ax_idx]
+        all_values = []
+        for method_idx, method in enumerate(methods):
+            values = []
+            for group in groups:
+                row = next((r for r in group_rows if r["method"] == method and r["group"] == group), None)
+                values.append(row.get(key, np.nan) if row else np.nan)
+            all_values.extend(values)
+            bars = ax.bar(
+                x + offsets[method_idx],
+                values,
+                width=bar_width,
+                label=method,
+                color=color_map.get(method, "#4C72B0"),
+                edgecolor="black",
+                linewidth=0.5,
+            )
+            for bar, value in zip(bars, values):
+                if np.isfinite(value):
+                    ax.annotate(
+                        f"{value:.{metric_precision(title, key)}f}",
+                        xy=(bar.get_x() + bar.get_width() / 2.0, value),
+                        xytext=(0, 2),
+                        textcoords="offset points",
+                        ha="center",
+                        va="bottom",
+                        fontsize=6,
+                    )
+
+        ax.set_title(f"{title_prefix}: {title}", fontsize=10, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels([g.replace("_", "\n") for g in groups], fontsize=8)
+        ax.grid(axis="y", linestyle="--", alpha=0.45)
+        ax.set_axisbelow(True)
+        limits = zoom_limits(all_values)
+        if limits is not None:
+            lower, upper = limits
+            if lower > 0:
+                lower = 0.0
+            ax.set_ylim(lower, upper)
+
+    for j in range(n_plots, len(axes)):
+        fig.delaxes(axes[j])
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="upper center", ncol=min(len(methods), 7), fontsize=8, frameon=False)
+        fig.subplots_adjust(top=0.88)
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
 def build_metric_plots(rows):
     methods_all = [r["method"] for r in rows]
     non_gt = [r for r in rows if r["method"] != "GT"]
@@ -529,11 +777,23 @@ def build_metric_plots(rows):
     standard = []
     if any(np.isfinite(r["contrast_dB"]) for r in rows):
         standard.append(("Contrast (dB)", "contrast_dB", [r["contrast_dB"] for r in rows], methods_all))
+    if any(np.isfinite(r["CNR"]) for r in rows):
+        standard.append(("CNR", "CNR", [r["CNR"] for r in rows], methods_all))
+    if any(np.isfinite(r["gCNR"]) for r in rows):
+        standard.append(("gCNR", "gCNR", [r["gCNR"] for r in rows], methods_all))
     if any(np.isfinite(r["speckle_pass_rate"]) for r in rows):
         standard.append(("Speckle Pass Rate", "speckle_pass_rate", [r["speckle_pass_rate"] for r in rows], methods_all))
+    if any(np.isfinite(r["speckle_SNR"]) for r in rows):
+        standard.append(("Speckle SNR", "speckle_SNR", [r["speckle_SNR"] for r in rows], methods_all))
+    if any(np.isfinite(r["ENL"]) for r in rows):
+        standard.append(("ENL", "ENL", [r["ENL"] for r in rows], methods_all))
     if any(np.isfinite(r["FWHM_axial_mm"]) for r in rows):
         standard.append(("Axial FWHM (mm)", "FWHM_axial_mm", [r["FWHM_axial_mm"] for r in rows], methods_all))
         standard.append(("Lateral FWHM (mm)", "FWHM_lateral_mm", [r["FWHM_lateral_mm"] for r in rows], methods_all))
+    if any(np.isfinite(r["PSLR_dB"]) for r in rows):
+        standard.append(("PSLR (dB)", "PSLR_dB", [r["PSLR_dB"] for r in rows], methods_all))
+    if any(np.isfinite(r["ISLR_dB"]) for r in rows):
+        standard.append(("ISLR (dB)", "ISLR_dB", [r["ISLR_dB"] for r in rows], methods_all))
     if any(np.isfinite(r["distortion_pass_rate"]) for r in rows):
         standard.append(("Distortion Pass Rate", "distortion_pass_rate", [r["distortion_pass_rate"] for r in rows], methods_all))
 
@@ -544,12 +804,6 @@ def build_metric_plots(rows):
         auxiliary.append(("PSNR vs GT (dB)", "PSNR_dB_vs_GT", [r["PSNR_dB_vs_GT"] for r in non_gt], [r["method"] for r in non_gt]))
     if any(np.isfinite(r["MAE_dB_vs_GT"]) for r in non_gt):
         auxiliary.append(("MAE vs GT (dB)", "MAE_dB_vs_GT", [r["MAE_dB_vs_GT"] for r in non_gt], [r["method"] for r in non_gt]))
-    if any(np.isfinite(r["black_pixel_ratio"]) for r in non_gt):
-        auxiliary.append(("Black Pixel Ratio (%)", "black_pixel_ratio", [100.0 * r["black_pixel_ratio"] for r in non_gt], [r["method"] for r in non_gt]))
-    if any(np.isfinite(r["mean_raw_dB"]) for r in rows):
-        auxiliary.append(("Mean Raw (dB)", "mean_raw_dB", [r["mean_raw_dB"] for r in rows], methods_all))
-    if any(np.isfinite(r["std_display_dB"]) for r in rows):
-        auxiliary.append(("Display Std (dB)", "std_display_dB", [r["std_display_dB"] for r in rows], methods_all))
 
     return standard, auxiliary
 
@@ -635,6 +889,162 @@ def save_lateral_profile_plot(out_dir, comparison, x_mm, z_mm, rois, targets, me
         print(f"Saved point target profile plot: {os.path.join(out_dir, 'point_profile.png')}")
 
 
+def picmus_resolution_groups(source, target_count):
+    if source == "simulation" and target_count >= 20:
+        return [
+            ("vertical_targets", list(range(1, 9))),
+            ("horizontal_targets_2cm", [9, 10, 11, 3, 12, 13, 14]),
+            ("horizontal_targets_4cm", [15, 16, 17, 7, 18, 19, 20]),
+        ]
+    if source == "experiments" and target_count >= 7:
+        return [
+            ("vertical_targets", list(range(1, 6))),
+            ("horizontal_targets_near_4cm", [6, 4, 7]),
+        ]
+    return [("all_targets", list(range(1, target_count + 1)))] if target_count else []
+
+
+def picmus_contrast_groups(source, roi_count):
+    if source == "simulation" and roi_count >= 9:
+        return [
+            ("left_column", [4, 5, 6]),
+            ("middle_column", [1, 2, 3]),
+            ("right_column", [7, 8, 9]),
+        ]
+    if source == "experiments" and roi_count >= 2:
+        return [("middle_column", [1, 2])]
+    return [("all_cysts", list(range(1, roi_count + 1)))] if roi_count else []
+
+
+def rows_for_method_index(rows, method, index_key):
+    out = {}
+    for row in rows:
+        if row.get("method") != method or index_key not in row:
+            continue
+        try:
+            out[int(row[index_key])] = row
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def speckle_penalty_for_method(roi_rows, method):
+    passes = [
+        row["speckle_pass"]
+        for row in roi_rows
+        if row.get("method") == method and "speckle_pass" in row and np.isfinite(row["speckle_pass"])
+    ]
+    if not passes:
+        return np.nan
+    return -40.0 if any(value < 0.5 for value in passes) else 0.0
+
+
+def build_resolution_group_rows(target_rows, source, target_count, methods):
+    groups = picmus_resolution_groups(source, target_count)
+    rows = []
+    for method in methods:
+        indexed = rows_for_method_index(target_rows, method, "target_idx")
+        for group_name, indices in groups:
+            selected = [indexed[i] for i in indices if i in indexed]
+            if not selected:
+                continue
+            pass_values = [row["distortion_pass"] for row in selected if np.isfinite(row.get("distortion_pass", np.nan))]
+            if source == "simulation" and pass_values:
+                penalty = -40.0 if any(value < 0.5 for value in pass_values) else 0.0
+                pass_rate = mean_or_nan(pass_values)
+            else:
+                penalty = np.nan
+                pass_rate = np.nan
+            rows.append({
+                "method": method,
+                "group": group_name,
+                "target_indices": " ".join(str(i) for i in indices),
+                "n_targets": len(selected),
+                "FWHM_axial_mm": mean_or_nan([row.get("FWHM_axial_mm") for row in selected]),
+                "FWHM_lateral_mm": mean_or_nan([row.get("FWHM_lateral_mm") for row in selected]),
+                "PSLR_dB": mean_or_nan([row.get("PSLR_dB") for row in selected]),
+                "ISLR_dB": mean_or_nan([row.get("ISLR_dB") for row in selected]),
+                "distortion_mm": mean_or_nan([row.get("distortion_mm") for row in selected]),
+                "distortion_pass_rate": pass_rate,
+                "PICMUS_distortion_penalty": penalty,
+            })
+    return rows
+
+
+def build_contrast_group_rows(roi_rows, source, roi_count, methods):
+    groups = picmus_contrast_groups(source, roi_count)
+    rows = []
+    for method in methods:
+        indexed = rows_for_method_index([row for row in roi_rows if "contrast_dB" in row], method, "roi_idx")
+        for group_name, indices0 in groups:
+            indices = [i - 1 for i in indices0]
+            selected = [indexed[i] for i in indices if i in indexed]
+            if not selected:
+                continue
+            rows.append({
+                "method": method,
+                "group": group_name,
+                "roi_indices": " ".join(str(i) for i in indices0),
+                "n_rois": len(selected),
+                "contrast_dB": mean_or_nan([row.get("contrast_dB") for row in selected]),
+                "CR_dB": mean_or_nan([row.get("CR_dB") for row in selected]),
+                "CNR": mean_or_nan([row.get("CNR") for row in selected]),
+                "gCNR": mean_or_nan([row.get("gCNR") for row in selected]),
+                "cyst_residual_dB": mean_or_nan([row.get("cyst_residual_dB") for row in selected]),
+                "PICMUS_speckle_penalty": speckle_penalty_for_method(roi_rows, method),
+            })
+    return rows
+
+
+def fmt_metric(value, precision=3):
+    try:
+        if value is None or not np.isfinite(value):
+            return "NA"
+    except TypeError:
+        return "NA"
+    return f"{float(value):.{precision}f}"
+
+
+def write_picmus_report(path, mode, source, methods, summary_rows, contrast_group_rows, resolution_group_rows, roi_rows):
+    summary_by_method = {row["method"]: row for row in summary_rows}
+    with open(path, "w", encoding="utf-8") as file:
+        file.write("PICMUS-style evaluation summary\n")
+        file.write(f"mode: {mode}\nsource: {source}\n\n")
+        for method in methods:
+            row = summary_by_method.get(method, {})
+            file.write(f"[{method}]\n")
+            if mode == "contrast_speckle":
+                file.write(f"mean_contrast_dB: {fmt_metric(row.get('contrast_dB'), 1)}\n")
+                file.write(f"mean_CR_dB: {fmt_metric(row.get('CR_dB'), 3)}\n")
+                file.write(f"mean_CNR: {fmt_metric(row.get('CNR'), 3)}\n")
+                file.write(f"mean_gCNR: {fmt_metric(row.get('gCNR'), 3)}\n")
+                file.write(f"speckle_pass_rate: {fmt_metric(row.get('speckle_pass_rate'), 3)}\n")
+                file.write(f"PICMUS_speckle_penalty: {fmt_metric(speckle_penalty_for_method(roi_rows, method), 1)}\n")
+                for group in [r for r in contrast_group_rows if r["method"] == method]:
+                    file.write(
+                        f"  {group['group']} ({group['roi_indices']}): "
+                        f"contrast={fmt_metric(group.get('contrast_dB'), 1)}, "
+                        f"CNR={fmt_metric(group.get('CNR'), 3)}, "
+                        f"gCNR={fmt_metric(group.get('gCNR'), 3)}\n"
+                    )
+            elif mode == "resolution_distorsion":
+                file.write(f"mean_FWHM_axial_mm: {fmt_metric(row.get('FWHM_axial_mm'), 4)}\n")
+                file.write(f"mean_FWHM_lateral_mm: {fmt_metric(row.get('FWHM_lateral_mm'), 4)}\n")
+                file.write(f"mean_PSLR_dB: {fmt_metric(row.get('PSLR_dB'), 3)}\n")
+                file.write(f"mean_ISLR_dB: {fmt_metric(row.get('ISLR_dB'), 3)}\n")
+                file.write(f"distortion_pass_rate: {fmt_metric(row.get('distortion_pass_rate'), 3)}\n")
+                for group in [r for r in resolution_group_rows if r["method"] == method]:
+                    file.write(
+                        f"  {group['group']} ({group['target_indices']}): "
+                        f"axial={fmt_metric(group.get('FWHM_axial_mm'), 4)}, "
+                        f"lateral={fmt_metric(group.get('FWHM_lateral_mm'), 4)}, "
+                        f"penalty={fmt_metric(group.get('PICMUS_distortion_penalty'), 1)}\n"
+                    )
+            else:
+                file.write("No PICMUS phantom score for this mode.\n")
+            file.write("\n")
+
+
 def write_csv(path, rows, fieldnames):
     with open(path, "w", newline="", encoding="utf-8-sig") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -647,7 +1057,15 @@ def main():
     comparison_path = resolve(args.comparison_npy)
     h5_path = resolve(args.h5_path)
     out_dir = resolve(args.out_dir)
-    os.makedirs(out_dir, exist_ok=True)
+    meta_from_h5 = read_sample_meta(h5_path, args.h5_sample_idx)
+    if (
+        args.phantom_mode == "in_vivo"
+        or args.phantom_source == "in_vivo"
+        or meta_from_h5.get("phantom_mode") == "in_vivo"
+        or meta_from_h5.get("phantom_source") == "in_vivo"
+    ):
+        print("In-vivo scene: skipped metric export.")
+        return
 
     comparison = np.load(comparison_path).astype(np.float64)
     x_mm, z_mm = load_grids(h5_path)
@@ -658,7 +1076,7 @@ def main():
 
     mode = infer_mode(args, comparison)
     source = infer_source(args)
-    meta_from_h5 = read_sample_meta(h5_path, args.h5_sample_idx)
+    os.makedirs(out_dir, exist_ok=True)
     if args.phantom_path == "auto" and meta_from_h5.get("phantom_path"):
         phantom_path = resolve_existing(meta_from_h5["phantom_path"])
     else:
@@ -686,19 +1104,9 @@ def main():
     roi_rows = []
     target_rows = []
     for method, db_img in zip(methods, comparison):
-        clipped_db = np.clip(db_img, -args.dr, 0.0)
         display = db_to_display(db_img, args.dr)
         env = db_to_envelope(db_img)
         row = {"method": method}
-        row["mean_raw_dB"] = float(np.mean(db_img))
-        row["median_raw_dB"] = float(np.median(db_img))
-        row["std_raw_dB"] = float(np.std(db_img))
-        row["dynamic_range_raw_dB"] = float(np.percentile(db_img, 99.9) - np.percentile(db_img, 0.1))
-        row["mean_display_dB"] = float(np.mean(clipped_db))
-        row["median_display_dB"] = float(np.median(clipped_db))
-        row["std_display_dB"] = float(np.std(clipped_db))
-        row["black_pixel_ratio"] = float(np.mean(db_img <= -args.dr))
-        row["white_pixel_ratio"] = float(np.mean(db_img >= 0.0))
         if has_gt and method == "GT":
             row["SSIM_vs_GT"] = 1.0
             row["PSNR_dB_vs_GT"] = float("inf")
@@ -719,14 +1127,30 @@ def main():
             row["MAE_dB_vs_GT"] = np.nan
 
         contrast_scores = []
+        cr_scores = []
+        cnr_scores = []
+        gcnr_scores = []
+        residual_scores = []
         for idx, roi in enumerate(rois):
             score = standard_contrast_score(db_img, x_mm, z_mm, roi, lateral_resolution_mm)
-            if not np.isfinite(score):
+            metrics = contrast_roi_metrics(db_img, x_mm, z_mm, roi, lateral_resolution_mm)
+            if not np.isfinite(score) and metrics is None:
                 continue
             roi_row = {"method": method, "roi_idx": idx, **roi, "contrast_dB": score}
+            if metrics is not None:
+                roi_row.update(metrics)
+                cr_scores.append(metrics["CR_dB"])
+                cnr_scores.append(metrics["CNR"])
+                gcnr_scores.append(metrics["gCNR"])
+                residual_scores.append(metrics["cyst_residual_dB"])
             roi_rows.append(roi_row)
             contrast_scores.append(score)
         row["contrast_dB"] = mean_or_nan(contrast_scores)
+        row["CR_dB"] = mean_or_nan(cr_scores)
+        row["CNR"] = mean_or_nan(cnr_scores)
+        row["gCNR"] = mean_or_nan(gcnr_scores)
+        row["cyst_residual_dB"] = mean_or_nan(residual_scores)
+
 
         speckle_stats = []
         for idx, roi in enumerate(speckle_rois):
@@ -738,32 +1162,40 @@ def main():
         row["speckle_pass_rate"] = mean_or_nan([s["speckle_pass"] for s in speckle_stats])
         row["speckle_KS_D"] = mean_or_nan([s["speckle_KS_D"] for s in speckle_stats])
         row["speckle_KS_p"] = mean_or_nan([s["speckle_KS_p"] for s in speckle_stats])
+        row["speckle_SNR"] = mean_or_nan([s["speckle_SNR"] for s in speckle_stats])
+        row["ENL"] = mean_or_nan([s["ENL"] for s in speckle_stats])
+
 
         target_stats = []
         for idx, target in enumerate(targets):
-            stats = target_resolution(db_img, x_mm, z_mm, target, args.fwhm_window_mm, target_idx=idx + 1)
+            stats = target_resolution(db_img, x_mm, z_mm, target, args.fwhm_window_mm, target_idx=idx + 1, source=source)
             if stats is None:
                 continue
             target_rows.append({"method": method, "target_idx": idx + 1, **stats})
             target_stats.append(stats)
         row["FWHM_axial_mm"] = mean_or_nan([s["FWHM_axial_mm"] for s in target_stats])
         row["FWHM_lateral_mm"] = mean_or_nan([s["FWHM_lateral_mm"] for s in target_stats])
+        row["PSLR_dB"] = mean_or_nan([s["PSLR_dB"] for s in target_stats])
+        row["ISLR_dB"] = mean_or_nan([s["ISLR_dB"] for s in target_stats])
         row["distortion_mm"] = mean_or_nan([s["distortion_mm"] for s in target_stats])
         row["distortion_pass_rate"] = mean_or_nan([s["distortion_pass"] for s in target_stats])
         rows.append(row)
 
     summary_fields = [
         "method", "SSIM_vs_GT", "PSNR_dB_vs_GT", "MAE_dB_vs_GT",
-        "contrast_dB", "speckle_pass_rate", "speckle_KS_D", "speckle_KS_p",
-        "FWHM_axial_mm", "FWHM_lateral_mm", "distortion_mm", "distortion_pass_rate",
-        "mean_raw_dB", "median_raw_dB", "std_raw_dB", "dynamic_range_raw_dB",
-        "mean_display_dB", "median_display_dB", "std_display_dB",
-        "black_pixel_ratio", "white_pixel_ratio",
+        "contrast_dB", "CR_dB", "CNR", "gCNR", "cyst_residual_dB",
+        "speckle_pass_rate", "speckle_KS_D", "speckle_KS_p", "speckle_SNR", "ENL",
+        "FWHM_axial_mm", "FWHM_lateral_mm", "PSLR_dB", "ISLR_dB",
+        "distortion_mm", "distortion_pass_rate",
     ]
     write_csv(os.path.join(out_dir, "summary_metrics.csv"), rows, summary_fields)
+    contrast_group_rows = build_contrast_group_rows(roi_rows, source, len(rois), methods)
+    resolution_group_rows = build_resolution_group_rows(target_rows, source, len(targets), methods)
     optional_outputs = [
         ("contrast_roi_metrics.csv", roi_rows),
         ("resolution_target_metrics.csv", target_rows),
+        ("contrast_group_metrics.csv", contrast_group_rows),
+        ("resolution_group_metrics.csv", resolution_group_rows),
     ]
     for name, data_rows in optional_outputs:
         path = os.path.join(out_dir, name)
@@ -777,14 +1209,47 @@ def main():
         else:
             write_csv(path, [{"status": "not_applicable"}], ["status"])
     if has_gt:
-        save_roi_plot(os.path.join(out_dir, "roi_targets.png"), gt_display, x_mm, z_mm, rois, targets)
+        peak_method = next((method for method in methods if method != "GT"), methods[0] if methods else None)
+        save_roi_plot(os.path.join(out_dir, "roi_targets.png"), gt_display, x_mm, z_mm, rois, targets, target_rows, peak_method)
     old_plot = os.path.join(out_dir, "metrics_" + "comparison.png")
     if os.path.exists(old_plot):
         os.remove(old_plot)
     standard_metrics, auxiliary_metrics = build_metric_plots(rows)
     save_bar_plot(os.path.join(out_dir, "standard_metrics.png"), standard_metrics)
     save_bar_plot(os.path.join(out_dir, "auxiliary_metrics.png"), auxiliary_metrics)
+    save_group_metric_plot(
+        os.path.join(out_dir, "contrast_group_metrics.png"),
+        contrast_group_rows,
+        [
+            ("contrast_dB", "Contrast (dB)"),
+            ("CNR", "CNR"),
+            ("gCNR", "gCNR"),
+            ("CR_dB", "CR (dB)"),
+        ],
+        "Contrast groups",
+    )
+    save_group_metric_plot(
+        os.path.join(out_dir, "resolution_group_metrics.png"),
+        resolution_group_rows,
+        [
+            ("FWHM_axial_mm", "Axial FWHM (mm)"),
+            ("FWHM_lateral_mm", "Lateral FWHM (mm)"),
+            ("PSLR_dB", "PSLR (dB)"),
+            ("ISLR_dB", "ISLR (dB)"),
+        ],
+        "Resolution groups",
+    )
     save_lateral_profile_plot(out_dir, comparison, x_mm, z_mm, rois, targets, methods)
+    write_picmus_report(
+        os.path.join(out_dir, "picmus_challenge_summary.txt"),
+        mode,
+        source,
+        methods,
+        rows,
+        contrast_group_rows,
+        resolution_group_rows,
+        roi_rows,
+    )
 
     meta = {
         "comparison_npy": comparison_path,
@@ -799,6 +1264,8 @@ def main():
         "contrast_roi_count": len(rois),
         "speckle_roi_count": len(speckle_rois),
         "resolution_target_count": len(targets),
+        "contrast_groups": picmus_contrast_groups(source, len(rois)),
+        "resolution_groups": picmus_resolution_groups(source, len(targets)),
         "note": "Standard metrics use the predefined phantom ROI and target definitions when available.",
     }
     with open(os.path.join(out_dir, "evaluation_meta.json"), "w", encoding="utf-8") as file:
@@ -809,13 +1276,17 @@ def main():
         print(f"Saved standard metrics plot: {os.path.join(out_dir, 'standard_metrics.png')}")
     if auxiliary_metrics:
         print(f"Saved auxiliary metrics plot: {os.path.join(out_dir, 'auxiliary_metrics.png')}")
+    if contrast_group_rows:
+        print(f"Saved contrast group metrics: {os.path.join(out_dir, 'contrast_group_metrics.csv')}")
+        print(f"Saved contrast group plot: {os.path.join(out_dir, 'contrast_group_metrics.png')}")
+    if resolution_group_rows:
+        print(f"Saved resolution group metrics: {os.path.join(out_dir, 'resolution_group_metrics.csv')}")
+        print(f"Saved resolution group plot: {os.path.join(out_dir, 'resolution_group_metrics.png')}")
     if has_gt:
         print(f"Saved ROI/target plot: {os.path.join(out_dir, 'roi_targets.png')}")
+    print(f"Saved PICMUS-style report: {os.path.join(out_dir, 'picmus_challenge_summary.txt')}")
     print(f"Mode={mode}, source={source}, contrast_rois={len(rois)}, resolution_targets={len(targets)}")
 
 
 if __name__ == "__main__":
     main()
-
-
-
