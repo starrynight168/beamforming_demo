@@ -183,6 +183,16 @@ def run_evaluation(args, config, scene, scene_dir, comparison_path, methods):
     result = subprocess.run(cmd, cwd=ROOT, text=True)
     if result.returncode != 0:
         raise RuntimeError("Evaluation failed")
+    metrics_dir = scene_dir / "metrics"
+    if (metrics_dir / "evaluation_meta.json").exists():
+        plot_cmd = [
+            args.python_exe, str(ROOT / "evaluation" / "plot_metrics.py"),
+            "--metrics_dir", str(metrics_dir),
+            "--dr", str(params.get("dr", 60)),
+        ]
+        result = subprocess.run(plot_cmd, cwd=ROOT, text=True)
+        if result.returncode != 0:
+            raise RuntimeError("Metric plotting failed")
 
 
 def main():

@@ -28,6 +28,7 @@ beamforming_demo/
 
   evaluation/
     evaluate.py
+    plot_metrics.py
 
   results/
 ```
@@ -125,6 +126,14 @@ results/simulation_contrast_speckle/
 - `roi_targets.png`（phantom 数据）
 - `contrast_roi_metrics.csv`
 - `resolution_target_metrics.csv`
+- `contrast_group_metrics.csv`
+- `resolution_group_metrics.csv`
+- `contrast_group_metrics.png`
+- `resolution_group_metrics.png`
+- `picmus_challenge_summary.txt`
+- `evaluation_meta.json`
+
+`run_one.py` 会先调用 `evaluation/evaluate.py` 计算指标并写出 CSV / JSON / TXT，再调用 `evaluation/plot_metrics.py` 从这些表格生成图片。`run_all.py` 通过逐个调用 `run_one.py` 复用同一流程。
 
 ## 一键运行全部场景
 
@@ -146,22 +155,48 @@ python run_one.py --scene carotid_cross --algorithms das,mv
 
 ## 评估说明
 
-phantom 数据会计算：
+评估和绘图已经拆分：
+
+```text
+evaluation/evaluate.py      # 只计算指标，写 CSV / JSON / TXT
+evaluation/plot_metrics.py  # 只读取评估输出并画 PNG
+```
+
+单独重新计算指标：
+
+```bash
+python evaluation/evaluate.py \
+  --comparison_npy results/simulation_contrast_speckle/comparison.npy \
+  --h5_path data/simulation.h5 \
+  --h5_sample_idx 0 \
+  --out_dir results/simulation_contrast_speckle/metrics
+```
+
+单独重新画图：
+
+```bash
+python evaluation/plot_metrics.py \
+  --metrics_dir results/simulation_contrast_speckle/metrics
+```
+
+phantom 数据会计算主指标：
 
 - `contrast_dB`
+- `CR_dB`
+- `CNR`
+- `gCNR`
+- `cyst_residual_dB`
 - `speckle_pass_rate`
+- `speckle_KS_D`
+- `speckle_KS_p`
+- `speckle_SNR`
+- `ENL`
 - `FWHM_axial_mm`
 - `FWHM_lateral_mm`
+- `PSLR_dB`
+- `ISLR_dB`
+- `distortion_mm`
 - `distortion_pass_rate`
-
-所有数据都会计算无参考辅助统计：
-
-- `mean_raw_dB`
-- `std_raw_dB`
-- `mean_display_dB`
-- `std_display_dB`
-- `black_pixel_ratio`
-- `white_pixel_ratio`
 
 有 GT 的数据还会计算：
 
@@ -169,7 +204,20 @@ phantom 数据会计算：
 - `PSNR_dB_vs_GT`
 - `MAE_dB_vs_GT`
 
-in vivo 数据没有 GT 和 phantom，因此只生成图像对比和无参考统计。
+PICMUS 分组结果会写入：
+
+- `contrast_group_metrics.csv`
+- `resolution_group_metrics.csv`
+- `picmus_challenge_summary.txt`
+
+对应分组图由 `plot_metrics.py` 生成：
+
+- `contrast_group_metrics.png`
+- `resolution_group_metrics.png`
+
+in vivo 数据没有 GT 和 phantom ROI/target，评估脚本会直接跳过，不生成新的 `metrics/` 文件夹。人体结果只使用 `comparison.png` 等图像做定性展示，不计算无参考指标。
+
+`plot_metrics.py` 会根据算法数量自适应图像布局。算法较多时，普通指标图会自动改为横向柱状图；指标太多时会按指标分页，例如 `standard_metrics_page2.png`。
 
 ## 添加新算法
 
@@ -360,4 +408,4 @@ algorithm_labels:
 
 这不是必需步骤，不影响运行。
 
-只要遵守输入输出约定，`run_one.py` / `run_all.py` 会自动调用新算法、拼接对比图，并复用 `evaluation/evaluate.py` 生成指标。算法数量变多时，对比图会自动网格排版。
+只要遵守输入输出约定，`run_one.py` / `run_all.py` 会自动调用新算法、拼接对比图，并复用 `evaluation/evaluate.py` 生成指标、`evaluation/plot_metrics.py` 生成评估图。算法数量变多时，对比图和评估图会自动调整布局。
