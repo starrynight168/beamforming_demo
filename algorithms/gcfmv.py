@@ -179,6 +179,44 @@ class RowDynamicMVBeamformerIQ:
         self.X, self.Z = X, Z
         self.drs = torch.sqrt((X[..., None] - lateral_channel) ** 2 + Z[..., None] ** 2) * self.sc
         self.ch = torch.arange(self.N, device=device).view(1, self.N, 1)
+        self.row_cache = self._build_row_cache()
+
+    def _aperture_window(self, k):
+        if args.window == 'rect':
+            return None
+        x_norm = torch.linspace(-1, 1, k, device=device)
+        if args.window == 'hann':
+            return 0.5 * (1.0 + torch.cos(np.pi * x_norm))
+        beta = 0.25
+        win_w = torch.ones_like(x_norm)
+        transition = x_norm.abs() > (1.0 - beta)
+        win_w[transition] = 0.5 * (1.0 + torch.cos(
+            np.pi * (x_norm[transition].abs() - (1.0 - beta)) / beta))
+        return win_w
+
+    def _build_row_cache(self):
+        cache = []
+        for hz in range(self.H):
+            if args.dynamic_aperture:
+                depth = float(self.z_grid[hz].item())
+                half_a = depth / (2 * args.f_number)
+                k = min(max(int(2 * half_a / self.pitch) + 1, 4), self.N)
+            else:
+                k = self.N
+            l = max(int(k * self.subarray_ratio), 2)
+            m = k - l + 1
+            idx_start = torch.clamp(self.c_idx - k // 2, 0, self.N - k)
+            ch_idx = idx_start.unsqueeze(1) + torch.arange(k, device=device).unsqueeze(0)
+            cache.append({
+                'K': k,
+                'L': l,
+                'M': m,
+                'ch_idx_t': ch_idx.unsqueeze(-1).expand(-1, -1, self.temporal_win),
+                'window': self._aperture_window(k),
+                'eye': torch.eye(l, dtype=torch.complex64, device=device).unsqueeze(0),
+                'ones': torch.ones((self.W, l, 1), dtype=torch.complex64, device=device),
+            })
+        return cache
 
     def __call__(self, I_data, Q_data, selected_angles, t_starts, fs):
         n_a = I_data.shape[0]
@@ -256,38 +294,12 @@ class RowDynamicMVBeamformerIQ:
                 I_aligned = I_samples * cos_phi - Q_samples * sin_phi
                 Q_aligned = I_samples * sin_phi + Q_samples * cos_phi
                 X_flat = torch.complex(I_aligned, Q_aligned) * valid_mask_center
-                depth = self.z_grid[hz]
+                row = self.row_cache[hz]
+                K, L, M = row['K'], row['L'], row['M']
 
-                # 动态计算活动孔径大小 K
-                if args.dynamic_aperture:
-                    half_a = depth / (2 * args.f_number)
-                    K = int(2 * half_a / self.pitch) + 1
-                    K = min(max(K, 4), self.N)
-                else:
-                    K = self.N
-
-                L = max(int(K * self.subarray_ratio), 2)
-                M = K - L + 1  # 子阵列数量
-
-                # 提取当前行所有像素的活动通道信号
-                idx_start = torch.clamp(self.c_idx - K // 2, 0, self.N - K)
-                ch_idx = idx_start.unsqueeze(1) + torch.arange(K, device=device).unsqueeze(0)  # [W, K]
-
-                ch_idx_t = ch_idx.unsqueeze(-1).expand(-1, -1, self.temporal_win)
-                X_active = torch.gather(X_flat, 1, ch_idx_t)  # [W, K, T]
-
-                # 可选预加权窗
-                if args.window != 'rect':
-                    x_norm = torch.linspace(-1, 1, K, device=device)
-                    if args.window == 'hann':
-                        win_w = 0.5 * (1.0 + torch.cos(np.pi * x_norm))
-                    elif args.window == 'tukey':
-                        beta = 0.25
-                        win_w = torch.ones_like(x_norm)
-                        transition = (x_norm.abs() > (1.0 - beta))
-                        win_w[transition] = 0.5 * (1.0 + torch.cos(
-                            np.pi * (x_norm[transition].abs() - (1.0 - beta)) / beta))
-                    X_active = X_active * win_w.view(1, K, 1)
+                X_active = torch.gather(X_flat, 1, row['ch_idx_t'])  # [W, K, T]
+                if row['window'] is not None:
+                    X_active = X_active * row['window'].view(1, K, 1)
 
                 # ========== 空间平滑 (前向) ==========
                 X_sub = X_active.unfold(1, L, 1).permute(0, 3, 1, 2)  # [W, L, M, T]
@@ -303,11 +315,10 @@ class RowDynamicMVBeamformerIQ:
 
                 # ========== 对角加载 ==========
                 trace = R.diagonal(dim1=-2, dim2=-1).real.sum(-1)  # [W]
-                dl_matrix = torch.eye(L, dtype=torch.complex64, device=device).unsqueeze(0)
-                R_dl = R + (self.dl_factor / L) * trace.view(self.W, 1, 1) * dl_matrix
+                R_dl = R + (self.dl_factor / L) * trace.view(self.W, 1, 1) * row['eye']
 
                 # ========== 标准 MVDR 求解 ==========
-                ones_L = torch.ones((self.W, L, 1), dtype=torch.complex64, device=device)
+                ones_L = row['ones']
 
                 try:
                     v = torch.linalg.solve(R_dl, ones_L)  # [W, L, 1]

@@ -413,18 +413,21 @@ def main():
         centers = torch.argmin(
             torch.abs(torch.from_numpy(x_grid).to(device)[:, None] - element_x[None]), dim=1
         )
-        sigma = torch.empty((H, W), dtype=torch.float32, device=device)
-        active_rows, k_rows = [], []
-
-        for iz, depth in enumerate(z_grid):
-            # 动态孔径
+        row_cache = []
+        for depth in z_grid:
             if args.dynamic_aperture:
                 k = min(max(int(depth / (args.f_number * pitch)) + 1, 4), n_channels)
             else:
                 k = n_channels
             starts = torch.clamp(centers - k // 2, 0, n_channels - k)
             channels = starts[:, None] + torch.arange(k, device=device)[None]
-            active = torch.gather(data[iz], 1, channels) * aperture_window(k)[None]
+            row_cache.append((k, channels, aperture_window(k)[None]))
+
+        sigma = torch.empty((H, W), dtype=torch.float32, device=device)
+        active_rows, k_rows = [], []
+
+        for iz, (k, channels, win) in enumerate(row_cache):
+            active = torch.gather(data[iz], 1, channels) * win
             sigma[iz] = torch.std(torch.abs(active), dim=1, unbiased=False)
             active_rows.append(active)
             k_rows.append(k)

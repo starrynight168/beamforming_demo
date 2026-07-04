@@ -215,7 +215,7 @@ PICMUS 分组结果会写入：
 - `contrast_group_metrics.png`
 - `resolution_group_metrics.png`
 
-in vivo 数据没有 GT 和 phantom ROI/target，评估脚本会直接跳过，不生成新的 `metrics/` 文件夹。人体结果只使用 `comparison.png` 等图像做定性展示，不计算无参考指标。
+in vivo 数据使用多角度 DAS 生成的 reference 作为 GT，因此会计算 `SSIM_vs_GT`、`PSNR_dB_vs_GT`、`MAE_dB_vs_GT` 等参考指标；由于没有 phantom ROI/target，contrast/resolution 分组指标为空。
 
 `plot_metrics.py` 会根据算法数量自适应图像布局。算法较多时，普通指标图会自动改为横向柱状图；指标太多时会按指标分页，例如 `standard_metrics_page2.png`。
 
@@ -409,3 +409,4 @@ algorithm_labels:
 这不是必需步骤，不影响运行。
 
 只要遵守输入输出约定，`run_one.py` / `run_all.py` 会自动调用新算法、拼接对比图，并复用 `evaluation/evaluate.py` 生成指标、`evaluation/plot_metrics.py` 生成评估图。算法数量变多时，对比图和评估图会自动调整布局。
+

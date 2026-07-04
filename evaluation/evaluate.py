@@ -695,15 +695,6 @@ def main():
     h5_path = resolve(args.h5_path)
     out_dir = resolve(args.out_dir)
     meta_from_h5 = read_sample_meta(h5_path, args.h5_sample_idx)
-    if (
-        args.phantom_mode == "in_vivo"
-        or args.phantom_source == "in_vivo"
-        or meta_from_h5.get("phantom_mode") == "in_vivo"
-        or meta_from_h5.get("phantom_source") == "in_vivo"
-    ):
-        print("In-vivo scene: skipped metric export.")
-        return
-
     comparison = np.load(comparison_path).astype(np.float64)
     x_mm, z_mm = load_grids(h5_path)
     if comparison.shape[1:] != (len(z_mm), len(x_mm)):
@@ -887,3 +878,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

@@ -128,7 +128,7 @@ def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, 
         transmit_x = x_mesh * sc
 
         dx = x_mesh[..., None] - elements
-        half_aperture = z_mesh[..., None] / (2.0 * F_NUMBER) + 2.0 * pitch
+        half_aperture = z_mesh[..., None] / (2.0 * F_NUMBER)
         aperture = (dx.abs() <= half_aperture).float()
         weights = aperture / (aperture.sum(-1, keepdim=True) + 1e-9)
         ch = torch.arange(n_channels, device=device, dtype=torch.long).view(1, 1, -1)
@@ -342,3 +342,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
