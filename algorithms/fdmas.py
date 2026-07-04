@@ -153,91 +153,7 @@ def build_window(dx, half_a, window_type):
     return win
 
 
-def extract_windows_on_gpu(rf_I_pad, rf_Q_pad, t_starts, img_idx, pixel_idx,
-                           fs, offsets, angle_idx, max_t_len,
-                           pitch, x_grid, z_grid, selected_angles_rad, interp='cubic'):
-    P, T, N = len(pixel_idx), len(offsets), NUM_CHANNELS
-    device_local = rf_I_pad.device
-    z_idx, x_idx = (pixel_idx // IMG_W).long(), (pixel_idx % IMG_W).long()
-    depth, lateral_pixel = z_grid[z_idx], x_grid[x_idx]
-    lateral_channel = (torch.arange(N, device=device_local).float() - (N - 1) / 2.0) * pitch
 
-    dx = lateral_pixel.unsqueeze(1) - lateral_channel.unsqueeze(0)
-    receive_dist = torch.sqrt(depth.unsqueeze(1)**2 + dx**2)
-
-    A = len(angle_idx)
-    theta = selected_angles_rad
-    tx_dist = depth.unsqueeze(1) * torch.cos(theta).unsqueeze(0) + lateral_pixel.unsqueeze(1) * torch.sin(theta).unsqueeze(0)
-    total_dist = tx_dist.unsqueeze(2) + receive_dist.unsqueeze(1)
-    total_tof = total_dist / c_global
-
-    if isinstance(t_starts, (int, float)):
-        ts = torch.full((P, A), float(t_starts), device=device_local)
-    elif t_starts.dim() == 0:
-        ts = torch.full((P, A), t_starts.item(), device=device_local)
-    elif t_starts.dim() == 1:
-        ts = t_starts.unsqueeze(0).expand(P, A)
-    else:
-        ts = t_starts.expand(P, A)
-
-    exact_idxs = ((total_tof - ts.unsqueeze(2)) * fs)
-    valid_mask = (exact_idxs >= 0) & (exact_idxs < max_t_len - 1)
-
-    c_ind = torch.arange(N, device=device_local).view(1, 1, N, 1).expand(P, A, N, T)
-    img_ind = img_idx.view(-1, 1, 1, 1).expand(P, A, N, T)
-    a_ind = angle_idx[:A].view(1, -1, 1, 1).expand(P, A, N, T)
-
-    if interp == 'linear':
-        idx_floor = torch.floor(exact_idxs).long()
-        idx_ceil = idx_floor + 1
-        w_ceil = exact_idxs - idx_floor.float()
-        w_floor = 1.0 - w_ceil
-        idx_floor_c = torch.clamp(idx_floor, 0, max_t_len - 1)
-        idx_ceil_c = torch.clamp(idx_ceil, 0, max_t_len - 1)
-        t_ind_floor = torch.clamp(idx_floor_c.unsqueeze(-1) + offsets.view(1, 1, 1, -1), 0, max_t_len - 1).long()
-        t_ind_ceil = torch.clamp(idx_ceil_c.unsqueeze(-1) + offsets.view(1, 1, 1, -1), 0, max_t_len - 1).long()
-        I_floor = rf_I_pad[img_ind, a_ind, t_ind_floor, c_ind]
-        I_ceil = rf_I_pad[img_ind, a_ind, t_ind_ceil, c_ind]
-        extracted_I = I_floor * w_floor.unsqueeze(-1) + I_ceil * w_ceil.unsqueeze(-1)
-        Q_floor = rf_Q_pad[img_ind, a_ind, t_ind_floor, c_ind]
-        Q_ceil = rf_Q_pad[img_ind, a_ind, t_ind_ceil, c_ind]
-        extracted_Q = Q_floor * w_floor.unsqueeze(-1) + Q_ceil * w_ceil.unsqueeze(-1)
-    elif interp == 'cubic':
-        idx_floor = torch.floor(exact_idxs).long()
-        w = exact_idxs - idx_floor.float()
-        w2, w3 = w * w, w * w * w
-        c_m1 = -0.5 * w3 + w2 - 0.5 * w
-        c_0  =  1.5 * w3 - 2.5 * w2 + 1.0
-        c_1  = -1.5 * w3 + 2.0 * w2 + 0.5 * w
-        c_2  =  0.5 * w3 - 0.5 * w2
-        idx_m1 = torch.clamp(idx_floor - 1, 0, max_t_len - 1)
-        idx_0  = torch.clamp(idx_floor,     0, max_t_len - 1)
-        idx_1  = torch.clamp(idx_floor + 1, 0, max_t_len - 1)
-        idx_2  = torch.clamp(idx_floor + 2, 0, max_t_len - 1)
-        t_ind_m1 = torch.clamp(idx_m1.unsqueeze(-1) + offsets.view(1, 1, 1, -1), 0, max_t_len - 1).long()
-        t_ind_0  = torch.clamp(idx_0.unsqueeze(-1)  + offsets.view(1, 1, 1, -1), 0, max_t_len - 1).long()
-        t_ind_1  = torch.clamp(idx_1.unsqueeze(-1)  + offsets.view(1, 1, 1, -1), 0, max_t_len - 1).long()
-        t_ind_2  = torch.clamp(idx_2.unsqueeze(-1)  + offsets.view(1, 1, 1, -1), 0, max_t_len - 1).long()
-        I_m1 = rf_I_pad[img_ind, a_ind, t_ind_m1, c_ind]
-        I_0  = rf_I_pad[img_ind, a_ind, t_ind_0,  c_ind]
-        I_1  = rf_I_pad[img_ind, a_ind, t_ind_1,  c_ind]
-        I_2  = rf_I_pad[img_ind, a_ind, t_ind_2,  c_ind]
-        Q_m1 = rf_Q_pad[img_ind, a_ind, t_ind_m1, c_ind]
-        Q_0  = rf_Q_pad[img_ind, a_ind, t_ind_0,  c_ind]
-        Q_1  = rf_Q_pad[img_ind, a_ind, t_ind_1,  c_ind]
-        Q_2  = rf_Q_pad[img_ind, a_ind, t_ind_2,  c_ind]
-        extracted_I = I_m1 * c_m1.unsqueeze(-1) + I_0 * c_0.unsqueeze(-1) + I_1 * c_1.unsqueeze(-1) + I_2 * c_2.unsqueeze(-1)
-        extracted_Q = Q_m1 * c_m1.unsqueeze(-1) + Q_0 * c_0.unsqueeze(-1) + Q_1 * c_1.unsqueeze(-1) + Q_2 * c_2.unsqueeze(-1)
-    else:
-        center_idxs = torch.clamp(exact_idxs.long(), 0, max_t_len - 1)
-        t_ind = torch.clamp(center_idxs.unsqueeze(-1) + offsets.view(1, 1, 1, -1), 0, max_t_len - 1).long()
-        extracted_I = rf_I_pad[img_ind, a_ind, t_ind, c_ind]
-        extracted_Q = rf_Q_pad[img_ind, a_ind, t_ind, c_ind]
-
-    valid_mask_expanded = valid_mask.unsqueeze(-1).expand_as(extracted_I)
-    extracted_I = extracted_I * valid_mask_expanded.float()
-    extracted_Q = extracted_Q * valid_mask_expanded.float()
-    return extracted_I, extracted_Q, total_tof, valid_mask
 
 
 class FDMASBeamformerIQ:
@@ -261,60 +177,95 @@ class FDMASBeamformerIQ:
             half_a = torch.full_like(Z[..., None], (n_elem - 1) * pitch / 2)
         win = build_window(dx, half_a, args.window)
         self.window = win / (win.sum(-1, keepdim=True) + 1e-9)
+        self.ch = torch.arange(n_elem, device=device).view(1, 1, -1)
 
     @staticmethod
     def _complex_fdmas(i_aligned, q_aligned, weights, eps=1e-12):
         z = torch.complex(i_aligned, q_aligned)
         q = z / torch.sqrt(torch.abs(z) + eps)
         qw = q * weights
-        pair_sum = 0.5 * (qw.sum(dim=1).square() - qw.square().sum(dim=1))
-        pair_norm = 0.5 * (weights.sum(dim=1).square() - weights.square().sum(dim=1))
+        pair_sum = 0.5 * (qw.sum(dim=-1).square() - qw.square().sum(dim=-1))
+        pair_norm = 0.5 * (weights.sum(dim=-1).square() - weights.square().sum(dim=-1))
         pair_sum = pair_sum / torch.clamp(pair_norm, min=eps)
         return pair_sum
 
     def __call__(self, I_data, Q_data, selected_angles, t_starts, fs):
         n_a = I_data.shape[0]
-        I_t = torch.from_numpy(I_data.astype(np.float32)).to(device).unsqueeze(0)
-        Q_t = torch.from_numpy(Q_data.astype(np.float32)).to(device).unsqueeze(0)
-        max_t_len = I_t.shape[2]
+        n_s = I_data.shape[1]
+        max_sample = float(n_s - 2)
 
-        offsets = torch.tensor([0], device=device)
-        pixel_idx = torch.arange(self.H * self.W, device=device)
-        img_idx_t = torch.zeros(self.H * self.W, dtype=torch.long, device=device)
+        I_t = torch.from_numpy(I_data.astype(np.float32)).to(device)
+        Q_t = torch.from_numpy(Q_data.astype(np.float32)).to(device)
+        cos_a = torch.from_numpy(np.cos(selected_angles).astype(np.float32)).to(device)
+        sin_a = torch.from_numpy(np.sin(selected_angles).astype(np.float32)).to(device)
 
-        beam_sum = torch.zeros(self.H * self.W, dtype=torch.complex64, device=device)
+        t_starts_arr = np.asarray(t_starts, dtype=np.float32).reshape(-1)
+        if t_starts_arr.size == 1:
+            t_starts_arr = np.repeat(t_starts_arr, n_a)
+        t_starts_t = torch.from_numpy(t_starts_arr[:n_a]).to(device) * fs
+
+        beam_sum = torch.zeros((self.H, self.W), dtype=torch.complex64, device=device)
+        tx_z = self.Z * self.sc
+        tx_x = self.X * self.sc
+        weights = self.window
+        ch = self.ch
 
         for i in range(n_a):
-            angle_idx_single = torch.tensor([i], device=device)
-            selected_angles_t = torch.as_tensor([selected_angles[i]], dtype=torch.float32, device=device)
-            t_starts_t = (float(t_starts) if isinstance(t_starts, (int, float))
-                          else torch.as_tensor([t_starts[i]], dtype=torch.float32, device=device))
+            sample_no_t0 = (tx_z * cos_a[i] + tx_x * sin_a[i]).unsqueeze(-1) + self.drs
+            sample = sample_no_t0 - t_starts_t[i]
+            valid = (sample >= 0) & (sample < n_s - 1)
+            sample.clamp_(0.0, max_sample)
 
-            ext_I, ext_Q, tof, valid_mask = extract_windows_on_gpu(
-                I_t, Q_t, t_starts_t, img_idx_t, pixel_idx,
-                fs, offsets, angle_idx_single, max_t_len,
-                self.pitch, self.x_grid, self.z_grid, selected_angles_t,
-                interp=args.interp
-            )
+            if args.interp == 'nearest':
+                idx = sample.round().long().clamp(0, n_s - 1)
+                I_center = I_t[i][idx, ch]
+                Q_center = Q_t[i][idx, ch]
+            elif args.interp == 'cubic':
+                idx0 = sample.floor().long()
+                frac = sample - idx0.float()
+                frac2 = frac * frac
+                frac3 = frac2 * frac
+                c_m1 = -0.5 * frac3 + frac2 - 0.5 * frac
+                c_0 = 1.5 * frac3 - 2.5 * frac2 + 1.0
+                c_1 = -1.5 * frac3 + 2.0 * frac2 + 0.5 * frac
+                c_2 = 0.5 * frac3 - 0.5 * frac2
+                idx_m1 = torch.clamp(idx0 - 1, 0, n_s - 1)
+                idx_0 = torch.clamp(idx0, 0, n_s - 1)
+                idx_1 = torch.clamp(idx0 + 1, 0, n_s - 1)
+                idx_2 = torch.clamp(idx0 + 2, 0, n_s - 1)
+                I_angle = I_t[i]
+                Q_angle = Q_t[i]
+                I_center = (
+                    I_angle[idx_m1, ch] * c_m1
+                    + I_angle[idx_0, ch] * c_0
+                    + I_angle[idx_1, ch] * c_1
+                    + I_angle[idx_2, ch] * c_2
+                )
+                Q_center = (
+                    Q_angle[idx_m1, ch] * c_m1
+                    + Q_angle[idx_0, ch] * c_0
+                    + Q_angle[idx_1, ch] * c_1
+                    + Q_angle[idx_2, ch] * c_2
+                )
+            else:
+                idx0 = sample.floor().long()
+                frac = sample - idx0.float()
+                I_angle = I_t[i]
+                Q_angle = Q_t[i]
+                I_center = I_angle[idx0, ch] * (1.0 - frac) + I_angle[idx0 + 1, ch] * frac
+                Q_center = Q_angle[idx0, ch] * (1.0 - frac) + Q_angle[idx0 + 1, ch] * frac
 
-            center_t = ext_I.shape[-1] // 2
-            I_center = ext_I[:, 0, :, center_t]
-            Q_center = ext_Q[:, 0, :, center_t]
-            tof_center = tof[:, 0, :]
-            valid_mask_center = valid_mask[:, 0, :].float()
-            weights = self.window.view(-1, self.N)
-
-            phase = 2.0 * np.pi * fc_global * tof_center
-            cos_phi, sin_phi = torch.cos(phase), torch.sin(phase)
-            I_center = I_center * valid_mask_center
-            Q_center = Q_center * valid_mask_center
+            valid_w = valid.float() * weights
+            total_tof = sample_no_t0 / fs
+            phase = 2.0 * np.pi * fc_global * total_tof
+            cos_phi = torch.cos(phase)
+            sin_phi = torch.sin(phase)
             I_aligned = I_center * cos_phi - Q_center * sin_phi
             Q_aligned = I_center * sin_phi + Q_center * cos_phi
 
-            effective_weights = weights * valid_mask_center
-            beam_sum += self._complex_fdmas(I_aligned, Q_aligned, effective_weights)
+            beam_sum.add_(self._complex_fdmas(I_aligned, Q_aligned, valid_w))
 
-        beam = (beam_sum / n_a).view(self.H, self.W)
+        beam = beam_sum / n_a
         return beam.real.cpu().numpy(), beam.imag.cpu().numpy()
 
 

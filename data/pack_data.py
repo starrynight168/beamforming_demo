@@ -4,10 +4,14 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import torch
 
 
 BASE = "US/US_DATASET0000"
 DYNAMIC_RANGE = 60.0
+TGC_ALPHA = 0.5
+F_NUMBER = 1.5
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 SIMULATION_SCENES = [
@@ -60,7 +64,7 @@ IN_VIVO_SCENES = [
         "iq": "database/in_vivo/carotid_cross/carotid_cross_expe_dataset_iq.hdf5",
         "scan": "database/in_vivo/carotid_cross/carotid_cross_expe_scan.hdf5",
         "phantom": "",
-        "gt": "",
+        "gt": "generated:multi_angle_das",
     },
     {
         "name": "carotid_long",
@@ -69,7 +73,7 @@ IN_VIVO_SCENES = [
         "iq": "database/in_vivo/carotid_long/carotid_long_expe_dataset_iq.hdf5",
         "scan": "database/in_vivo/carotid_long/carotid_long_expe_scan.hdf5",
         "phantom": "",
-        "gt": "",
+        "gt": "generated:multi_angle_das",
     },
 ]
 
@@ -100,14 +104,115 @@ def read_gt(gt_path):
     norm = (np.clip(db, -DYNAMIC_RANGE, 0.0) + DYNAMIC_RANGE) / DYNAMIC_RANGE
     return norm[np.newaxis, np.newaxis, ...].astype(np.float32)
 
+def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, z_grid, interp='cubic'):
+    """Build an in-vivo multi-angle DAS reference with GPU tensor operations using the fast DAS method."""
+    n_angles, n_times, n_channels = i_data.shape
+    t0 = np.asarray(t0, dtype=np.float32).reshape(-1)
+    if t0.size == 1:
+        t0 = np.repeat(t0, n_angles)
 
+    with torch.no_grad():
+        z_t = torch.from_numpy(z_grid.astype(np.float32)).to(device)
+        x_t = torch.from_numpy(x_grid.astype(np.float32)).to(device)
+        x_mesh, z_mesh = torch.meshgrid(x_t, z_t, indexing='xy')
+
+        sc = fs / c
+        elements = torch.linspace(
+            -(n_channels - 1) / 2 * pitch,
+            (n_channels - 1) / 2 * pitch,
+            n_channels,
+            device=device,
+        )
+        receive_samples = torch.sqrt((x_mesh[..., None] - elements) ** 2 + z_mesh[..., None] ** 2) * sc
+        transmit_z = z_mesh * sc
+        transmit_x = x_mesh * sc
+
+        dx = x_mesh[..., None] - elements
+        half_aperture = z_mesh[..., None] / (2.0 * F_NUMBER) + 2.0 * pitch
+        aperture = (dx.abs() <= half_aperture).float()
+        weights = aperture / (aperture.sum(-1, keepdim=True) + 1e-9)
+        ch = torch.arange(n_channels, device=device, dtype=torch.long).view(1, 1, -1)
+
+        I_t = torch.from_numpy(i_data.astype(np.float32)).to(device)
+        Q_t = torch.from_numpy(q_data.astype(np.float32)).to(device)
+        cos_a = torch.from_numpy(np.cos(angles).astype(np.float32)).to(device)
+        sin_a = torch.from_numpy(np.sin(angles).astype(np.float32)).to(device)
+        t_starts_t = torch.from_numpy(t0.astype(np.float32)).to(device) * fs
+
+        out_i = torch.zeros((len(z_grid), len(x_grid)), dtype=torch.float32, device=device)
+        out_q = torch.zeros_like(out_i)
+        max_sample = float(n_times - 2)
+
+        for i in range(n_angles):
+            sample_no_t0 = transmit_z * cos_a[i] + transmit_x * sin_a[i]
+            sample_no_t0 = sample_no_t0[..., None] + receive_samples
+            sample = sample_no_t0 - t_starts_t[i]
+            valid = (sample >= 0) & (sample < n_times - 1)
+            sample.clamp_(0.0, max_sample)
+
+            if interp == 'nearest':
+                idx = sample.round().long().clamp(0, n_times - 1)
+                I_center = I_t[i][idx, ch]
+                Q_center = Q_t[i][idx, ch]
+            elif interp == 'cubic':
+                idx0 = sample.floor().long()
+                frac = sample - idx0.float()
+                frac2 = frac * frac
+                frac3 = frac2 * frac
+                c_m1 = -0.5 * frac3 + frac2 - 0.5 * frac
+                c_0 = 1.5 * frac3 - 2.5 * frac2 + 1.0
+                c_1 = -1.5 * frac3 + 2.0 * frac2 + 0.5 * frac
+                c_2 = 0.5 * frac3 - 0.5 * frac2
+                idx_m1 = torch.clamp(idx0 - 1, 0, n_times - 1)
+                idx_0 = torch.clamp(idx0, 0, n_times - 1)
+                idx_1 = torch.clamp(idx0 + 1, 0, n_times - 1)
+                idx_2 = torch.clamp(idx0 + 2, 0, n_times - 1)
+                I_angle = I_t[i]
+                Q_angle = Q_t[i]
+                I_center = (
+                    I_angle[idx_m1, ch] * c_m1
+                    + I_angle[idx_0, ch] * c_0
+                    + I_angle[idx_1, ch] * c_1
+                    + I_angle[idx_2, ch] * c_2
+                )
+                Q_center = (
+                    Q_angle[idx_m1, ch] * c_m1
+                    + Q_angle[idx_0, ch] * c_0
+                    + Q_angle[idx_1, ch] * c_1
+                    + Q_angle[idx_2, ch] * c_2
+                )
+            else: # linear
+                idx0 = sample.floor().long()
+                frac = sample - idx0.float()
+                I_angle = I_t[i]
+                Q_angle = Q_t[i]
+                I_center = I_angle[idx0, ch] * (1.0 - frac) + I_angle[idx0 + 1, ch] * frac
+                Q_center = Q_angle[idx0, ch] * (1.0 - frac) + Q_angle[idx0 + 1, ch] * frac
+
+            valid_w = valid.float() * weights
+            total_tof = sample_no_t0 / fs
+            phase = 2.0 * np.pi * fc * total_tof
+            cos_phi = torch.cos(phase)
+            sin_phi = torch.sin(phase)
+            I_aligned = I_center * cos_phi - Q_center * sin_phi
+            Q_aligned = I_center * sin_phi + Q_center * cos_phi
+
+            out_i.add_((I_aligned * valid_w).sum(-1))
+            out_q.add_((Q_aligned * valid_w).sum(-1))
+
+        out_i.div_(n_angles)
+        out_q.div_(n_angles)
+        tgc = 10.0 ** (TGC_ALPHA * (fc / 1e6) * (z_t * 100.0) * 2.0 / 20.0)
+        env = torch.sqrt(out_i * out_i + out_q * out_q) * tgc[:, None]
+        env = env / (env.max() + 1e-12)
+        db = 20.0 * torch.log10(torch.clamp(env, min=1e-12))
+        norm = (torch.clamp(db, -DYNAMIC_RANGE, 0.0) + DYNAMIC_RANGE) / DYNAMIC_RANGE
+        return norm.cpu().numpy()[np.newaxis, np.newaxis, ...].astype(np.float32)
 def process_scene(scene, source_root):
     print(f"Processing {scene['name']}")
     iq_path = source_root / scene["iq"]
     scan_path = source_root / scene["scan"]
-    gt_path = source_root / scene["gt"] if scene["gt"] else None
-
-    gt = read_gt(gt_path) if gt_path else None
+    gt_path = source_root / scene["gt"] if scene["gt"] and not scene["gt"].startswith("generated:") else None
 
     with h5py.File(iq_path, "r") as f:
         i_data = f[f"{BASE}/data/real"][:]
@@ -137,6 +242,11 @@ def process_scene(scene, source_root):
     with h5py.File(scan_path, "r") as f:
         x_grid = np.array(f[f"{BASE}/x_axis"]).flatten().astype(np.float32)
         z_grid = np.array(f[f"{BASE}/z_axis"]).flatten().astype(np.float32)
+
+    if scene["gt"] == "generated:multi_angle_das":
+        gt = das_reference_from_iq(i_trans, q_trans, fs, c, fc, pitch, t0, angles, x_grid, z_grid)
+    else:
+        gt = read_gt(gt_path) if gt_path else None
 
     return {
         "I": i_trans[np.newaxis, ...],

@@ -98,11 +98,11 @@ scenes:
     sample_idx: 0
     phantom_mode: in_vivo
     phantom_source: in_vivo
-    has_gt: false
+    has_gt: true
 
   - id: carotid_long
     h5_path: data/in_vivo.h5
     sample_idx: 1
     phantom_mode: in_vivo
     phantom_source: in_vivo
-    has_gt: false
+    has_gt: true

@@ -11,7 +11,7 @@ PICMUS = ROOT / "PICMUS"
 PACKED_FILES = [
     ("simulation", ROOT / "data" / "simulation.h5", True, 2),
     ("experiments", ROOT / "data" / "experiments.h5", True, 2),
-    ("in_vivo", ROOT / "data" / "in_vivo.h5", False, 2),
+    ("in_vivo", ROOT / "data" / "in_vivo.h5", True, 2),
 ]
 
 REQUIRED_H5_KEYS = [
@@ -262,7 +262,7 @@ def check_packed_h5(name, path, expect_gt, expected_samples):
         passed = check_numeric_fields(name, path.name, hf) and passed
         print(SEPARATOR)
         for key in REQUIRED_STRING_KEYS:
-            allow_empty = key in {"phantom_path", "gt_path"} and not expect_gt
+            allow_empty = key == "phantom_path" and name == "in_vivo" or (key in {"phantom_path", "gt_path"} and not expect_gt)
             passed = check_string_dataset(name, path.name, hf, key, expected_samples, allow_empty) and passed
         if "has_gt" in hf:
             has_gt_values = hf["has_gt"][:].astype(bool).tolist()

@@ -1,25 +1,44 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*$py.class
 
-.venv/
-venv/
-env/
-.env
+# C extensions
+*.so
 
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDEs
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS metadata
 .DS_Store
 Thumbs.db
 
-results/
+# Project specific ignores
 PICMUS/
-
 data/*.h5
-data/*.hdf5
-data/*.mat
-
-*.npy
-*.npz
-*.png
-*.jpg
-*.jpeg
-*.tif
-*.tiff
+results/

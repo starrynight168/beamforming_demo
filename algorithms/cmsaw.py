@@ -248,36 +248,43 @@ def delayed_iq(sample, angle_idx):
     exact = (tof - t0[:, None, None, None]) * sample["fs"]
     valid = (exact >= 0) & (exact <= n_samples - 1)
 
+    flat_i, flat_q = I.reshape(-1), Q.reshape(-1)
+    angle_offset = torch.arange(n_angles, device=device)[:, None, None, None] * n_samples * n_channels
+    channel_offset = torch.arange(n_channels, device=device)[None, None, None, :]
+
     if args.interp == "nearest":
         index0 = torch.round(exact).long().clamp(0, n_samples - 1)
-        frac = torch.zeros_like(exact)
-        index1 = index0
-        index_m1 = index2 = index0
-    else:
+        linear0 = angle_offset + index0 * n_channels + channel_offset
+        i = flat_i[linear0]
+        q = flat_q[linear0]
+    elif args.interp == "linear":
+        index0 = torch.floor(exact).long().clamp(0, n_samples - 1)
+        index1 = (index0 + 1).clamp(0, n_samples - 1)
+        frac = exact - torch.floor(exact)
+        linear0 = angle_offset + index0 * n_channels + channel_offset
+        linear1 = angle_offset + index1 * n_channels + channel_offset
+        i = flat_i[linear0] * (1.0 - frac) + flat_i[linear1] * frac
+        q = flat_q[linear0] * (1.0 - frac) + flat_q[linear1] * frac
+    else: # cubic
         index0 = torch.floor(exact).long().clamp(0, n_samples - 1)
         index1 = (index0 + 1).clamp(0, n_samples - 1)
         index_m1 = (index0 - 1).clamp(0, n_samples - 1)
         index2 = (index0 + 2).clamp(0, n_samples - 1)
         frac = exact - torch.floor(exact)
-
-    angle_offset = torch.arange(n_angles, device=device)[:, None, None, None] * n_samples * n_channels
-    channel_offset = torch.arange(n_channels, device=device)[None, None, None, :]
-    linear0 = angle_offset + index0 * n_channels + channel_offset
-    linear1 = angle_offset + index1 * n_channels + channel_offset
-    if args.interp == "cubic":
+        
+        linear0 = angle_offset + index0 * n_channels + channel_offset
+        linear1 = angle_offset + index1 * n_channels + channel_offset
         linear_m1 = angle_offset + index_m1 * n_channels + channel_offset
         linear2 = angle_offset + index2 * n_channels + channel_offset
+        
         w2, w3 = frac.square(), frac.pow(3)
         cm1 = -0.5 * w3 + w2 - 0.5 * frac
         c0 = 1.5 * w3 - 2.5 * w2 + 1.0
         c1 = -1.5 * w3 + 2.0 * w2 + 0.5 * frac
         c2 = 0.5 * w3 - 0.5 * w2
-        flat_i, flat_q = I.reshape(-1), Q.reshape(-1)
+        
         i = flat_i[linear_m1] * cm1 + flat_i[linear0] * c0 + flat_i[linear1] * c1 + flat_i[linear2] * c2
         q = flat_q[linear_m1] * cm1 + flat_q[linear0] * c0 + flat_q[linear1] * c1 + flat_q[linear2] * c2
-    else:
-        i = I.reshape(-1)[linear0] * (1.0 - frac) + I.reshape(-1)[linear1] * frac
-        q = Q.reshape(-1)[linear0] * (1.0 - frac) + Q.reshape(-1)[linear1] * frac
 
     phase = 2.0 * torch.pi * sample["fc"] * tof
     aligned_i = i * torch.cos(phase) - q * torch.sin(phase)
