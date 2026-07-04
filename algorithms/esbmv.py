@@ -242,6 +242,11 @@ class RowDynamicMVBeamformerIQ:
         I_beam_sum = torch.zeros((self.H, self.W), dtype=torch.float32, device=device)
         Q_beam_sum = torch.zeros((self.H, self.W), dtype=torch.float32, device=device)
 
+        # 1. 预计算接收端相位旋转因子 (全网格 3D)
+        phi_rx_global = 2.0 * np.pi * fc_global * (self.drs / fs)
+        cos_rx_global = torch.cos(phi_rx_global)
+        sin_rx_global = torch.sin(phi_rx_global)
+
         for i in range(n_a):
             Y_out = torch.zeros((self.H, self.W), dtype=torch.complex64, device=device)
             I_angle = I_t[i]
@@ -288,16 +293,16 @@ class RowDynamicMVBeamformerIQ:
                     frac = sample - idx0.float()
                     idx1 = torch.clamp(idx0 + 1, 0, n_s - 1)
                     idx0 = torch.clamp(idx0, 0, n_s - 1)
-                    I_samples = I_angle[idx0, self.ch] * (1.0 - frac) + I_angle[idx1, self.ch] * frac
-                    Q_samples = Q_angle[idx0, self.ch] * (1.0 - frac) + Q_angle[idx1, self.ch] * frac
+                    I_samples = I_angle[idx0, self.ch] * (1.0 - frac) + I_angle[idx0 + 1, self.ch] * frac
+                    Q_samples = Q_angle[idx0, self.ch] * (1.0 - frac) + Q_angle[idx0 + 1, self.ch] * frac
 
-                tof_samples = sample_no_t0.unsqueeze(-1) / fs + offsets_f / fs
-                phase = 2.0 * np.pi * fc_global * tof_samples
-                cos_phi = torch.cos(phase)
-                sin_phi = torch.sin(phase)
-                I_aligned = I_samples * cos_phi - Q_samples * sin_phi
-                Q_aligned = I_samples * sin_phi + Q_samples * cos_phi
-                X_flat = torch.complex(I_aligned, Q_aligned) * valid_mask_center
+                # 2. 接收端相位旋转 (3D)
+                cos_rx = cos_rx_global[hz].unsqueeze(-1)
+                sin_rx = sin_rx_global[hz].unsqueeze(-1)
+                I_rx = I_samples * cos_rx - Q_samples * sin_rx
+                Q_rx = I_samples * sin_rx + Q_samples * cos_rx
+
+                X_flat = torch.complex(I_rx, Q_rx) * valid_mask_center
                 row = self.row_cache[hz]
                 K, L, M = row['K'], row['L'], row['M']
 
@@ -348,11 +353,22 @@ class RowDynamicMVBeamformerIQ:
                     keep[:, 0] = True
                     coeff = eigvecs.mH @ w_mv
                     w = eigvecs @ (coeff * keep.to(coeff.dtype).unsqueeze(-1))
+
                 # ========== 合成输出 ==========
                 t0 = self.temporal_win // 2
                 X_sub_center = X_sub[:, :, :, t0]              # [W, L, M]
                 X_mean = X_sub_center.mean(dim=2).unsqueeze(-1)  # [W, L, 1]
-                y_row = torch.matmul(w.mH, X_mean)             # [W, 1, 1]
+                y_row_rx = torch.matmul(w.mH, X_mean)             # [W, 1, 1]
+
+                # 3. 发射端相位旋转 (2D)
+                phi_tx = 2.0 * np.pi * fc_global * ((self.Z[hz] * self.sc * cos_a[i] + self.X[hz] * self.sc * sin_a[i]) / fs)
+                cos_tx = torch.cos(phi_tx).view(self.W, 1, 1)
+                sin_tx = torch.sin(phi_tx).view(self.W, 1, 1)
+
+                y_row = torch.complex(
+                    y_row_rx.real * cos_tx - y_row_rx.imag * sin_tx,
+                    y_row_rx.real * sin_tx + y_row_rx.imag * cos_tx
+                )
 
                 Y_out[hz] = y_row.squeeze(-1).squeeze(-1)
 

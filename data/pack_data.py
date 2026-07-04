@@ -139,6 +139,11 @@ def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, 
         sin_a = torch.from_numpy(np.sin(angles).astype(np.float32)).to(device)
         t_starts_t = torch.from_numpy(t0.astype(np.float32)).to(device) * fs
 
+        # 1. 预计算接收端相位旋转因子 (3D)
+        phi_rx = 2.0 * np.pi * fc * (receive_samples / fs)
+        cos_rx = torch.cos(phi_rx)
+        sin_rx = torch.sin(phi_rx)
+
         out_i = torch.zeros((len(z_grid), len(x_grid)), dtype=torch.float32, device=device)
         out_q = torch.zeros_like(out_i)
         max_sample = float(n_times - 2)
@@ -190,15 +195,22 @@ def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, 
                 Q_center = Q_angle[idx0, ch] * (1.0 - frac) + Q_angle[idx0 + 1, ch] * frac
 
             valid_w = valid.float() * weights
-            total_tof = sample_no_t0 / fs
-            phase = 2.0 * np.pi * fc * total_tof
-            cos_phi = torch.cos(phase)
-            sin_phi = torch.sin(phase)
-            I_aligned = I_center * cos_phi - Q_center * sin_phi
-            Q_aligned = I_center * sin_phi + Q_center * cos_phi
 
-            out_i.add_((I_aligned * valid_w).sum(-1))
-            out_q.add_((Q_aligned * valid_w).sum(-1))
+            # 2. 接收端相位旋转并求和 (3D -> 2D)
+            I_rx = I_center * cos_rx - Q_center * sin_rx
+            Q_rx = I_center * sin_rx + Q_center * cos_rx
+            I_sum = (I_rx * valid_w).sum(dim=-1)
+            Q_sum = (Q_rx * valid_w).sum(dim=-1)
+
+            # 3. 发射端相位旋转 (2D)
+            phi_tx = 2.0 * np.pi * fc * ((transmit_z * cos_a[i] + transmit_x * sin_a[i]) / fs)
+            cos_tx = torch.cos(phi_tx)
+            sin_tx = torch.sin(phi_tx)
+            I_rot = I_sum * cos_tx - Q_sum * sin_tx
+            Q_rot = I_sum * sin_tx + Q_sum * cos_tx
+
+            out_i.add_(I_rot)
+            out_q.add_(Q_rot)
 
         out_i.div_(n_angles)
         out_q.div_(n_angles)

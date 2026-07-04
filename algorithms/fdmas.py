@@ -210,6 +210,11 @@ class FDMASBeamformerIQ:
         weights = self.window
         ch = self.ch
 
+        # 1. 预计算接收端相位旋转因子 (在所有角度循环中完全相同)
+        phi_rx = 2.0 * np.pi * fc_global * (self.drs / fs)
+        cos_rx = torch.cos(phi_rx)
+        sin_rx = torch.sin(phi_rx)
+
         for i in range(n_a):
             sample_no_t0 = (tx_z * cos_a[i] + tx_x * sin_a[i]).unsqueeze(-1) + self.drs
             sample = sample_no_t0 - t_starts_t[i]
@@ -256,14 +261,24 @@ class FDMASBeamformerIQ:
                 Q_center = Q_angle[idx0, ch] * (1.0 - frac) + Q_angle[idx0 + 1, ch] * frac
 
             valid_w = valid.float() * weights
-            total_tof = sample_no_t0 / fs
-            phase = 2.0 * np.pi * fc_global * total_tof
-            cos_phi = torch.cos(phase)
-            sin_phi = torch.sin(phase)
-            I_aligned = I_center * cos_phi - Q_center * sin_phi
-            Q_aligned = I_center * sin_phi + Q_center * cos_phi
 
-            beam_sum.add_(self._complex_fdmas(I_aligned, Q_aligned, valid_w))
+            # 2. 接收端相位旋转并求和 (3D)
+            I_rx = I_center * cos_rx - Q_center * sin_rx
+            Q_rx = I_center * sin_rx + Q_center * cos_rx
+
+            # 3. 计算 F-DMAS (得到 2D 复数张量)
+            pair_sum = self._complex_fdmas(I_rx, Q_rx, valid_w)
+
+            # 4. 发射端相位旋转 (2D)
+            phi_tx = 2.0 * np.pi * fc_global * ((tx_z * cos_a[i] + tx_x * sin_a[i]) / fs)
+            # 由于 F-DMAS 为双信号相乘，其相位旋转角为 2 * phi_tx
+            cos_tx = torch.cos(2.0 * phi_tx)
+            sin_tx = torch.sin(2.0 * phi_tx)
+
+            I_rot = pair_sum.real * cos_tx - pair_sum.imag * sin_tx
+            Q_rot = pair_sum.real * sin_tx + pair_sum.imag * cos_tx
+
+            beam_sum.add_(torch.complex(I_rot, Q_rot))
 
         beam = beam_sum / n_a
         return beam.real.cpu().numpy(), beam.imag.cpu().numpy()

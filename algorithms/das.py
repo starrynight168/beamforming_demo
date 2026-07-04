@@ -201,6 +201,11 @@ class DASBeamformerIQ:
         weights = self.window
         ch = self.ch
 
+        # 1. 预计算接收端相位旋转因子 (在所有角度循环中完全相同)
+        phi_rx = 2.0 * np.pi * fc_global * (self.drs / fs)
+        cos_rx = torch.cos(phi_rx)
+        sin_rx = torch.sin(phi_rx)
+
         for i in range(n_a):
             sample_no_t0 = (tx_z * cos_a[i] + tx_x * sin_a[i]).unsqueeze(-1) + self.drs
             sample = sample_no_t0 - t_starts_t[i]
@@ -247,15 +252,22 @@ class DASBeamformerIQ:
                 Q_center = Q_angle[idx0, ch] * (1.0 - frac) + Q_angle[idx0 + 1, ch] * frac
 
             valid_w = valid.float() * weights
-            total_tof = sample_no_t0 / fs
-            phase = 2.0 * np.pi * fc_global * total_tof
-            cos_phi = torch.cos(phase)
-            sin_phi = torch.sin(phase)
-            I_aligned = I_center * cos_phi - Q_center * sin_phi
-            Q_aligned = I_center * sin_phi + Q_center * cos_phi
 
-            I_beam_sum.add_((I_aligned * valid_w).sum(dim=-1))
-            Q_beam_sum.add_((Q_aligned * valid_w).sum(dim=-1))
+            # 2. 接收端相位旋转并求和 (3D -> 2D)
+            I_rx = I_center * cos_rx - Q_center * sin_rx
+            Q_rx = I_center * sin_rx + Q_center * cos_rx
+            I_sum = (I_rx * valid_w).sum(dim=-1)
+            Q_sum = (Q_rx * valid_w).sum(dim=-1)
+
+            # 3. 发射端相位旋转 (2D)
+            phi_tx = 2.0 * np.pi * fc_global * ((tx_z * cos_a[i] + tx_x * sin_a[i]) / fs)
+            cos_tx = torch.cos(phi_tx)
+            sin_tx = torch.sin(phi_tx)
+            I_aligned = I_sum * cos_tx - Q_sum * sin_tx
+            Q_aligned = I_sum * sin_tx + Q_sum * cos_tx
+
+            I_beam_sum.add_(I_aligned)
+            Q_beam_sum.add_(Q_aligned)
 
         I_out = I_beam_sum / n_a
         Q_out = Q_beam_sum / n_a

@@ -286,9 +286,11 @@ def delayed_iq(sample, angle_idx):
         i = flat_i[linear_m1] * cm1 + flat_i[linear0] * c0 + flat_i[linear1] * c1 + flat_i[linear2] * c2
         q = flat_q[linear_m1] * cm1 + flat_q[linear0] * c0 + flat_q[linear1] * c1 + flat_q[linear2] * c2
 
-    phase = 2.0 * torch.pi * sample["fc"] * tof
-    aligned_i = i * torch.cos(phase) - q * torch.sin(phase)
-    aligned_q = i * torch.sin(phase) + q * torch.cos(phase)
+    phase_rx = 2.0 * torch.pi * sample["fc"] * (receive / sample["c"])
+    cos_rx = torch.cos(phase_rx)[None]
+    sin_rx = torch.sin(phase_rx)[None]
+    aligned_i = i * cos_rx - q * sin_rx
+    aligned_q = i * sin_rx + q * cos_rx
     return torch.complex(aligned_i, aligned_q) * valid
 
 
