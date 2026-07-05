@@ -18,6 +18,21 @@ import numpy as np
 from evaluate import db_to_display, load_grids, read_phantom
 
 
+def get_color(method_name):
+    # 标准化名字为大写，并过滤连字符和空格以实现鲁棒的配色匹配
+    name = method_name.upper().replace("-", "").replace(" ", "")
+    mapping = {
+        "GT": "#333333",       # 深灰
+        "DAS": "#4C72B0",      # 蓝色
+        "MV": "#55A868",       # 绿色
+        "ESBMV": "#8172B3",    # 紫色
+        "GCFMV": "#64B5CD",    # 青色
+        "CMSAW": "#FF7F0E",    # 橙色
+        "FDMAS": "#C44E52",    # 红色
+    }
+    return mapping.get(name, "#4C72B0") # 默认返回蓝色
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Plot evaluation CSV outputs.")
     parser.add_argument("--metrics_dir", default=os.path.join("results", "metrics"))
@@ -114,19 +129,9 @@ def save_bar_plot(path, metrics_to_plot):
     fig, axes = plt.subplots(rows_grid, cols, figsize=(panel_width * cols, panel_height * rows_grid), dpi=150)
     axes = np.asarray([axes]).reshape(-1) if n_plots == 1 else axes.flatten()
 
-    color_map = {
-        "GT": "#333333",
-        "DAS": "#4C72B0",
-        "MV": "#55A868",
-        "ESBMV": "#8172B3",
-        "GCF-MV": "#64B5CD",
-        "CMSAW": "#FF7F0E",
-        "F-DMAS": "#C44E52",
-    }
-
     for i, (title, key, vals, methods) in enumerate(metrics_to_plot):
         ax = axes[i]
-        colors = [color_map.get(m, "#4C72B0") for m in methods]
+        colors = [get_color(m) for m in methods]
         use_horizontal = len(methods) > 6
         positions = np.arange(len(methods))
         if use_horizontal:
@@ -298,14 +303,13 @@ def save_roi_plot(path, display, x_mm, z_mm, rois, targets, target_rows=None, pe
 
 
 def save_lateral_profile_plot(out_dir, comparison, x_mm, z_mm, rois, targets, methods):
-    color_map = {"GT": "#333333", "DAS": "#4C72B0", "MV": "#55A868", "ESBMV": "#8172B3", "F-DMAS": "#C44E52"}
     if rois:
         target_cyst = min(rois, key=lambda c: (c["x_mm"] - 0.0) ** 2 + (c["z_mm"] - 25.0) ** 2)
         iz = int(np.argmin(np.abs(z_mm - target_cyst["z_mm"])))
         fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
         for i, method in enumerate(methods):
-            ax.plot(x_mm, comparison[i, iz, :], label=method, color=color_map.get(method, "#4C72B0"),
-                    linestyle="--" if method == "GT" else "-", linewidth=1.5 if method != "GT" else 1.2)
+            ax.plot(x_mm, comparison[i, iz, :], label=method, color=get_color(method),
+                    linestyle="--" if method.upper() == "GT" else "-", linewidth=1.5 if method.upper() != "GT" else 1.2)
         ax.axvline(target_cyst["x_mm"] - target_cyst["diameter_mm"] / 2, color="grey", linestyle=":", alpha=0.7, label="Cyst Boundary")
         ax.axvline(target_cyst["x_mm"] + target_cyst["diameter_mm"] / 2, color="grey", linestyle=":", alpha=0.7)
         ax.set_title(f"1D Lateral Cyst Profile (Depth z = {z_mm[iz]:.1f} mm)", fontsize=12, fontweight="bold", pad=12)
@@ -322,8 +326,8 @@ def save_lateral_profile_plot(out_dir, comparison, x_mm, z_mm, rois, targets, me
         iz = int(np.argmin(np.abs(z_mm - target_point["z_mm"])))
         fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
         for i, method in enumerate(methods):
-            ax.plot(x_mm, comparison[i, iz, :], label=method, color=color_map.get(method, "#4C72B0"),
-                    linestyle="--" if method == "GT" else "-", linewidth=1.5 if method != "GT" else 1.2)
+            ax.plot(x_mm, comparison[i, iz, :], label=method, color=get_color(method),
+                    linestyle="--" if method.upper() == "GT" else "-", linewidth=1.5 if method.upper() != "GT" else 1.2)
         ax.axvline(target_point["x_mm"], color="grey", linestyle=":", alpha=0.7, label="Point Target Center")
         ax.set_title(f"1D Lateral Point Profile (Depth z = {z_mm[iz]:.1f} mm)", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("Lateral coordinate (mm)")
