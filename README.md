@@ -153,6 +153,64 @@ python run_all.py --only simulation_contrast_speckle,carotid_cross
 python run_one.py --scene carotid_cross --algorithms das,mv
 ```
 
+## 中文交互向导（全新）
+
+项目新增了两个面向中文用户的交互式脚本，方便进行可视化参数配置和单参数消融实验。
+
+### 1. 成像向导：`run_wizard_cn.py`
+
+适合对命令行参数不熟悉的“小白”用户。该脚本会以全中文一步步引导您配置超声成像的各项参数：
+
+- **引导式输入**：按顺序选择 H5 数据集、样本索引、波束合成算法、发射偏角、显示参数（如动态范围 `dr`）、TGC（时间增益补偿）、窗函数、插值方式、是否保存 GT 及进行指标评估等。
+- **人性化操作**：在任何步骤输入 `b` 可返回上一步重新选择，输入 `q` 可直接退出。
+- **小白说明模式**：每一步提供详细的背景知识说明，解释该参数对最终成像画质的具体影响。
+- **智能分支逻辑**：例如关闭“动态孔径”后自动跳过 `F-Number` 的提问；关闭 “TGC” 后跳过 `TGC_ALPHA` 提问。
+- **参数容错与校验**：输入的参数格式不正确时会给出中文报错并提示重新输入，不会直接崩溃。例如自定义角度必须为 `center`、`all`、正整数或整数索引列表。
+- **输出路径**：
+  - 默认结果输出在 `results/wizard/` 目录下。
+  - 临时取消执行不会写入配置，执行时会将当前的配置文件保存到 `results/wizard/configs/`。
+
+使用方法：
+
+```bash
+python run_wizard_cn.py
+```
+
+---
+
+### 2. 单参数消融向导：`run_ablation_cn.py`
+
+用于对某一个特定参数进行“消融实验”（Ablation Study），观察其取值变化对算法成像质量的影响。
+
+- **多参数列表展示**：固定一个算法后，自动从 `config.yaml` 读取所有可消融的超参数，并以中文表格列出。
+- **单变量控制**：一次只允许对一个选定参数进行消融实验。
+- **灵活输入取值**：支持手动列举多个取值（逗号分隔），或通过范围生成（如 `1.2:0.1:2.0` 表示从 1.2 到 2.0，步长 0.1）。
+- **参数强类型校验**：例如 `select_angles` 参数不接受小数或布尔值，数值参数只能输入数字，开关参数只接受 true/false，`window` 和 `interp` 只接受合法选项。
+- **输出结构设计**：
+  默认输出到 `results/ablation/ablation_<算法名>_<参数名>/`，如 `ablation_das_f_number/`。结构如下：
+  ```text
+  results/ablation/ablation_das_f_number/
+    configs/                      # 每次运行生成的临时配置文件
+    fnumber1.2/                   # 对应参数值的原生结果目录
+      comparison.png
+      comparison.npy
+      run_params.json
+      das/
+        das.npy
+    fnumber1.5/
+    ...
+    ablation_summary.csv          # 指标消融汇总 CSV
+    ablation_comparison.png       # 自动生成的对比拼接总览图
+    ablation_comparison.npy       # 对比图像数据
+  ```
+- **智能对比总览图**：消融结束后，脚本会自动读取每个子目录中的 `.npy` 图像数据，将 Ground Truth（若有）作为第一张，随后拼接各个参数取值的成像图，生成 `ablation_comparison.png`。子图布局支持自动折行（每行最多 4 张），并优先读取自身配置的 `dr` 动态范围进行完美显示。
+
+使用方法：
+
+```bash
+python run_ablation_cn.py
+```
+
 ## 评估说明
 
 评估和绘图已经拆分：

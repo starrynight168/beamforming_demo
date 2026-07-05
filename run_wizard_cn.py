@@ -1,0 +1,509 @@
+import subprocess
+import sys
+from pathlib import Path
+
+import h5py
+
+try:
+    import yaml
+except Exception:
+    yaml = None
+
+
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = ROOT / "data"
+RESULTS_DIR = ROOT / "results"
+
+ALGORITHMS = {
+    "das": "DAS：最基础、最快，适合入门观察",
+    "mv": "MV：自适应波束合成，速度较慢",
+    "esbmv": "ESBMV：MV 的特征空间版本，速度较慢",
+    "gcfmv": "GCF-MV：带相干因子的 MV",
+    "cmsaw": "CMSAW：基于 MV 的加权方法，会先调用 MV",
+    "fdmas": "F-DMAS：非线性延迟乘加方法",
+}
+
+HELP_TEXT = {
+    "h5": "H5 是已经整理好的成像数据包，里面通常包含输入 IQ、角度、探头参数、成像网格，有些还包含 GT 参考图。",
+    "sample": "一个 H5 里可以有多个样本。样本编号就是选择第几帧/第几个场景来成像。",
+    "algorithm": "成像方法决定如何把通道数据合成为图像。刚入门建议先选 DAS，速度快、结果最容易理解。",
+    "angles": "角度表示使用哪些平面波发射角。center 只用中心角，all 用全部角度。角度越多通常图像越稳定，但速度越慢。",
+    "dynamic_aperture": "动态孔径会随深度改变接收孔径。开启后浅层更稳、深层分辨率更合理；关闭后实现更简单，但浅层可能更容易出现旁瓣/伪影。",
+    "f_number": "F-Number 只在动态孔径开启时生效。数值越小，孔径越大，横向分辨率可能更好但旁瓣/噪声也可能更重；数值越大，图像更平滑但可能变糊。常用 1.5。",
+    "dr": "动态范围只影响显示灰度，不改变算法原始输出。60 dB 常用；数值小会让图像对比更强但暗部细节少，数值大会保留暗部但图像可能发灰。",
+    "tgc": "TGC 是深度增益补偿。开启后深部不会太暗，更接近常见 B-mode 显示；关闭后可以观察原始衰减，但深部通常偏暗。",
+    "tgc_alpha": "TGC_ALPHA 只在 TGC 开启时生效。数值越大，深部越亮；太大会让深部噪声和伪影也被放大。默认 0.5。",
+    "window": "窗函数影响旁瓣、斑点和分辨率。rect 分辨率较锐但旁瓣更明显；hann 更干净平滑但会牺牲一点横向分辨率；tukey 介于两者之间。",
+    "interp": "插值影响延迟取样精度。cubic 图像更平滑、边界更自然但稍慢；linear 更快且通常够用；nearest 最快但可能出现锯齿或亮点位置不准。",
+    "gt": "GT 是参考图像。加入 GT 后，对比图会把算法结果和参考图放在一起，便于肉眼比较。",
+    "evaluate": "指标会计算算法结果和 GT 的差异，并生成 CSV/图片。没有 GT 时不建议计算。",
+    "keep_existing": "复用已有输出可以节省时间，但如果你改了参数，应关闭复用重新计算。",
+    "execute": "如果暂不执行，向导只会生成临时配置和命令，方便你检查。",
+    "output": "结果目录会保存各算法输出图、comparison.png、运行参数和可选指标。",
+}
+
+
+def explain(enabled, key):
+    if enabled:
+        print(f"\n说明：{HELP_TEXT[key]}")
+
+
+def print_title(text):
+    print("\n" + "=" * 72)
+    print(text)
+    print("=" * 72)
+
+
+class BackCommand(Exception):
+    pass
+
+
+class ExitCommand(Exception):
+    pass
+
+
+def handle_nav_command(value):
+    low = value.strip().lower()
+    if low in ("b", "back", "上一步", "返回"):
+        raise BackCommand
+    if low in ("q", "quit", "exit", "退出"):
+        raise ExitCommand
+
+
+def read_line(prompt):
+    try:
+        return input(prompt)
+    except EOFError:
+        print()
+        raise SystemExit("输入已结束，向导退出。")
+
+
+def ask_text(prompt, default=None):
+    suffix = f"（默认：{default}）" if default not in (None, "") else ""
+    value = read_line(f"{prompt}{suffix}: ").strip()
+    handle_nav_command(value)
+    if value == "" and default is not None:
+        return str(default)
+    return value
+
+
+def ask_yes_no(prompt, default=True):
+    default_text = "Y/n" if default else "y/N"
+    while True:
+        value = read_line(f"{prompt} [{default_text}]: ").strip().lower()
+        handle_nav_command(value)
+        if value == "":
+            return default
+        if value in ("y", "yes", "是", "1"):
+            return True
+        if value in ("n", "no", "否", "0"):
+            return False
+        print("请输入 y 或 n。")
+
+
+def ask_float(prompt, default):
+    while True:
+        raw = ask_text(prompt, default=default)
+        try:
+            return float(raw)
+        except ValueError:
+            print("请输入合法数字。")
+
+
+def ask_choice(prompt, options, default_index=0):
+    if not options:
+        raise ValueError("没有可选项。")
+    print(f"\n{prompt}")
+    for idx, (key, desc) in enumerate(options, 1):
+        default_mark = "  ← 默认" if idx - 1 == default_index else ""
+        print(f"  {idx}. {desc}{default_mark}")
+    while True:
+        raw = read_line("请输入序号: ").strip()
+        handle_nav_command(raw)
+        if raw == "":
+            return options[default_index][0]
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return options[int(raw) - 1][0]
+        for key, _ in options:
+            if isinstance(key, str) and raw.lower() == key.lower():
+                return key
+        print("序号不合法，请重新输入。")
+
+
+def ask_multi_choice(prompt, options, default_keys):
+    print(f"\n{prompt}")
+    for idx, (key, desc) in enumerate(options, 1):
+        print(f"  {idx}. {key:<7} {desc}")
+    default_text = ",".join(default_keys)
+    while True:
+        raw = read_line(f"请输入序号或名称，多个用逗号分隔（默认：{default_text}）: ").strip()
+        handle_nav_command(raw)
+        if raw == "":
+            return default_keys
+        selected = []
+        ok = True
+        for item in raw.replace("，", ",").split(","):
+            token = item.strip().lower()
+            if not token:
+                continue
+            if token.isdigit() and 1 <= int(token) <= len(options):
+                selected.append(options[int(token) - 1][0])
+            elif token in dict(options):
+                selected.append(token)
+            else:
+                ok = False
+                print(f"无法识别：{item}")
+                break
+        selected = list(dict.fromkeys(selected))
+        if ok and selected:
+            return selected
+        print("请选择至少一个合法算法。")
+
+
+def relative_to_root(path):
+    path = Path(path)
+    try:
+        return path.resolve().relative_to(ROOT)
+    except ValueError:
+        return path.resolve()
+
+
+def validate_select_angles(value):
+    text = str(value).strip().lower()
+    if text in ("center", "all"):
+        return text
+    parts = [part.strip() for part in text.replace("，", ",").split(",") if part.strip()]
+    if parts and all(part.isdigit() and int(part) > 0 for part in parts):
+        return ",".join(parts)
+    raise ValueError("角度只能填 center、all、正整数角度数，或整数索引列表，例如 1、3、11、0,37,74。")
+
+
+def ask_select_angles(default="1"):
+    while True:
+        raw = ask_text("请输入角度数量 N 或整数索引列表，例如 1、3、11、0,37,74", default=default)
+        try:
+            return validate_select_angles(raw)
+        except ValueError as exc:
+            print(exc)
+
+
+def list_h5_files():
+    paths = sorted(DATA_DIR.rglob("*.h5"))
+    return [p for p in paths if p.is_file()]
+
+
+def sample_name(hf, idx):
+    if "sample_names" not in hf:
+        return f"sample_{idx}"
+    value = hf["sample_names"][idx]
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return str(value)
+
+
+def inspect_h5(path):
+    with h5py.File(path, "r") as hf:
+        if "all_multi_I" not in hf or "all_multi_Q" not in hf:
+            raise ValueError("这个 H5 缺少 all_multi_I/all_multi_Q，不像本工程的成像数据。")
+        n, a, t, c = hf["all_multi_I"].shape
+        gt = "有" if "all_envdb_norm" in hf else "无"
+        angles = hf["angles"].shape[0] if "angles" in hf else a
+        fs = float(hf["fs"][()]) if "fs" in hf else None
+        fc = float(hf["fc"][()]) if "fc" in hf else None
+        names = [sample_name(hf, i) for i in range(n)]
+    return {
+        "n": n,
+        "a": a,
+        "t": t,
+        "c": c,
+        "gt": gt,
+        "angles": angles,
+        "fs": fs,
+        "fc": fc,
+        "names": names,
+    }
+
+
+def choose_h5():
+    paths = list_h5_files()
+    if paths:
+        options = []
+        for path in paths:
+            rel = relative_to_root(path)
+            try:
+                info = inspect_h5(path)
+                desc = f"{rel}  | 样本 {info['n']}，角度 {info['a']}，T={info['t']}，通道={info['c']}，GT={info['gt']}"
+            except Exception as exc:
+                desc = f"{rel}  | 无法读取：{exc}"
+            options.append((str(path), desc))
+        options.append(("manual", "手动输入 H5 路径"))
+        choice = ask_choice("请选择要成像的 H5 文件", options, default_index=0)
+        if choice != "manual":
+            return Path(choice)
+    while True:
+        raw = ask_text("请输入 H5 路径")
+        path = Path(raw.strip('"').strip("'"))
+        if not path.is_absolute():
+            path = ROOT / path
+        if path.exists():
+            return path
+        print("文件不存在，请重新输入。")
+
+
+def choose_sample(path, teaching=True):
+    info = inspect_h5(path)
+    explain(teaching, "sample")
+    print("\n这个 H5 的基本信息：")
+    print(f"  样本数: {info['n']}")
+    print(f"  输入形状: [N={info['n']}, A={info['a']}, T={info['t']}, C={info['c']}]")
+    if teaching:
+        print("  形状说明: N=样本数，A=角度数，T=时间采样点，C=阵元/通道数")
+    print(f"  H5 角度数: {info['angles']}")
+    if info["fs"] is not None:
+        print(f"  fs: {info['fs'] / 1e6:.3f} MHz")
+    if info["fc"] is not None:
+        print(f"  fc: {info['fc'] / 1e6:.3f} MHz")
+    print(f"  GT: {info['gt']}")
+
+    options = []
+    for idx, name in enumerate(info["names"]):
+        options.append((idx, f"{idx}: {name}"))
+    return int(ask_choice("请选择样本编号", options, default_index=0))
+
+
+def build_config(base_config, h5_path, sample_idx, algorithms, params):
+    h5_rel = str(relative_to_root(h5_path)).replace("\\", "/")
+    scene_id = f"{Path(h5_path).stem}_sample{sample_idx}"
+    scene = {
+        "id": scene_id,
+        "h5_path": h5_rel,
+        "sample_idx": int(sample_idx),
+        "phantom_mode": "auto",
+        "phantom_source": "auto",
+        "has_gt": params.pop("has_gt"),
+    }
+    config = {
+        "algorithms": algorithms,
+        "algorithm_labels": base_config.get("algorithm_labels", {}),
+        "params": params,
+        "algorithm_params": base_config.get("algorithm_params", {}),
+        "scenes": [scene],
+    }
+    return config, scene_id
+
+
+def load_base_config():
+    if yaml is None:
+        raise RuntimeError("缺少 PyYAML，无法读取 config.yaml。请先安装：pip install pyyaml")
+    with open(ROOT / "config.yaml", "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def make_temp_config_path(scene_id):
+    out_dir = RESULTS_DIR / "wizard" / "configs"
+    return out_dir / f"{scene_id}.yaml"
+
+
+def write_config(config, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+    return path
+
+
+def run_steps(steps):
+    index = 0
+    while index < len(steps):
+        try:
+            steps[index]()
+            index += 1
+        except BackCommand:
+            if index == 0:
+                print("已经是第一步，输入 q 可退出。")
+            else:
+                index -= 1
+                print("\n已返回上一步。")
+
+
+def main():
+    print_title("超声波束合成中文向导")
+    print("这个向导会一步一步问你问题，然后调用现有 run_one.py 完成成像、对比和可选指标计算。")
+    print("说明：本向导只新增入口，不会修改原来的 config.yaml、算法脚本或数据文件。")
+    print("提示：每一步都可以输入 b 返回上一步，输入 q 退出。")
+
+    state = {"base_config": load_base_config()}
+
+    def step_teaching():
+        state["teaching"] = ask_yes_no("是否开启小白说明模式（每一步解释参数含义）", default=state.get("teaching", True))
+
+    def step_h5():
+        explain(state["teaching"], "h5")
+        state["h5_path"] = choose_h5()
+
+    def step_sample():
+        state["sample_idx"] = choose_sample(state["h5_path"], teaching=state["teaching"])
+
+    def step_algorithms():
+        algorithm_options = [(key, desc) for key, desc in ALGORITHMS.items()]
+        explain(state["teaching"], "algorithm")
+        state["algorithms"] = ask_multi_choice("请选择成像方法", algorithm_options, default_keys=state.get("algorithms", ["das"]))
+
+    def step_angles():
+        explain(state["teaching"], "angles")
+        value = ask_choice(
+            "请选择使用哪些角度",
+            [
+                ("center", "center：只用中心角，最适合入门和单角度数据"),
+                ("all", "all：使用 H5 中保存的全部角度"),
+                ("custom", "输入一个数字 N：使用 N 个角度"),
+            ],
+            default_index=0,
+        )
+        if value == "custom":
+            value = ask_select_angles(default=state.get("select_angles", "1"))
+        state["select_angles"] = value
+
+    def step_dr():
+        explain(state["teaching"], "dr")
+        state["dr"] = ask_float("请输入显示动态范围 dB", default=state.get("dr", "60"))
+
+    def step_aperture():
+        explain(state["teaching"], "dynamic_aperture")
+        state["dynamic_aperture"] = ask_yes_no("是否启用动态孔径", default=state.get("dynamic_aperture", True))
+        if state["dynamic_aperture"]:
+            explain(state["teaching"], "f_number")
+            state["f_number"] = ask_float("请输入 F-Number", default=state.get("f_number", "1.5"))
+        else:
+            state["f_number"] = 1.5
+
+    def step_tgc():
+        explain(state["teaching"], "tgc")
+        state["tgc"] = ask_yes_no("是否启用 TGC 深度补偿", default=state.get("tgc", True))
+        if state["tgc"]:
+            explain(state["teaching"], "tgc_alpha")
+            state["tgc_alpha"] = ask_float("请输入 TGC_ALPHA", default=state.get("tgc_alpha", "0.5"))
+        else:
+            state["tgc_alpha"] = 0.5
+
+    def step_window():
+        explain(state["teaching"], "window")
+        state["window"] = ask_choice("请选择孔径窗函数", [("rect", "rect：矩形窗，默认"), ("hann", "hann：更平滑"), ("tukey", "tukey：折中")], 0)
+
+    def step_interp():
+        explain(state["teaching"], "interp")
+        state["interp"] = ask_choice("请选择插值方式", [("cubic", "cubic：默认，较平滑"), ("linear", "linear：较快"), ("nearest", "nearest：最快但粗糙")], 0)
+
+    def step_gt_evaluate():
+        has_gt_default = inspect_h5(state["h5_path"])["gt"] == "有"
+        explain(state["teaching"], "gt")
+        state["has_gt"] = ask_yes_no("是否把 H5 里的 GT 加入对比图", default=state.get("has_gt", has_gt_default)) if has_gt_default else False
+        explain(state["teaching"], "evaluate")
+        state["evaluate"] = ask_yes_no("是否计算指标并生成指标图", default=state.get("evaluate", state["has_gt"]))
+
+    def step_keep_existing():
+        explain(state["teaching"], "keep_existing")
+        state["keep_existing"] = ask_yes_no("如果结果已存在，是否复用已有算法输出", default=state.get("keep_existing", False))
+
+    def step_output():
+        explain(state["teaching"], "output")
+        state["output_root"] = ask_text("请输入结果输出目录", default=state.get("output_root", "results/wizard"))
+
+    def step_confirm():
+        params = {
+            "select_angles": state["select_angles"],
+            "f_number": state["f_number"],
+            "dr": state["dr"],
+            "dynamic_aperture": state["dynamic_aperture"],
+            "tgc": state["tgc"],
+            "tgc_alpha": state["tgc_alpha"],
+            "window": state["window"],
+            "interp": state["interp"],
+            "has_gt": state["has_gt"],
+        }
+        config, scene_id = build_config(state["base_config"], state["h5_path"], state["sample_idx"], state["algorithms"], params)
+        config_path = make_temp_config_path(scene_id)
+        cmd = [
+            sys.executable,
+            str(ROOT / "run_one.py"),
+            "--config",
+            str(config_path),
+            "--scene",
+            scene_id,
+            "--algorithms",
+            ",".join(state["algorithms"]),
+            "--output_root",
+            state["output_root"],
+        ]
+        if not state["evaluate"]:
+            cmd.append("--no_evaluate")
+        if state["keep_existing"]:
+            cmd.append("--keep_existing")
+        state["scene_id"] = scene_id
+        state["config"] = config
+        state["config_path"] = config_path
+        state["cmd"] = cmd
+
+        print_title("即将执行的配置")
+        print(f"H5 文件: {relative_to_root(state['h5_path'])}")
+        print(f"样本编号: {state['sample_idx']}")
+        print(f"算法: {', '.join(state['algorithms'])}")
+        print(f"角度选择: {state['select_angles']}")
+        print(f"F-Number: {state['f_number']}")
+        print(f"动态范围: {state['dr']} dB")
+        print(f"动态孔径: {'开' if state['dynamic_aperture'] else '关'}")
+        print(f"TGC: {'开' if state['tgc'] else '关'}")
+        print(f"窗函数: {state['window']}")
+        print(f"插值: {state['interp']}")
+        print(f"计算指标: {'是' if state['evaluate'] else '否'}")
+        print(f"临时配置: {relative_to_root(config_path)}（确认执行后才写入）")
+        print("\n命令：")
+        print(" ".join(f'"{part}"' if " " in str(part) else str(part) for part in cmd))
+
+        explain(state["teaching"], "execute")
+        state["execute"] = ask_yes_no("确认按以上配置执行吗", default=True)
+
+    try:
+        run_steps([
+            step_teaching,
+            step_h5,
+            step_sample,
+            step_algorithms,
+            step_angles,
+            step_dr,
+            step_aperture,
+            step_tgc,
+            step_window,
+            step_interp,
+            step_gt_evaluate,
+            step_keep_existing,
+            step_output,
+            step_confirm,
+        ])
+    except ExitCommand:
+        print("\n已退出。")
+        return
+
+    if not state["execute"]:
+        print("\n已按你的选择只展示配置和命令，没有写入临时配置，也没有执行。")
+        return
+
+    print_title("开始执行")
+    write_config(state["config"], state["config_path"])
+    result = subprocess.run(state["cmd"], cwd=ROOT, text=True)
+    if result.returncode != 0:
+        raise SystemExit(f"流程执行失败，退出码：{result.returncode}")
+
+    scene_dir = Path(state["output_root"])
+    if not scene_dir.is_absolute():
+        scene_dir = ROOT / scene_dir
+    scene_dir = scene_dir / state["scene_id"]
+    print_title("完成")
+    print(f"结果目录: {scene_dir}")
+    print(f"对比图: {scene_dir / 'comparison.png'}")
+    print(f"运行参数: {scene_dir / 'run_params.json'}")
+    if state["evaluate"]:
+        print(f"指标目录: {scene_dir / 'metrics'}")
+
+
+if __name__ == "__main__":
+    main()
