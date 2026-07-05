@@ -5,6 +5,9 @@ from pathlib import Path
 import h5py
 import numpy as np
 import torch
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 
 BASE = "US/US_DATASET0000"
@@ -290,7 +293,39 @@ def pad_and_concat(items, key):
     return np.concatenate(padded, axis=0)
 
 
-def pack_dataset(scenes, output_path, source_root, row_block=24):
+def save_gt_images(items, image_dir):
+    image_dir.mkdir(parents=True, exist_ok=True)
+    for item in items:
+        gt = item["gt"]
+        if gt is None:
+            continue
+        img = np.squeeze(gt).astype(np.float32)
+        out_path = image_dir / f"{item['meta']['name']}_gt.png"
+
+        x_grid = np.asarray(item.get("x_grid", []), dtype=np.float32)
+        z_grid = np.asarray(item.get("z_grid", []), dtype=np.float32)
+        if x_grid.size >= 2 and z_grid.size >= 2:
+            lateral_mm = max(float((x_grid[-1] - x_grid[0]) * 1000.0), 1e-6)
+            depth_mm = max(float((z_grid[-1] - z_grid[0]) * 1000.0), 1e-6)
+            fig_w = 6.0
+            fig_h = fig_w * depth_mm / lateral_mm
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=200)
+            ax.imshow(
+                img,
+                cmap="gray",
+                vmin=0.0,
+                vmax=1.0,
+                extent=[x_grid[0] * 1000.0, x_grid[-1] * 1000.0, z_grid[-1] * 1000.0, z_grid[0] * 1000.0],
+                aspect="equal",
+            )
+            ax.axis("off")
+            fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+            fig.savefig(out_path, bbox_inches="tight", pad_inches=0)
+            plt.close(fig)
+        else:
+            plt.imsave(out_path, img, cmap="gray", vmin=0.0, vmax=1.0)
+
+def pack_dataset(scenes, output_path, source_root, row_block=24, save_gt_images_enabled=True):
     items = [process_scene(scene, source_root, row_block=row_block) for scene in scenes]
     base = items[0]
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -327,6 +362,9 @@ def pack_dataset(scenes, output_path, source_root, row_block=24):
             hf.create_dataset(dataset_name, data=np.array(values, dtype=object), dtype=string_dtype)
         hf.create_dataset("has_gt", data=np.array([item["gt"] is not None for item in items], dtype=np.bool_))
 
+    if save_gt_images_enabled:
+        save_gt_images(items, output_path.parent / "gt_images" / output_path.stem)
+
     print(f"Saved {output_path}")
 
 
@@ -336,6 +374,7 @@ def parse_args():
     parser.add_argument("--out_dir", default=str(project_root() / "data"))
     parser.add_argument("--only", default="all", help="all, simulation, experiments, in_vivo")
     parser.add_argument("--row_block", type=int, default=24, help="GPU按深度方向分块行数；<=0 表示整幅一次计算")
+    parser.add_argument("--no_save_gt_images", action="store_true", help="不额外输出GT预览图")
     return parser.parse_args()
 
 
@@ -351,10 +390,13 @@ def main():
     }
     for choice in choices:
         scenes, output_path = scene_map[choice]
-        pack_dataset(scenes, output_path, source_root, row_block=args.row_block)
+        pack_dataset(scenes, output_path, source_root, row_block=args.row_block, save_gt_images_enabled=not args.no_save_gt_images)
 
 
 if __name__ == "__main__":
     main()
+
+
+
 
 
