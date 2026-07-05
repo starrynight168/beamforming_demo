@@ -10,6 +10,8 @@ beamforming_demo/
   check_data.py
   run_one.py
   run_all.py
+  run_wizard_cn.py
+  run_ablation_cn.py
 
   data/
     pack_data.py
@@ -153,9 +155,9 @@ python run_all.py --only simulation_contrast_speckle,carotid_cross
 python run_one.py --scene carotid_cross --algorithms das,mv
 ```
 
-## 中文交互向导（全新）
+## 中文交互向导
 
-项目新增了两个面向中文用户的交互式脚本，方便进行可视化参数配置和单参数消融实验。
+项目提供了两个面向中文用户的交互式脚本，用于辅助参数配置和单参数消融实验。
 
 ### 1. 成像向导：`run_wizard_cn.py`
 
