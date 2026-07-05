@@ -34,6 +34,7 @@ parser.add_argument('--interp', type=str, default='cubic', choices=['linear', 'n
 # ---- ESBMV 子空间参数 ----
 parser.add_argument('--num_eig', type=int, default=0, help='信号子空间特征向量数量；<=0 时使用 eig_threshold 自动选择')
 parser.add_argument('--eig_threshold', type=float, default=0.05, help='自动选择时保留 lambda >= threshold * lambda_max 的特征向量')
+parser.add_argument('--force_gpu_eigh', action='store_true', default=False, help='强制在 GPU 上进行特征值分解')
 
 parser.add_argument('--h5_path', type=str, default='data/simulation.h5')
 parser.add_argument('--h5_sample_idx', type=int, default=0)
@@ -341,17 +342,32 @@ class RowDynamicMVBeamformerIQ:
                 w_mv = v / (denom + 1e-12)           # [W, L, 1]  归一化 MV 权重
 
                 # ========== ESBMV：将 MV 权重投影到信号子空间 ==========
-                try:
-                    eigvals, eigvecs = torch.linalg.eigh(R_dl)
-                except RuntimeError:
-                    # 如果不收敛（多见于全零或奇异矩阵），加入微小的对角加载保护重新求解
-                    R_safe = R_dl + 1e-6 * torch.eye(L, dtype=R_dl.dtype, device=R_dl.device).unsqueeze(0)
+                if L > 32 and not args.force_gpu_eigh:
+                    # 对于矩阵大小超过32的批处理，CUDA的 batch eigh 极慢，fallback 到 CPU 进行求解以提升速度
+                    R_cpu = R_dl.cpu()
                     try:
-                        eigvals, eigvecs = torch.linalg.eigh(R_safe)
+                        eigvals_cpu, eigvecs_cpu = torch.linalg.eigh(R_cpu)
                     except RuntimeError:
-                        # 极端情况下如果依然失败，则使用默认的单位阵退化处理
-                        eigvals = torch.ones((self.W, L), dtype=torch.float32, device=device)
-                        eigvecs = torch.eye(L, dtype=torch.complex64, device=device).unsqueeze(0).expand(self.W, -1, -1)
+                        R_safe = R_cpu + 1e-6 * torch.eye(L, dtype=R_cpu.dtype, device=R_cpu.device).unsqueeze(0)
+                        try:
+                            eigvals_cpu, eigvecs_cpu = torch.linalg.eigh(R_safe)
+                        except RuntimeError:
+                            eigvals_cpu = torch.ones((self.W, L), dtype=torch.float32, device=R_cpu.device)
+                            eigvecs_cpu = torch.eye(L, dtype=torch.complex64, device=R_cpu.device).unsqueeze(0).expand(self.W, -1, -1)
+                    eigvals = eigvals_cpu.to(device)
+                    eigvecs = eigvecs_cpu.to(device)
+                else:
+                    try:
+                        eigvals, eigvecs = torch.linalg.eigh(R_dl)
+                    except RuntimeError:
+                        # 如果不收敛（多见于全零或奇异矩阵），加入微小的对角加载保护重新求解
+                        R_safe = R_dl + 1e-6 * torch.eye(L, dtype=R_dl.dtype, device=R_dl.device).unsqueeze(0)
+                        try:
+                            eigvals, eigvecs = torch.linalg.eigh(R_safe)
+                        except RuntimeError:
+                            # 极端情况下如果依然失败，则使用默认的单位阵退化处理
+                            eigvals = torch.ones((self.W, L), dtype=torch.float32, device=device)
+                            eigvecs = torch.eye(L, dtype=torch.complex64, device=device).unsqueeze(0).expand(self.W, -1, -1)
 
                 eigvals = eigvals.flip(-1).real
                 eigvecs = eigvecs.flip(-1)
