@@ -341,7 +341,18 @@ class RowDynamicMVBeamformerIQ:
                 w_mv = v / (denom + 1e-12)           # [W, L, 1]  归一化 MV 权重
 
                 # ========== ESBMV：将 MV 权重投影到信号子空间 ==========
-                eigvals, eigvecs = torch.linalg.eigh(R_dl)
+                try:
+                    eigvals, eigvecs = torch.linalg.eigh(R_dl)
+                except RuntimeError:
+                    # 如果不收敛（多见于全零或奇异矩阵），加入微小的对角加载保护重新求解
+                    R_safe = R_dl + 1e-6 * torch.eye(L, dtype=R_dl.dtype, device=R_dl.device).unsqueeze(0)
+                    try:
+                        eigvals, eigvecs = torch.linalg.eigh(R_safe)
+                    except RuntimeError:
+                        # 极端情况下如果依然失败，则使用默认的单位阵退化处理
+                        eigvals = torch.ones((self.W, L), dtype=torch.float32, device=device)
+                        eigvecs = torch.eye(L, dtype=torch.complex64, device=device).unsqueeze(0).expand(self.W, -1, -1)
+
                 eigvals = eigvals.flip(-1).real
                 eigvecs = eigvecs.flip(-1)
                 if args.num_eig > 0:
