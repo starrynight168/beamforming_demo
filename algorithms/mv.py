@@ -240,12 +240,12 @@ class RowDynamicMVBeamformerIQ:
         sin_rx_global = torch.sin(phi_rx_global)
 
         for i in range(n_a):
-            Y_out = torch.zeros((self.H, self.W), dtype=torch.complex64, device=device)
             I_angle = I_t[i]
             Q_angle = Q_t[i]
 
             for hz in range(self.H):
-                sample_no_t0 = (self.Z[hz] * self.sc * cos_a[i] + self.X[hz] * self.sc * sin_a[i]).unsqueeze(-1) + self.drs[hz]
+                tx_row = self.Z[hz] * self.sc * cos_a[i] + self.X[hz] * self.sc * sin_a[i]
+                sample_no_t0 = tx_row.unsqueeze(-1) + self.drs[hz]
                 sample_center = sample_no_t0 - t_starts_t[i]
                 valid_mask_center = ((sample_center >= 0) & (sample_center < n_s - 1)).float().unsqueeze(-1)
                 sample = sample_center.unsqueeze(-1) + offsets_f
@@ -336,7 +336,7 @@ class RowDynamicMVBeamformerIQ:
                 y_row_rx = torch.matmul(w.mH, X_mean)             # [W, 1, 1]
 
                 # 3. 发射端相位旋转 (2D)
-                phi_tx = 2.0 * np.pi * fc_global * ((self.Z[hz] * self.sc * cos_a[i] + self.X[hz] * self.sc * sin_a[i]) / fs)
+                phi_tx = 2.0 * np.pi * fc_global * (tx_row / fs)
                 cos_tx = torch.cos(phi_tx).view(self.W, 1, 1)
                 sin_tx = torch.sin(phi_tx).view(self.W, 1, 1)
 
@@ -345,10 +345,9 @@ class RowDynamicMVBeamformerIQ:
                     y_row_rx.real * sin_tx + y_row_rx.imag * cos_tx
                 )
 
-                Y_out[hz] = y_row.squeeze(-1).squeeze(-1)
-
-            I_beam_sum += Y_out.real
-            Q_beam_sum += Y_out.imag
+                y_row_2d = y_row.squeeze(-1).squeeze(-1)
+                I_beam_sum[hz].add_(y_row_2d.real)
+                Q_beam_sum[hz].add_(y_row_2d.imag)
 
         I_out = (I_beam_sum / n_a).cpu().numpy()
         Q_out = (Q_beam_sum / n_a).cpu().numpy()
@@ -530,4 +529,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 

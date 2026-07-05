@@ -104,8 +104,8 @@ def read_gt(gt_path):
     norm = (np.clip(db, -DYNAMIC_RANGE, 0.0) + DYNAMIC_RANGE) / DYNAMIC_RANGE
     return norm[np.newaxis, np.newaxis, ...].astype(np.float32)
 
-def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, z_grid, interp='cubic'):
-    """Build an in-vivo multi-angle DAS reference with GPU tensor operations using the fast DAS method."""
+def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, z_grid, interp='cubic', row_block=24):
+    """Build an in-vivo multi-angle DAS reference with GPU tensor operations using row blocks."""
     n_angles, n_times, n_channels = i_data.shape
     t0 = np.asarray(t0, dtype=np.float32).reshape(-1)
     if t0.size == 1:
@@ -123,14 +123,8 @@ def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, 
             n_channels,
             device=device,
         )
-        receive_samples = torch.sqrt((x_mesh[..., None] - elements) ** 2 + z_mesh[..., None] ** 2) * sc
         transmit_z = z_mesh * sc
         transmit_x = x_mesh * sc
-
-        dx = x_mesh[..., None] - elements
-        half_aperture = z_mesh[..., None] / (2.0 * F_NUMBER)
-        aperture = (dx.abs() <= half_aperture).float()
-        weights = aperture / (aperture.sum(-1, keepdim=True) + 1e-9)
         ch = torch.arange(n_channels, device=device, dtype=torch.long).view(1, 1, -1)
 
         I_t = torch.from_numpy(i_data.astype(np.float32)).to(device)
@@ -139,88 +133,95 @@ def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, 
         sin_a = torch.from_numpy(np.sin(angles).astype(np.float32)).to(device)
         t_starts_t = torch.from_numpy(t0.astype(np.float32)).to(device) * fs
 
-        # 1. 预计算接收端相位旋转因子 (3D)
-        phi_rx = 2.0 * np.pi * fc * (receive_samples / fs)
-        cos_rx = torch.cos(phi_rx)
-        sin_rx = torch.sin(phi_rx)
-
         out_i = torch.zeros((len(z_grid), len(x_grid)), dtype=torch.float32, device=device)
         out_q = torch.zeros_like(out_i)
         max_sample = float(n_times - 2)
+        row_block = len(z_grid) if row_block <= 0 else max(1, row_block)
 
-        for i in range(n_angles):
-            sample_no_t0 = transmit_z * cos_a[i] + transmit_x * sin_a[i]
-            sample_no_t0 = sample_no_t0[..., None] + receive_samples
-            sample = sample_no_t0 - t_starts_t[i]
-            valid = (sample >= 0) & (sample < n_times - 1)
-            sample.clamp_(0.0, max_sample)
+        for z0 in range(0, len(z_grid), row_block):
+            z1 = min(z0 + row_block, len(z_grid))
+            x_b = x_mesh[z0:z1]
+            z_b = z_mesh[z0:z1]
+            tx_z = transmit_z[z0:z1]
+            tx_x = transmit_x[z0:z1]
 
-            if interp == 'nearest':
-                idx = sample.round().long().clamp(0, n_times - 1)
-                I_center = I_t[i][idx, ch]
-                Q_center = Q_t[i][idx, ch]
-            elif interp == 'cubic':
-                idx0 = sample.floor().long()
-                frac = sample - idx0.float()
-                frac2 = frac * frac
-                frac3 = frac2 * frac
-                c_m1 = -0.5 * frac3 + frac2 - 0.5 * frac
-                c_0 = 1.5 * frac3 - 2.5 * frac2 + 1.0
-                c_1 = -1.5 * frac3 + 2.0 * frac2 + 0.5 * frac
-                c_2 = 0.5 * frac3 - 0.5 * frac2
-                idx_m1 = torch.clamp(idx0 - 1, 0, n_times - 1)
-                idx_0 = torch.clamp(idx0, 0, n_times - 1)
-                idx_1 = torch.clamp(idx0 + 1, 0, n_times - 1)
-                idx_2 = torch.clamp(idx0 + 2, 0, n_times - 1)
+            receive_samples = torch.sqrt((x_b[..., None] - elements) ** 2 + z_b[..., None] ** 2) * sc
+            dx = x_b[..., None] - elements
+            half_aperture = z_b[..., None] / (2.0 * F_NUMBER)
+            aperture = (dx.abs() <= half_aperture).float()
+            weights = aperture / (aperture.sum(-1, keepdim=True) + 1e-9)
+
+            phi_rx = 2.0 * np.pi * fc * (receive_samples / fs)
+            cos_rx = torch.cos(phi_rx)
+            sin_rx = torch.sin(phi_rx)
+            block_i = torch.zeros((z1 - z0, len(x_grid)), dtype=torch.float32, device=device)
+            block_q = torch.zeros_like(block_i)
+
+            for i in range(n_angles):
+                tx_samples = tx_z * cos_a[i] + tx_x * sin_a[i]
+                sample = tx_samples[..., None] + receive_samples - t_starts_t[i]
+                valid = (sample >= 0) & (sample < n_times - 1)
+                sample.clamp_(0.0, max_sample)
                 I_angle = I_t[i]
                 Q_angle = Q_t[i]
-                I_center = (
-                    I_angle[idx_m1, ch] * c_m1
-                    + I_angle[idx_0, ch] * c_0
-                    + I_angle[idx_1, ch] * c_1
-                    + I_angle[idx_2, ch] * c_2
-                )
-                Q_center = (
-                    Q_angle[idx_m1, ch] * c_m1
-                    + Q_angle[idx_0, ch] * c_0
-                    + Q_angle[idx_1, ch] * c_1
-                    + Q_angle[idx_2, ch] * c_2
-                )
-            else: # linear
-                idx0 = sample.floor().long()
-                frac = sample - idx0.float()
-                I_angle = I_t[i]
-                Q_angle = Q_t[i]
-                I_center = I_angle[idx0, ch] * (1.0 - frac) + I_angle[idx0 + 1, ch] * frac
-                Q_center = Q_angle[idx0, ch] * (1.0 - frac) + Q_angle[idx0 + 1, ch] * frac
 
-            valid_w = valid.float() * weights
+                if interp == 'nearest':
+                    idx = sample.round().long().clamp(0, n_times - 1)
+                    I_center = I_angle[idx, ch]
+                    Q_center = Q_angle[idx, ch]
+                elif interp == 'cubic':
+                    idx0 = sample.floor().long()
+                    frac = sample - idx0.float()
+                    frac2 = frac * frac
+                    frac3 = frac2 * frac
+                    c_m1 = -0.5 * frac3 + frac2 - 0.5 * frac
+                    c_0 = 1.5 * frac3 - 2.5 * frac2 + 1.0
+                    c_1 = -1.5 * frac3 + 2.0 * frac2 + 0.5 * frac
+                    c_2 = 0.5 * frac3 - 0.5 * frac2
+                    idx_m1 = torch.clamp(idx0 - 1, 0, n_times - 1)
+                    idx_0 = torch.clamp(idx0, 0, n_times - 1)
+                    idx_1 = torch.clamp(idx0 + 1, 0, n_times - 1)
+                    idx_2 = torch.clamp(idx0 + 2, 0, n_times - 1)
+                    I_center = (
+                        I_angle[idx_m1, ch] * c_m1
+                        + I_angle[idx_0, ch] * c_0
+                        + I_angle[idx_1, ch] * c_1
+                        + I_angle[idx_2, ch] * c_2
+                    )
+                    Q_center = (
+                        Q_angle[idx_m1, ch] * c_m1
+                        + Q_angle[idx_0, ch] * c_0
+                        + Q_angle[idx_1, ch] * c_1
+                        + Q_angle[idx_2, ch] * c_2
+                    )
+                else: # linear
+                    idx0 = sample.floor().long()
+                    frac = sample - idx0.float()
+                    I_center = I_angle[idx0, ch] * (1.0 - frac) + I_angle[idx0 + 1, ch] * frac
+                    Q_center = Q_angle[idx0, ch] * (1.0 - frac) + Q_angle[idx0 + 1, ch] * frac
 
-            # 2. 接收端相位旋转并求和 (3D -> 2D)
-            I_rx = I_center * cos_rx - Q_center * sin_rx
-            Q_rx = I_center * sin_rx + Q_center * cos_rx
-            I_sum = (I_rx * valid_w).sum(dim=-1)
-            Q_sum = (Q_rx * valid_w).sum(dim=-1)
+                valid_w = valid.float() * weights
+                I_rx = I_center * cos_rx - Q_center * sin_rx
+                Q_rx = I_center * sin_rx + Q_center * cos_rx
+                I_sum = (I_rx * valid_w).sum(dim=-1)
+                Q_sum = (Q_rx * valid_w).sum(dim=-1)
 
-            # 3. 发射端相位旋转 (2D)
-            phi_tx = 2.0 * np.pi * fc * ((transmit_z * cos_a[i] + transmit_x * sin_a[i]) / fs)
-            cos_tx = torch.cos(phi_tx)
-            sin_tx = torch.sin(phi_tx)
-            I_rot = I_sum * cos_tx - Q_sum * sin_tx
-            Q_rot = I_sum * sin_tx + Q_sum * cos_tx
+                phi_tx = 2.0 * np.pi * fc * (tx_samples / fs)
+                cos_tx = torch.cos(phi_tx)
+                sin_tx = torch.sin(phi_tx)
+                block_i.add_(I_sum * cos_tx - Q_sum * sin_tx)
+                block_q.add_(I_sum * sin_tx + Q_sum * cos_tx)
 
-            out_i.add_(I_rot)
-            out_q.add_(Q_rot)
+            out_i[z0:z1] = block_i / n_angles
+            out_q[z0:z1] = block_q / n_angles
 
-        out_i.div_(n_angles)
-        out_q.div_(n_angles)
         tgc = 10.0 ** (TGC_ALPHA * (fc / 1e6) * (z_t * 100.0) * 2.0 / 20.0)
         env = torch.sqrt(out_i * out_i + out_q * out_q) * tgc[:, None]
         env = env / (env.max() + 1e-12)
         db = 20.0 * torch.log10(torch.clamp(env, min=1e-12))
         norm = (torch.clamp(db, -DYNAMIC_RANGE, 0.0) + DYNAMIC_RANGE) / DYNAMIC_RANGE
         return norm.cpu().numpy()[np.newaxis, np.newaxis, ...].astype(np.float32)
-def process_scene(scene, source_root):
+def process_scene(scene, source_root, row_block=24):
     print(f"Processing {scene['name']}")
     iq_path = source_root / scene["iq"]
     scan_path = source_root / scene["scan"]
@@ -256,7 +257,7 @@ def process_scene(scene, source_root):
         z_grid = np.array(f[f"{BASE}/z_axis"]).flatten().astype(np.float32)
 
     if scene["gt"] == "generated:multi_angle_das":
-        gt = das_reference_from_iq(i_trans, q_trans, fs, c, fc, pitch, t0, angles, x_grid, z_grid)
+        gt = das_reference_from_iq(i_trans, q_trans, fs, c, fc, pitch, t0, angles, x_grid, z_grid, row_block=row_block)
     else:
         gt = read_gt(gt_path) if gt_path else None
 
@@ -289,8 +290,8 @@ def pad_and_concat(items, key):
     return np.concatenate(padded, axis=0)
 
 
-def pack_dataset(scenes, output_path, source_root):
-    items = [process_scene(scene, source_root) for scene in scenes]
+def pack_dataset(scenes, output_path, source_root, row_block=24):
+    items = [process_scene(scene, source_root, row_block=row_block) for scene in scenes]
     base = items[0]
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -334,6 +335,7 @@ def parse_args():
     parser.add_argument("--source_root", default=str(default_source_root()))
     parser.add_argument("--out_dir", default=str(project_root() / "data"))
     parser.add_argument("--only", default="all", help="all, simulation, experiments, in_vivo")
+    parser.add_argument("--row_block", type=int, default=24, help="GPU按深度方向分块行数；<=0 表示整幅一次计算")
     return parser.parse_args()
 
 
@@ -349,9 +351,10 @@ def main():
     }
     for choice in choices:
         scenes, output_path = scene_map[choice]
-        pack_dataset(scenes, output_path, source_root)
+        pack_dataset(scenes, output_path, source_root, row_block=args.row_block)
 
 
 if __name__ == "__main__":
     main()
+
 

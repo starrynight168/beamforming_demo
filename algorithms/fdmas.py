@@ -27,6 +27,7 @@ parser.add_argument('--h5_path', type=str, default='data/simulation.h5', help='H
 parser.add_argument('--h5_sample_idx', type=int, default=0, help='H5 样本索引')
 parser.add_argument('--output_dir', type=str, default='results', help='输出目录')
 parser.add_argument('--save_gt', action='store_true', default=False, help='保存GT对比图')
+parser.add_argument('--row_block', type=int, default=24, help='GPU按深度方向分块行数；<=0 表示整幅一次计算')
 args = parser.parse_args()
 
 METHOD_NAME = 'fdmas'
@@ -204,85 +205,84 @@ class FDMASBeamformerIQ:
             t_starts_arr = np.repeat(t_starts_arr, n_a)
         t_starts_t = torch.from_numpy(t_starts_arr[:n_a]).to(device) * fs
 
-        beam_sum = torch.zeros((self.H, self.W), dtype=torch.complex64, device=device)
-        tx_z = self.Z * self.sc
-        tx_x = self.X * self.sc
-        weights = self.window
+        beam_out = torch.zeros((self.H, self.W), dtype=torch.complex64, device=device)
         ch = self.ch
+        row_block = self.H if args.row_block <= 0 else max(1, args.row_block)
 
-        # 1. 预计算接收端相位旋转因子 (在所有角度循环中完全相同)
-        phi_rx = 2.0 * np.pi * fc_global * (self.drs / fs)
-        cos_rx = torch.cos(phi_rx)
-        sin_rx = torch.sin(phi_rx)
+        for z0 in range(0, self.H, row_block):
+            z1 = min(z0 + row_block, self.H)
+            Xb = self.X[z0:z1]
+            Zb = self.Z[z0:z1]
+            drs_b = self.drs[z0:z1]
+            weights_b = self.window[z0:z1]
+            tx_z = Zb * self.sc
+            tx_x = Xb * self.sc
 
-        for i in range(n_a):
-            sample_no_t0 = (tx_z * cos_a[i] + tx_x * sin_a[i]).unsqueeze(-1) + self.drs
-            sample = sample_no_t0 - t_starts_t[i]
-            valid = (sample >= 0) & (sample < n_s - 1)
-            sample.clamp_(0.0, max_sample)
+            block_sum = torch.zeros((z1 - z0, self.W), dtype=torch.complex64, device=device)
 
-            if args.interp == 'nearest':
-                idx = sample.round().long().clamp(0, n_s - 1)
-                I_center = I_t[i][idx, ch]
-                Q_center = Q_t[i][idx, ch]
-            elif args.interp == 'cubic':
-                idx0 = sample.floor().long()
-                frac = sample - idx0.float()
-                frac2 = frac * frac
-                frac3 = frac2 * frac
-                c_m1 = -0.5 * frac3 + frac2 - 0.5 * frac
-                c_0 = 1.5 * frac3 - 2.5 * frac2 + 1.0
-                c_1 = -1.5 * frac3 + 2.0 * frac2 + 0.5 * frac
-                c_2 = 0.5 * frac3 - 0.5 * frac2
-                idx_m1 = torch.clamp(idx0 - 1, 0, n_s - 1)
-                idx_0 = torch.clamp(idx0, 0, n_s - 1)
-                idx_1 = torch.clamp(idx0 + 1, 0, n_s - 1)
-                idx_2 = torch.clamp(idx0 + 2, 0, n_s - 1)
+            phi_rx = 2.0 * np.pi * fc_global * (drs_b / fs)
+            cos_rx = torch.cos(phi_rx)
+            sin_rx = torch.sin(phi_rx)
+
+            for i in range(n_a):
+                tx_samples = tx_z * cos_a[i] + tx_x * sin_a[i]
+                sample = tx_samples.unsqueeze(-1) + drs_b - t_starts_t[i]
+                valid = (sample >= 0) & (sample < n_s - 1)
+                sample.clamp_(0.0, max_sample)
                 I_angle = I_t[i]
                 Q_angle = Q_t[i]
-                I_center = (
-                    I_angle[idx_m1, ch] * c_m1
-                    + I_angle[idx_0, ch] * c_0
-                    + I_angle[idx_1, ch] * c_1
-                    + I_angle[idx_2, ch] * c_2
-                )
-                Q_center = (
-                    Q_angle[idx_m1, ch] * c_m1
-                    + Q_angle[idx_0, ch] * c_0
-                    + Q_angle[idx_1, ch] * c_1
-                    + Q_angle[idx_2, ch] * c_2
-                )
-            else:
-                idx0 = sample.floor().long()
-                frac = sample - idx0.float()
-                I_angle = I_t[i]
-                Q_angle = Q_t[i]
-                I_center = I_angle[idx0, ch] * (1.0 - frac) + I_angle[idx0 + 1, ch] * frac
-                Q_center = Q_angle[idx0, ch] * (1.0 - frac) + Q_angle[idx0 + 1, ch] * frac
 
-            valid_w = valid.float() * weights
+                if args.interp == 'nearest':
+                    idx = sample.round().long().clamp(0, n_s - 1)
+                    I_center = I_angle[idx, ch]
+                    Q_center = Q_angle[idx, ch]
+                elif args.interp == 'cubic':
+                    idx0 = sample.floor().long()
+                    frac = sample - idx0.float()
+                    frac2 = frac * frac
+                    frac3 = frac2 * frac
+                    c_m1 = -0.5 * frac3 + frac2 - 0.5 * frac
+                    c_0 = 1.5 * frac3 - 2.5 * frac2 + 1.0
+                    c_1 = -1.5 * frac3 + 2.0 * frac2 + 0.5 * frac
+                    c_2 = 0.5 * frac3 - 0.5 * frac2
+                    idx_m1 = torch.clamp(idx0 - 1, 0, n_s - 1)
+                    idx_0 = torch.clamp(idx0, 0, n_s - 1)
+                    idx_1 = torch.clamp(idx0 + 1, 0, n_s - 1)
+                    idx_2 = torch.clamp(idx0 + 2, 0, n_s - 1)
+                    I_center = (
+                        I_angle[idx_m1, ch] * c_m1
+                        + I_angle[idx_0, ch] * c_0
+                        + I_angle[idx_1, ch] * c_1
+                        + I_angle[idx_2, ch] * c_2
+                    )
+                    Q_center = (
+                        Q_angle[idx_m1, ch] * c_m1
+                        + Q_angle[idx_0, ch] * c_0
+                        + Q_angle[idx_1, ch] * c_1
+                        + Q_angle[idx_2, ch] * c_2
+                    )
+                else:
+                    idx0 = sample.floor().long()
+                    frac = sample - idx0.float()
+                    I_center = I_angle[idx0, ch] * (1.0 - frac) + I_angle[idx0 + 1, ch] * frac
+                    Q_center = Q_angle[idx0, ch] * (1.0 - frac) + Q_angle[idx0 + 1, ch] * frac
 
-            # 2. 接收端相位旋转并求和 (3D)
-            I_rx = I_center * cos_rx - Q_center * sin_rx
-            Q_rx = I_center * sin_rx + Q_center * cos_rx
+                valid_w = valid.float() * weights_b
+                I_rx = I_center * cos_rx - Q_center * sin_rx
+                Q_rx = I_center * sin_rx + Q_center * cos_rx
+                pair_sum = self._complex_fdmas(I_rx, Q_rx, valid_w)
 
-            # 3. 计算 F-DMAS (得到 2D 复数张量)
-            pair_sum = self._complex_fdmas(I_rx, Q_rx, valid_w)
+                phi_tx = 2.0 * np.pi * fc_global * (tx_samples / fs)
+                cos_tx = torch.cos(2.0 * phi_tx)
+                sin_tx = torch.sin(2.0 * phi_tx)
+                block_sum.add_(torch.complex(
+                    pair_sum.real * cos_tx - pair_sum.imag * sin_tx,
+                    pair_sum.real * sin_tx + pair_sum.imag * cos_tx,
+                ))
 
-            # 4. 发射端相位旋转 (2D)
-            phi_tx = 2.0 * np.pi * fc_global * ((tx_z * cos_a[i] + tx_x * sin_a[i]) / fs)
-            # 由于 F-DMAS 为双信号相乘，其相位旋转角为 2 * phi_tx
-            cos_tx = torch.cos(2.0 * phi_tx)
-            sin_tx = torch.sin(2.0 * phi_tx)
+            beam_out[z0:z1] = block_sum / n_a
 
-            I_rot = pair_sum.real * cos_tx - pair_sum.imag * sin_tx
-            Q_rot = pair_sum.real * sin_tx + pair_sum.imag * cos_tx
-
-            beam_sum.add_(torch.complex(I_rot, Q_rot))
-
-        beam = beam_sum / n_a
-        return beam.real.cpu().numpy(), beam.imag.cpu().numpy()
-
+        return beam_out.real.cpu().numpy(), beam_out.imag.cpu().numpy()
 
 # ================= 保存函数 =================
 def save_comparison_figure(fdmas_db, gt_norm, extent_mm, out_path, title_str, dr=60.0):
@@ -435,3 +435,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
