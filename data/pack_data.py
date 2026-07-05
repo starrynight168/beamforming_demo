@@ -90,12 +90,11 @@ def default_source_root():
     return project_root() / "PICMUS"
 
 
-def complex_standardization(i_data, q_data):
+def complex_rms_normalization(i_data, q_data):
     i_data = i_data.astype(np.float32)
     q_data = q_data.astype(np.float32)
-    envelope = np.sqrt(i_data ** 2 + q_data ** 2)
-    scale = np.std(envelope) + 1e-12
-    return i_data / scale, q_data / scale
+    rms = np.sqrt(np.mean(i_data ** 2 + q_data ** 2) + 1e-12)
+    return i_data / rms, q_data / rms, rms
 
 
 def read_gt(gt_path):
@@ -103,10 +102,11 @@ def read_gt(gt_path):
         real = f[f"{BASE}/data/real"][:][-1].T
         imag = f[f"{BASE}/data/imag"][:][-1].T
     env_sq = real ** 2 + imag ** 2
-    env_sq /= np.max(env_sq) + 1e-24
+    safe_max = float(np.sqrt(np.max(env_sq)) + 1e-12)
+    env_sq /= safe_max ** 2 + 1e-24
     db = 10.0 * np.log10(env_sq + 1e-24)
     norm = (np.clip(db, -DYNAMIC_RANGE, 0.0) + DYNAMIC_RANGE) / DYNAMIC_RANGE
-    return norm[np.newaxis, np.newaxis, ...].astype(np.float32)
+    return norm[np.newaxis, np.newaxis, ...].astype(np.float32), safe_max
 
 def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, z_grid, interp='cubic', row_block=24):
     """Build an in-vivo multi-angle DAS reference with GPU tensor operations using row blocks."""
@@ -221,10 +221,11 @@ def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, 
 
         tgc = 10.0 ** (TGC_ALPHA * (fc / 1e6) * (z_t * 100.0) * 2.0 / 20.0)
         env = torch.sqrt(out_i * out_i + out_q * out_q) * tgc[:, None]
-        env = env / (env.max() + 1e-12)
+        safe_max = env.max()
+        env = env / (safe_max + 1e-12)
         db = 20.0 * torch.log10(torch.clamp(env, min=1e-12))
         norm = (torch.clamp(db, -DYNAMIC_RANGE, 0.0) + DYNAMIC_RANGE) / DYNAMIC_RANGE
-        return norm.cpu().numpy()[np.newaxis, np.newaxis, ...].astype(np.float32)
+        return norm.cpu().numpy()[np.newaxis, np.newaxis, ...].astype(np.float32), float(safe_max.cpu())
 def process_scene(scene, source_root, row_block=24):
     print(f"Processing {scene['name']}")
     iq_path = source_root / scene["iq"]
@@ -234,7 +235,9 @@ def process_scene(scene, source_root, row_block=24):
     with h5py.File(iq_path, "r") as f:
         i_data = f[f"{BASE}/data/real"][:]
         q_data = f[f"{BASE}/data/imag"][:]
-        i_norm, q_norm = complex_standardization(i_data, q_data)
+        i_norm, q_norm, rms_ref = complex_rms_normalization(i_data, q_data)
+        i_raw_trans = np.transpose(i_data.astype(np.float32), (0, 2, 1))
+        q_raw_trans = np.transpose(q_data.astype(np.float32), (0, 2, 1))
         i_trans = np.transpose(i_norm, (0, 2, 1)).astype(np.float32)
         q_trans = np.transpose(q_norm, (0, 2, 1)).astype(np.float32)
 
@@ -261,9 +264,11 @@ def process_scene(scene, source_root, row_block=24):
         z_grid = np.array(f[f"{BASE}/z_axis"]).flatten().astype(np.float32)
 
     if scene["gt"] == "generated:multi_angle_das":
-        gt = das_reference_from_iq(i_trans, q_trans, fs, c, fc, pitch, t0, angles, x_grid, z_grid, row_block=row_block)
+        gt, safe_max = das_reference_from_iq(i_raw_trans, q_raw_trans, fs, c, fc, pitch, t0, angles, x_grid, z_grid, row_block=row_block)
     else:
-        gt = read_gt(gt_path) if gt_path else None
+        gt, safe_max = read_gt(gt_path) if gt_path else (None, np.nan)
+
+    norm_ref = safe_max / (float(rms_ref) + 1e-12) if gt is not None else np.nan
 
     return {
         "I": i_trans[np.newaxis, ...],
@@ -278,6 +283,9 @@ def process_scene(scene, source_root, row_block=24):
         "z_grid": z_grid,
         "x_grid": x_grid,
         "angles": angles,
+        "rms_ref": rms_ref,
+        "norm_ref": norm_ref,
+        "gt_safe_max": safe_max,
         "meta": scene,
     }
 
@@ -354,6 +362,10 @@ def pack_dataset(scenes, output_path, source_root, row_block=24, save_gt_images_
         if all(item["gt"] is not None for item in items):
             hf.create_dataset("all_envdb_norm", data=np.concatenate([item["gt"] for item in items], axis=0),
                               compression="gzip", compression_opts=4)
+
+        hf.create_dataset("all_rms_ref", data=np.array([item["rms_ref"] for item in items], dtype=np.float32))
+        hf.create_dataset("all_norm_ref", data=np.array([item["norm_ref"] for item in items], dtype=np.float32))
+        hf.create_dataset("gt_safe_max", data=np.array([item["gt_safe_max"] for item in items], dtype=np.float32))
 
         max_a = max(item["t0"].shape[1] for item in items)
         t0_padded = []
