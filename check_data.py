@@ -6,7 +6,7 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parent
-PICMUS = ROOT / "PICMUS"
+PICMUS = ROOT / "data" / "PICMUS"
 
 PACKED_FILES = [
     ("simulation", ROOT / "data" / "simulation.h5", True, 2),

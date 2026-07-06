@@ -87,7 +87,7 @@ def project_root():
 
 
 def default_source_root():
-    return project_root() / "PICMUS"
+    return project_root() / "data" / "PICMUS"
 
 
 def complex_rms_normalization(i_data, q_data):

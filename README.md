@@ -57,9 +57,9 @@ pip install -r requirements.txt
 **重要**：原始数据 `PICMUS` 文件夹因大小限制未包含在代码仓库中，请从以下链接下载压缩包：
 - `PICMUS` 数据压缩包：https://drive.google.com/file/d/1CQxjvpwGHDyzwHSJQux-mkXLl97mul-f/view?usp=drive_link
 
-下载后，将压缩包解压，并用其中的 `PICMUS` 文件夹**替换**项目根目录下的 `PICMUS/` 文件夹（如果已存在）。确保解压后的路径结构（如 `PICMUS/simulation/...`）与 `data/pack_data.py` 脚本中的预期路径一致。
+下载后，将压缩包解压，并把其中的 `PICMUS` 文件夹放到项目的 `data/PICMUS/` 下。确保解压后的路径结构类似 `data/PICMUS/database/...`，与 `data/pack_data.py` 脚本中的预期路径一致。
 
-如果 `data/*.h5` 已存在，可以直接运行。需要重新从 `PICMUS/` 打包算法输入数据时：
+如果 `data/*.h5` 已存在，可以直接运行。需要重新从 `data/PICMUS/` 打包算法输入数据时：
 
 ```bash
 python data/pack_data.py

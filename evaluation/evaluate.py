@@ -27,7 +27,7 @@ DEFAULT_METHODS = ["DAS", "MV", "ESBMV", "F-DMAS"]
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, os.pardir))
 SOURCE_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, os.pardir))
-PICMUS_ROOT = os.path.join(PROJECT_ROOT, "PICMUS")
+PICMUS_ROOT = os.path.join(PROJECT_ROOT, "data", "PICMUS")
 
 
 def parse_args():
