@@ -4,6 +4,7 @@ import math
 import subprocess
 import sys
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -281,7 +282,18 @@ def run_one(config_path, scene_id, output_root, evaluate, keep_existing):
         cmd.append("--no_evaluate")
     if keep_existing:
         cmd.append("--keep_existing")
-    return subprocess.run(cmd, cwd=ROOT, text=True).returncode, cmd
+
+    scene_dir = Path(output_root) / scene_id
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    command_path = scene_dir / "run_command.txt"
+    log_path = scene_dir / "run.log"
+    command_text = " ".join(("\"" + str(part) + "\"") if " " in str(part) else str(part) for part in cmd)
+    command_path.write_text(command_text + "\n", encoding="utf-8")
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        log_file.write(command_text + "\n\n")
+        log_file.flush()
+        result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=log_file, stderr=subprocess.STDOUT)
+    return result.returncode, cmd
 
 
 def metric_method_names(config, algorithm):
@@ -449,7 +461,9 @@ def main():
         state["output_root"] = output_root
 
     def step_confirm():
-        run_tag = f"ablation_{state['algorithm']}_{state['param_name']}"
+        h5_tag = safe_name(Path(state["h5_path"]).stem)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_tag = f"ablation_{state['algorithm']}_{state['param_name']}_{h5_tag}_sample{state['sample_idx']}_{timestamp}"
         state["run_tag"] = run_tag
         state["run_root"] = state["output_root"] / run_tag
         state["config_dir"] = state["run_root"] / "configs"

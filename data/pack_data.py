@@ -235,7 +235,7 @@ def process_scene(scene, source_root, row_block=24):
     with h5py.File(iq_path, "r") as f:
         i_data = f[f"{BASE}/data/real"][:]
         q_data = f[f"{BASE}/data/imag"][:]
-        i_norm, q_norm, rms_ref = complex_rms_normalization(i_data, q_data)
+        i_norm, q_norm, scale_ref = complex_rms_normalization(i_data, q_data)
         i_raw_trans = np.transpose(i_data.astype(np.float32), (0, 2, 1))
         q_raw_trans = np.transpose(q_data.astype(np.float32), (0, 2, 1))
         i_trans = np.transpose(i_norm, (0, 2, 1)).astype(np.float32)
@@ -268,7 +268,7 @@ def process_scene(scene, source_root, row_block=24):
     else:
         gt, safe_max = read_gt(gt_path) if gt_path else (None, np.nan)
 
-    norm_ref = safe_max / (float(rms_ref) + 1e-12) if gt is not None else np.nan
+    norm_ref = safe_max / (float(scale_ref) + 1e-12) if gt is not None else np.nan
 
     return {
         "I": i_trans[np.newaxis, ...],
@@ -283,7 +283,7 @@ def process_scene(scene, source_root, row_block=24):
         "z_grid": z_grid,
         "x_grid": x_grid,
         "angles": angles,
-        "rms_ref": rms_ref,
+        "scale_ref": scale_ref,
         "norm_ref": norm_ref,
         "gt_safe_max": safe_max,
         "meta": scene,
@@ -363,7 +363,7 @@ def pack_dataset(scenes, output_path, source_root, row_block=24, save_gt_images_
             hf.create_dataset("all_envdb_norm", data=np.concatenate([item["gt"] for item in items], axis=0),
                               compression="gzip", compression_opts=4)
 
-        hf.create_dataset("all_rms_ref", data=np.array([item["rms_ref"] for item in items], dtype=np.float32))
+        hf.create_dataset("all_scale_ref", data=np.array([item["scale_ref"] for item in items], dtype=np.float32))
         hf.create_dataset("all_norm_ref", data=np.array([item["norm_ref"] for item in items], dtype=np.float32))
         hf.create_dataset("gt_safe_max", data=np.array([item["gt_safe_max"] for item in items], dtype=np.float32))
 

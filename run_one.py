@@ -164,6 +164,32 @@ def save_comparison(images, titles, extent_mm, output_path, dr):
     plt.close(fig)
 
 
+def can_reuse_existing(scene_dir, config, scene, method, args):
+    params_path = scene_dir / "run_params.json"
+    if not params_path.exists():
+        return False, "缺少 run_params.json，无法确认旧结果参数"
+    try:
+        with open(params_path, "r", encoding="utf-8") as f:
+            previous = json.load(f)
+    except Exception as exc:
+        return False, f"无法读取旧 run_params.json: {exc}"
+
+    expected = {
+        "scene": scene,
+        "params": config.get("params", {}) or {},
+        "method_params": algorithm_params(config, method),
+        "extra_algorithm_args": args.extra_algorithm_args,
+    }
+    actual = {
+        "scene": previous.get("scene"),
+        "params": previous.get("params", {}) or {},
+        "method_params": (previous.get("algorithm_params", {}) or {}).get(method, {}) or {},
+        "extra_algorithm_args": previous.get("extra_algorithm_args", []),
+    }
+    if actual != expected:
+        return False, "旧结果参数与当前配置不一致"
+    return True, "参数一致"
+
 def run_evaluation(args, config, scene, scene_dir, comparison_path, methods):
     params = config.get("params", {})
     labels = [algorithm_label(config, method) for method in methods]
@@ -207,8 +233,11 @@ def main():
     for method in methods:
         expected = scene_dir / method / f"{method}.npy"
         if args.keep_existing and expected.exists():
-            print(f"Reuse {expected}")
-            continue
+            reusable, reason = can_reuse_existing(scene_dir, config, scene, method, args)
+            if reusable:
+                print(f"Reuse {expected}")
+                continue
+            print(f"Ignore existing {expected}: {reason}")
         cmd = build_algorithm_cmd(args, config, scene, method, scene_dir)
         print("\n" + "=" * 70)
         print(f"Running {method}: {' '.join(cmd)}")

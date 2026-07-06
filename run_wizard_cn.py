@@ -173,9 +173,11 @@ def validate_select_angles(value):
     if text in ("center", "all"):
         return text
     parts = [part.strip() for part in text.replace("，", ",").split(",") if part.strip()]
-    if parts and all(part.isdigit() and int(part) > 0 for part in parts):
+    if len(parts) == 1 and parts[0].isdigit() and int(parts[0]) > 0:
+        return parts[0]
+    if len(parts) > 1 and all(part.isdigit() for part in parts):
         return ",".join(parts)
-    raise ValueError("角度只能填 center、all、正整数角度数，或整数索引列表，例如 1、3、11、0,37,74。")
+    raise ValueError("角度只能填 center、all、正整数角度数，或 0 基整数索引列表，例如 1、3、11、0,37,74。")
 
 
 def ask_select_angles(default="1"):
