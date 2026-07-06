@@ -95,15 +95,23 @@ def load_from_h5(h5_path, sample_idx=0):
 
 def parse_selected_angles(angles, select_str):
     select_str = select_str.strip().lower()
-    if select_str == 'center':
+    if select_str == 'all':
+        return np.arange(len(angles)), angles
+    elif select_str == 'center':
         ci = int(np.argmin(np.abs(angles)))
         return np.array([ci]), np.array([angles[ci]])
+    elif select_str.isdigit():
+        K = max(1, min(int(select_str), len(angles)))
+        if K == 1:
+            ci = int(np.argmin(np.abs(angles)))
+            return np.array([ci]), np.array([angles[ci]])
+        sorted_indices = np.argsort(angles)
+        sel = np.linspace(0, len(angles) - 1, K, dtype=int)
+        indices = sorted_indices[sel]
+        return indices, angles[indices]
     else:
         indices = [int(x) for x in select_str.split(',')]
         indices = [i for i in indices if 0 <= i < len(angles)]
-        if len(indices) == 0:
-            ci = int(np.argmin(np.abs(angles)))
-            return np.array([ci]), np.array([angles[ci]])
         return np.array(indices), angles[indices]
 
 
