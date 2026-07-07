@@ -21,6 +21,7 @@ from run_wizard_cn import (
     ALGORITHMS,
     ExitCommand,
     ROOT,
+    append_run_log,
     ask_choice,
     ask_text,
     ask_yes_no,
@@ -455,17 +456,19 @@ def main():
         state["keep_existing"] = ask_yes_no("如果某组结果已存在，是否复用", default=state.get("keep_existing", False))
 
     def step_output():
-        output_root = Path(ask_text("请输入消融结果根目录", default=state.get("output_root", "results/ablation")))
+        default_output = state.get("output_root")
+        if default_output is None:
+            h5_tag = Path(state["h5_path"]).stem
+            default_output = Path("results") / f"{h5_tag}_sample{state['sample_idx']}"
+        output_root = Path(ask_text("请输入消融结果根目录", default=str(default_output)))
         if not output_root.is_absolute():
             output_root = ROOT / output_root
         state["output_root"] = output_root
 
     def step_confirm():
-        h5_tag = safe_name(Path(state["h5_path"]).stem)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_tag = f"ablation_{state['algorithm']}_{state['param_name']}_{h5_tag}_sample{state['sample_idx']}_{timestamp}"
-        state["run_tag"] = run_tag
-        state["run_root"] = state["output_root"] / run_tag
+        state["run_id"] = f"ablation_{timestamp}"
+        state["run_root"] = state["output_root"] / state["run_id"]
         state["config_dir"] = state["run_root"] / "configs"
         print_title("消融计划")
         print(f"H5: {relative_to_root(state['h5_path'])}")
@@ -549,6 +552,20 @@ def main():
             print(f"  {state['param_name']} = {winner['value']}")
             print(f"  指标值 = {winner['metric_value']}")
             print(f"  结果目录 = {winner['result_dir']}")
+
+    append_run_log({
+        "type": "ablation",
+        "dir": str(relative_to_root(state["run_root"])).replace("\\", "/"),
+        "h5_path": str(relative_to_root(state["h5_path"])).replace("\\", "/"),
+        "sample_idx": int(state["sample_idx"]),
+        "algorithm": state["algorithm"],
+        "scope": state["scope"],
+        "parameter": state["param_name"],
+        "values": state["values"],
+        "has_gt": state["has_gt"],
+        "evaluate": state["evaluate"],
+        "metric": state["metric"],
+    })
 
 
 if __name__ == "__main__":

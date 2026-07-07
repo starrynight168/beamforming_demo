@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 from datetime import datetime
@@ -10,9 +11,17 @@ try:
 except Exception:
     yaml = None
 
-
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
+
+
+def append_run_log(entry):
+    """追加一条运行记录到 results/run_log.jsonl。"""
+    log_path = ROOT / "results" / "run_log.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    entry.setdefault("time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 ALGORITHMS = {
     "das": "DAS：最基础、最快，适合入门观察",
@@ -302,8 +311,7 @@ def load_base_config():
 
 
 def make_temp_config_path(output_root, scene_id):
-    out_dir = output_root / "configs"
-    return out_dir / f"{scene_id}.yaml"
+    return output_root / scene_id / "config.yaml"
 
 
 def write_config(config, path):
@@ -410,9 +418,9 @@ def main():
         explain(state["teaching"], "output")
         default_output = state.get("output_root")
         if default_output is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            default_output = Path("results") / f"wizard_{timestamp}"
-        output_root = Path(ask_text("请输入结果输出根目录（会自动追加场景名子目录）", default=str(default_output)))
+            h5_tag = Path(state["h5_path"]).stem
+            default_output = Path("results") / f"{h5_tag}_sample{state['sample_idx']}"
+        output_root = Path(ask_text("请输入结果输出根目录（场景子目录）", default=str(default_output)))
         if not output_root.is_absolute():
             output_root = ROOT / output_root
         state["output_root"] = output_root
@@ -429,15 +437,18 @@ def main():
             "interp": state["interp"],
             "has_gt": state["has_gt"],
         }
-        config, scene_id = build_config(state["base_config"], state["h5_path"], state["sample_idx"], state["algorithms"], params)
-        config_path = make_temp_config_path(state["output_root"], scene_id)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_id = f"wizard_{timestamp}"
+        config, _ = build_config(state["base_config"], state["h5_path"], state["sample_idx"], state["algorithms"], params)
+        config["scenes"][0]["id"] = run_id
+        config_path = make_temp_config_path(state["output_root"], run_id)
         cmd = [
             sys.executable,
             str(ROOT / "run_one.py"),
             "--config",
             str(config_path),
             "--scene",
-            scene_id,
+            run_id,
             "--algorithms",
             ",".join(state["algorithms"]),
             "--output_root",
@@ -447,7 +458,7 @@ def main():
             cmd.append("--no_evaluate")
         if state["keep_existing"]:
             cmd.append("--keep_existing")
-        state["scene_id"] = scene_id
+        state["scene_id"] = run_id
         state["config"] = config
         state["config_path"] = config_path
         state["cmd"] = cmd
@@ -509,6 +520,27 @@ def main():
     print(f"运行参数: {scene_dir / 'run_params.json'}")
     if state["evaluate"]:
         print(f"指标目录: {scene_dir / 'metrics'}")
+
+    h5_rel = str(relative_to_root(state["h5_path"])).replace("\\", "/")
+    append_run_log({
+        "type": "wizard",
+        "dir": str(relative_to_root(state["output_root"] / state["scene_id"])).replace("\\", "/"),
+        "h5_path": h5_rel,
+        "sample_idx": int(state["sample_idx"]),
+        "algorithms": state["algorithms"],
+        "params": {
+            "select_angles": state["select_angles"],
+            "f_number": state["f_number"],
+            "dr": state["dr"],
+            "dynamic_aperture": state["dynamic_aperture"],
+            "tgc": state["tgc"],
+            "tgc_alpha": state["tgc_alpha"],
+            "window": state["window"],
+            "interp": state["interp"],
+        },
+        "has_gt": state["has_gt"],
+        "evaluate": state["evaluate"],
+    })
 
 
 if __name__ == "__main__":
