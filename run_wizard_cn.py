@@ -1,5 +1,6 @@
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import h5py
@@ -12,7 +13,6 @@ except Exception:
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
-RESULTS_DIR = ROOT / "results"
 
 ALGORITHMS = {
     "das": "DAS：最基础、最快，适合入门观察",
@@ -301,8 +301,8 @@ def load_base_config():
         return yaml.safe_load(f)
 
 
-def make_temp_config_path(scene_id):
-    out_dir = RESULTS_DIR / "wizard" / "configs"
+def make_temp_config_path(output_root, scene_id):
+    out_dir = output_root / "configs"
     return out_dir / f"{scene_id}.yaml"
 
 
@@ -408,7 +408,14 @@ def main():
 
     def step_output():
         explain(state["teaching"], "output")
-        state["output_root"] = ask_text("请输入结果输出目录", default=state.get("output_root", "results/wizard"))
+        default_output = state.get("output_root")
+        if default_output is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_output = Path("results") / f"wizard_{timestamp}"
+        output_root = Path(ask_text("请输入结果输出根目录（会自动追加场景名子目录）", default=str(default_output)))
+        if not output_root.is_absolute():
+            output_root = ROOT / output_root
+        state["output_root"] = output_root
 
     def step_confirm():
         params = {
@@ -423,7 +430,7 @@ def main():
             "has_gt": state["has_gt"],
         }
         config, scene_id = build_config(state["base_config"], state["h5_path"], state["sample_idx"], state["algorithms"], params)
-        config_path = make_temp_config_path(scene_id)
+        config_path = make_temp_config_path(state["output_root"], scene_id)
         cmd = [
             sys.executable,
             str(ROOT / "run_one.py"),
@@ -434,7 +441,7 @@ def main():
             "--algorithms",
             ",".join(state["algorithms"]),
             "--output_root",
-            state["output_root"],
+            str(state["output_root"]),
         ]
         if not state["evaluate"]:
             cmd.append("--no_evaluate")
@@ -495,10 +502,7 @@ def main():
     if result.returncode != 0:
         raise SystemExit(f"流程执行失败，退出码：{result.returncode}")
 
-    scene_dir = Path(state["output_root"])
-    if not scene_dir.is_absolute():
-        scene_dir = ROOT / scene_dir
-    scene_dir = scene_dir / state["scene_id"]
+    scene_dir = state["output_root"] / state["scene_id"]
     print_title("完成")
     print(f"结果目录: {scene_dir}")
     print(f"对比图: {scene_dir / 'comparison.png'}")
