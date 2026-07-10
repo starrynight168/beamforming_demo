@@ -43,7 +43,7 @@ HELP_TEXT = {
     "tgc": "TGC 是深度增益补偿。开启后深部不会太暗，更接近常见 B-mode 显示；关闭后可以观察原始衰减，但深部通常偏暗。",
     "tgc_alpha": "TGC_ALPHA 只在 TGC 开启时生效。数值越大，深部越亮；太大会让深部噪声和伪影也被放大。默认 0.5。",
     "window": "窗函数影响旁瓣、斑点和分辨率。rect 分辨率较锐但旁瓣更明显；hann 更干净平滑但会牺牲一点横向分辨率；tukey 介于两者之间。",
-    "interp": "插值影响延迟取样精度。cubic 图像更平滑、边界更自然但稍慢；linear 更快且通常够用；nearest 最快但可能出现锯齿或亮点位置不准。",
+    "interp": "插值影响延迟取样精度。nearest 最快但最粗糙；linear 更快；cubic 更平滑；quintic、farrow、sinc 精度更高但通常更慢。",
     "gt": "GT 是参考图像。加入 GT 后，对比图会把算法结果和参考图放在一起，便于肉眼比较。",
     "evaluate": "指标会计算算法结果和 GT 的差异，并生成 CSV/图片。没有 GT 时不建议计算。",
     "keep_existing": "复用已有输出可以节省时间，但如果你改了参数，应关闭复用重新计算。",
@@ -401,7 +401,18 @@ def main():
 
     def step_interp():
         explain(state["teaching"], "interp")
-        state["interp"] = ask_choice("请选择插值方式", [("cubic", "cubic：默认，较平滑"), ("linear", "linear：较快"), ("nearest", "nearest：最快但粗糙")], 0)
+        state["interp"] = ask_choice(
+            "请选择插值方式",
+            [
+                ("cubic", "cubic：默认，较平滑"),
+                ("linear", "linear：较快"),
+                ("nearest", "nearest：最快但较粗糙"),
+                ("quintic", "quintic：高阶插值"),
+                ("farrow", "farrow：更宽核高阶插值"),
+                ("sinc", "sinc：窗化 sinc 插值"),
+            ],
+            0,
+        )
 
     def step_gt_evaluate():
         has_gt_default = inspect_h5(state["h5_path"])["gt"] == "有"

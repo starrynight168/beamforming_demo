@@ -16,6 +16,8 @@ matplotlib.use("Agg")
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
+from beamforming_utils import db_display_range, parse_selected_angles, resolve_project_path
+from common_params import add_common_arguments, add_io_arguments
 
 
 METHOD_NAME = "template_algorithm"
@@ -23,33 +25,14 @@ METHOD_NAME = "template_algorithm"
 
 def parse_args():
     parser = argparse.ArgumentParser(description=f"{METHOD_NAME} beamforming template")
-    parser.add_argument("--h5_path", type=str, default="data/simulation.h5")
-    parser.add_argument("--h5_sample_idx", type=int, default=0)
-    parser.add_argument("--output_dir", type=str, default="results")
-    parser.add_argument("--dr", type=float, default=60.0)
+    add_io_arguments(parser)
 
     # Common options used by run_one.py. Keep them even if your method ignores some.
-    parser.add_argument("--select_angles", type=str, default="center")
-    parser.add_argument("--f_number", type=float, default=1.5)
-    parser.add_argument("--dynamic_aperture", action="store_true", default=True)
-    parser.add_argument("--no_dynamic_aperture", dest="dynamic_aperture", action="store_false")
-    parser.add_argument("--tgc", action="store_true", default=True)
-    parser.add_argument("--no_tgc", dest="tgc", action="store_false")
-    parser.add_argument("--tgc_alpha", type=float, default=0.5)
-    parser.add_argument("--window", type=str, default="rect", choices=["hann", "rect", "tukey"])
-    parser.add_argument("--interp", type=str, default="cubic", choices=["linear", "nearest", "cubic"])
-    parser.add_argument("--save_gt", action="store_true", default=False)
+    add_common_arguments(parser)
 
     # Add your own method-specific parameters here.
     parser.add_argument("--demo_gain", type=float, default=1.0)
     return parser.parse_args()
-
-
-def resolve_path(path):
-    if os.path.isabs(path):
-        return path
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(project_root, path)
 
 
 def load_from_h5(h5_path, sample_idx):
@@ -71,17 +54,6 @@ def load_from_h5(h5_path, sample_idx):
         if "all_envdb_norm" in hf:
             gt = hf["all_envdb_norm"][sample_idx, 0].astype(np.float32)
     return data, gt
-
-
-def parse_selected_angles(angles, select_str):
-    n_angles = len(angles)
-    text = str(select_str).strip().lower()
-    if text == "all":
-        return np.arange(n_angles)
-    if text == "center":
-        return np.array([n_angles // 2])
-    count = max(1, min(int(text), n_angles))
-    return np.linspace(0, n_angles - 1, count, dtype=int)
 
 
 def normalize_to_db(envelope, eps=1e-24):
@@ -127,6 +99,7 @@ def add_scale_bar(ax, extent_mm):
 
 
 def save_figure(db_img, x_grid, z_grid, out_path, title, dr):
+    vmin, vmax = db_display_range(dr)
     extent_mm = [
         float(x_grid[0] * 1000.0),
         float(x_grid[-1] * 1000.0),
@@ -134,7 +107,7 @@ def save_figure(db_img, x_grid, z_grid, out_path, title, dr):
         float(z_grid[0] * 1000.0),
     ]
     fig, ax = plt.subplots(figsize=(7, 8), dpi=300)
-    im = ax.imshow(db_img, cmap="gray", vmin=-dr, vmax=0, extent=extent_mm, aspect="equal")
+    im = ax.imshow(db_img, cmap="gray", vmin=vmin, vmax=vmax, extent=extent_mm, aspect="equal")
     ax.set_title(title, fontsize=14, pad=10)
     ax.set_xlabel("Lateral (mm)")
     ax.set_ylabel("Depth (mm)")
@@ -147,7 +120,8 @@ def save_figure(db_img, x_grid, z_grid, out_path, title, dr):
 
 
 def save_outputs(image_db, data, gt, args):
-    output_dir = resolve_path(args.output_dir)
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    output_dir = resolve_project_path(args.output_dir, project_root)
     method_dir = os.path.join(output_dir, METHOD_NAME)
     os.makedirs(method_dir, exist_ok=True)
 
@@ -170,9 +144,10 @@ def save_outputs(image_db, data, gt, args):
 
 def main():
     args = parse_args()
-    h5_path = resolve_path(args.h5_path)
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    h5_path = resolve_project_path(args.h5_path, project_root)
     data, gt = load_from_h5(h5_path, args.h5_sample_idx)
-    selected = parse_selected_angles(data["angles"], args.select_angles)
+    selected, _ = parse_selected_angles(data["angles"], args.select_angles)
     data["selected_angle_indices"] = selected
     data["selected_angles"] = data["angles"][selected]
 

@@ -12,16 +12,19 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.gridspec import GridSpec
+from beamforming_utils import (
+    aperture_window_1d,
+    db_display_range,
+    dynamic_aperture_channel_count,
+    interpolate_multi_angle_channel_samples,
+    parse_selected_angles,
+    resolve_project_path,
+)
+from common_params import add_common_arguments, add_io_arguments
 
 # ================= 命令行参数配置 =================
 parser = argparse.ArgumentParser(description='CMSAW - Coherence-based Minimum Variance Adaptive Weighting')
-parser.add_argument('--select_angles', type=str, default='center', help='角度选择: center, 0,1,2(逗号分隔)')
-parser.add_argument('--f_number', type=float, default=1.5, help='F-Number')
-parser.add_argument('--dr', type=float, default=60.0, help='动态范围 dB')
-parser.add_argument('--dynamic_aperture', action='store_true', default=True, help='启用动态孔径')
-parser.add_argument('--no_dynamic_aperture', dest='dynamic_aperture', action='store_false', help='禁用动态孔径')
-parser.add_argument('--window', type=str, default='rect', choices=['hann', 'rect', 'tukey'], help='窗函数')
-parser.add_argument('--interp', type=str, default='cubic', choices=['linear', 'nearest', 'cubic'], help='插值方式')
+add_common_arguments(parser, select_help='角度选择: center, 0,1,2(逗号分隔)')
 
 # ---- MV参数（用于自动生成基线） ----
 parser.add_argument('--mv_dl', type=float, default=0.0, help='MV 对角加载系数（自动生成基线用）')
@@ -29,10 +32,6 @@ parser.add_argument('--subarray_ratio', type=float, default=0.25, help='MV 子�
 parser.add_argument('--temporal_win', type=int, default=9, help='MV 时间平均窗口（自动生成基线用）')
 parser.add_argument('--fbss', action='store_true', default=True, help='MV 启用FBSS（自动生成基线用）')
 parser.add_argument('--no_fbss', dest='fbss', action='store_false', help='MV 禁用FBSS')
-parser.add_argument('--tgc', action='store_true', default=True, help='启用 TGC（自动生成基线用）')
-parser.add_argument('--no_tgc', dest='tgc', action='store_false', help='禁用 TGC')
-parser.add_argument('--tgc_alpha', type=float, default=0.5, help='TGC 衰减系数')
-
 # ---- CMSAW 核心参数 ----
 parser.add_argument('--baseline_mv', type=str, default='mv.npy', help='MV基线结果文件路径')
 parser.add_argument('--lmax_ratio', type=float, default=0.5, help='最大子阵列长度比例 Lmax = ratio × K')
@@ -42,10 +41,7 @@ parser.add_argument('--gamma', type=float, default=0.5, help='权重幂次')
 parser.add_argument('--clip_percentile', type=float, default=90.0, help='权重裁剪百分位数')
 parser.add_argument('--depth_smooth_rows', type=int, default=1, help='深度平滑行数 (1=禁用)')
 
-parser.add_argument('--h5_path', type=str, default='data/simulation.h5', help='H5数据文件路径')
-parser.add_argument('--h5_sample_idx', type=int, default=0, help='H5样本索引')
-parser.add_argument('--output_dir', type=str, default='results', help='输出目录')
-parser.add_argument('--save_gt', action='store_true', default=False, help='保存GT对比图')
+add_io_arguments(parser, save_gt_help='保存GT对比图')
 args = parser.parse_args()
 
 METHOD_NAME = "cmsaw"
@@ -54,13 +50,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
 
-def resolve_input_path(path):
-    if os.path.isabs(path):
-        return path
-    return os.path.join(PROJECT_ROOT, path)
-
-
-H5_PATH = resolve_input_path(args.h5_path)
+H5_PATH = resolve_project_path(args.h5_path, PROJECT_ROOT)
 BASE_OUTPUT_DIR = args.output_dir
 OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, METHOD_NAME)
 
@@ -91,28 +81,6 @@ def load_from_h5(h5_path, sample_idx=0):
 
         NUM_CHANNELS, IMG_H, IMG_W = n_elem, len(z_grid), len(x_grid)
     return c_global, fc_global, fs, pitch, n_elem, angles, t0_vec, z_grid, x_grid, I_data, Q_data, gt_data, has_gt
-
-
-def parse_selected_angles(angles, select_str):
-    select_str = select_str.strip().lower()
-    if select_str == 'all':
-        return np.arange(len(angles)), angles
-    elif select_str == 'center':
-        ci = int(np.argmin(np.abs(angles)))
-        return np.array([ci]), np.array([angles[ci]])
-    elif select_str.isdigit():
-        K = max(1, min(int(select_str), len(angles)))
-        if K == 1:
-            ci = int(np.argmin(np.abs(angles)))
-            return np.array([ci]), np.array([angles[ci]])
-        sorted_indices = np.argsort(angles)
-        sel = np.linspace(0, len(angles) - 1, K, dtype=int)
-        indices = sorted_indices[sel]
-        return indices, angles[indices]
-    else:
-        indices = [int(x) for x in select_str.split(',')]
-        indices = [i for i in indices if 0 <= i < len(angles)]
-        return np.array(indices), angles[indices]
 
 
 def print_physical_summary(c, fc, fs, pitch, n_elem, angles, t0, H, W, dz, dx,
@@ -225,19 +193,6 @@ def ensure_mv_baseline(baseline_path):
     return full_path
 
 
-def aperture_window(k):
-    if args.window == "rect":
-        return torch.ones(k, device=device)
-    x = torch.linspace(-1.0, 1.0, k, device=device)
-    if args.window == "hann":
-        return 0.5 * (1.0 + torch.cos(torch.pi * x))
-    beta = 0.25
-    weight = torch.ones_like(x)
-    edge = x.abs() > 1.0 - beta
-    weight[edge] = 0.5 * (1.0 + torch.cos(torch.pi * (x[edge].abs() - (1.0 - beta)) / beta))
-    return weight
-
-
 def delayed_iq(sample, angle_idx):
     I = torch.from_numpy(sample["I"][angle_idx]).to(device)
     Q = torch.from_numpy(sample["Q"][angle_idx]).to(device)
@@ -256,43 +211,10 @@ def delayed_iq(sample, angle_idx):
     exact = (tof - t0[:, None, None, None]) * sample["fs"]
     valid = (exact >= 0) & (exact <= n_samples - 1)
 
-    flat_i, flat_q = I.reshape(-1), Q.reshape(-1)
-    angle_offset = torch.arange(n_angles, device=device)[:, None, None, None] * n_samples * n_channels
+    angle_index = torch.arange(n_angles, device=device)[:, None, None, None]
     channel_offset = torch.arange(n_channels, device=device)[None, None, None, :]
 
-    if args.interp == "nearest":
-        index0 = torch.round(exact).long().clamp(0, n_samples - 1)
-        linear0 = angle_offset + index0 * n_channels + channel_offset
-        i = flat_i[linear0]
-        q = flat_q[linear0]
-    elif args.interp == "linear":
-        index0 = torch.floor(exact).long().clamp(0, n_samples - 1)
-        index1 = (index0 + 1).clamp(0, n_samples - 1)
-        frac = exact - torch.floor(exact)
-        linear0 = angle_offset + index0 * n_channels + channel_offset
-        linear1 = angle_offset + index1 * n_channels + channel_offset
-        i = flat_i[linear0] * (1.0 - frac) + flat_i[linear1] * frac
-        q = flat_q[linear0] * (1.0 - frac) + flat_q[linear1] * frac
-    else: # cubic
-        index0 = torch.floor(exact).long().clamp(0, n_samples - 1)
-        index1 = (index0 + 1).clamp(0, n_samples - 1)
-        index_m1 = (index0 - 1).clamp(0, n_samples - 1)
-        index2 = (index0 + 2).clamp(0, n_samples - 1)
-        frac = exact - torch.floor(exact)
-        
-        linear0 = angle_offset + index0 * n_channels + channel_offset
-        linear1 = angle_offset + index1 * n_channels + channel_offset
-        linear_m1 = angle_offset + index_m1 * n_channels + channel_offset
-        linear2 = angle_offset + index2 * n_channels + channel_offset
-        
-        w2, w3 = frac.square(), frac.pow(3)
-        cm1 = -0.5 * w3 + w2 - 0.5 * frac
-        c0 = 1.5 * w3 - 2.5 * w2 + 1.0
-        c1 = -1.5 * w3 + 2.0 * w2 + 0.5 * frac
-        c2 = 0.5 * w3 - 0.5 * w2
-        
-        i = flat_i[linear_m1] * cm1 + flat_i[linear0] * c0 + flat_i[linear1] * c1 + flat_i[linear2] * c2
-        q = flat_q[linear_m1] * cm1 + flat_q[linear0] * c0 + flat_q[linear1] * c1 + flat_q[linear2] * c2
+    i, q = interpolate_multi_angle_channel_samples(I, Q, exact, angle_index, channel_offset, args.interp)
 
     phase_rx = 2.0 * torch.pi * sample["fc"] * (receive / sample["c"])
     cos_rx = torch.cos(phase_rx)[None]
@@ -304,6 +226,7 @@ def delayed_iq(sample, angle_idx):
 
 # ================= 保存函数 =================
 def save_comparison_figure(cmsaw_db, gt_norm, extent_mm, out_path, title_str, dr=60.0):
+    vmin, vmax = db_display_range(dr)
     def to_2d(arr):
         if arr.ndim == 3:
             return arr[0] if arr.shape[0] == 1 else arr[:, :, 0]
@@ -321,7 +244,7 @@ def save_comparison_figure(cmsaw_db, gt_norm, extent_mm, out_path, title_str, dr
     ax1.set_ylabel("Depth (mm)")
 
     ax2 = fig.add_subplot(gs[0, 1])
-    im2 = ax2.imshow(cmsaw_db, cmap='gray', vmin=-dr, vmax=0, extent=extent_mm, aspect='equal')
+    im2 = ax2.imshow(cmsaw_db, cmap='gray', vmin=vmin, vmax=vmax, extent=extent_mm, aspect='equal')
     ax2.set_title(f"CMSAW\n{title_str}", fontsize=9, pad=10)
     ax2.set_xlabel("Lateral (mm)")
     ax2.set_ylabel("Depth (mm)")
@@ -344,8 +267,9 @@ def save_comparison_figure(cmsaw_db, gt_norm, extent_mm, out_path, title_str, dr
 
 
 def save_figure(db_img, extent_mm, out_path, title_str, dr=60.0):
+    vmin, vmax = db_display_range(dr)
     fig, ax = plt.subplots(figsize=(6, 8), dpi=300)
-    im = ax.imshow(db_img, cmap='gray', vmin=-dr, vmax=0, extent=extent_mm, aspect='equal')
+    im = ax.imshow(db_img, cmap='gray', vmin=vmin, vmax=vmax, extent=extent_mm, aspect='equal')
     ax.set_xlabel("Lateral (mm)")
     ax.set_ylabel("Depth (mm)")
     ax.set_title(f"CMSAW\n{title_str}", fontsize=9, pad=15)
@@ -425,13 +349,10 @@ def main():
         )
         row_cache = []
         for depth in z_grid:
-            if args.dynamic_aperture:
-                k = min(max(int(depth / (args.f_number * pitch)) + 1, 4), n_channels)
-            else:
-                k = n_channels
+            k = dynamic_aperture_channel_count(depth, args.f_number, pitch, n_channels, args.dynamic_aperture)
             starts = torch.clamp(centers - k // 2, 0, n_channels - k)
             channels = starts[:, None] + torch.arange(k, device=device)[None]
-            row_cache.append((k, channels, aperture_window(k)[None]))
+            row_cache.append((k, channels, aperture_window_1d(k, args.window, device)[None]))
 
         sigma = torch.empty((H, W), dtype=torch.float32, device=device)
         active_rows, k_rows = [], []

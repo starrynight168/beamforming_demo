@@ -43,7 +43,7 @@ GLOBAL_PARAM_DESCRIPTIONS = {
     "tgc": "是否启用深度增益补偿。关闭后深部通常更暗。",
     "tgc_alpha": "TGC 强度。只在 tgc=true 时有意义。",
     "window": "孔径窗函数。rect 锐但旁瓣明显；hann 平滑干净；tukey 折中。",
-    "interp": "延迟插值方式。cubic 平滑，linear 较快，nearest 最粗糙。",
+    "interp": "延迟插值方式。nearest 最快但粗糙，linear 较快，cubic 平滑，quintic/farrow/sinc 更高阶但通常更慢。",
 }
 
 ALGORITHM_PARAM_DESCRIPTIONS = {
@@ -159,7 +159,7 @@ def validate_values(param_name, default_value, values):
         return values
 
     if param_name in ("window", "interp"):
-        allowed = {"window": {"rect", "hann", "tukey"}, "interp": {"cubic", "linear", "nearest"}}[param_name]
+        allowed = {"window": {"rect", "hann", "tukey"}, "interp": {"nearest", "linear", "cubic", "quintic", "farrow", "sinc"}}[param_name]
         bad = [value for value in values if not isinstance(value, str) or value.lower() not in allowed]
         if bad:
             raise ValueError(f"{param_name} 只能从 {', '.join(sorted(allowed))} 里选。")

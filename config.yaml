@@ -15,7 +15,7 @@ algorithm_labels:
   fdmas: F-DMAS
 
 params:
-  select_angles: center
+  select_angles: "1"
   f_number: 1.5
   dr: 60
   dynamic_aperture: true

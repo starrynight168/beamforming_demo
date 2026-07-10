@@ -20,6 +20,8 @@ beamforming_demo/
     in_vivo.h5
 
   algorithms/
+    common_params.py
+    beamforming_utils.py
     das.py
     mv.py
     esbmv.py
@@ -136,6 +138,43 @@ results/simulation_contrast_speckle/
 - `evaluation_meta.json`
 
 `run_one.py` 会先调用 `evaluation/evaluate.py` 计算指标并写出 CSV / JSON / TXT，再调用 `evaluation/plot_metrics.py` 从这些表格生成图片。`run_all.py` 通过逐个调用 `run_one.py` 复用同一流程。
+
+## 常用运行参数
+
+通用参数写在 `config.yaml` 的 `params` 中，也可以在命令行临时覆盖：
+
+```yaml
+params:
+  select_angles: "1"
+  f_number: 1.5
+  dr: 60
+  dynamic_aperture: true
+  tgc: true
+  tgc_alpha: 0.5
+  window: rect
+  interp: cubic
+```
+
+- `select_angles`: 选择发射角。`"1"` 和 `center` 都表示中心单角度；`all` 表示全部角度；也可以填角度数量如 `3`、`11`，或 0 基角度索引列表如 `0,37,74`。
+- `window`: 孔径窗函数，支持 `rect`、`tukey`、`hann`、`hamming`、`blackman`、`kaiser`。
+- `interp`: 延迟插值方式，支持 `nearest`、`linear`、`cubic`、`quintic`、`farrow`、`sinc`。
+- `dynamic_aperture`: 是否启用动态孔径；开启时 `f_number` 生效。
+- `tgc`: 是否启用深度增益补偿；开启时 `tgc_alpha` 生效。
+- `dr`: 显示和评估使用的动态范围，单位 dB。
+
+命令行示例：
+
+```bash
+python run_one.py --scene simulation_contrast_speckle --algorithms das,mv --interp nearest
+```
+
+复用已有算法输出：
+
+```bash
+python run_one.py --scene simulation_contrast_speckle --algorithms das,mv --keep_existing
+```
+
+`--keep_existing` 会读取场景目录中的 `run_params.json`。只有场景、通用参数、算法专属参数和额外命令行参数都一致时，才复用已有 `.npy`；参数不一致时会重新运行对应算法。
 
 ## 一键运行全部场景
 
@@ -469,4 +508,3 @@ algorithm_labels:
 这不是必需步骤，不影响运行。
 
 只要遵守输入输出约定，`run_one.py` / `run_all.py` 会自动调用新算法、拼接对比图，并复用 `evaluation/evaluate.py` 生成指标、`evaluation/plot_metrics.py` 生成评估图。算法数量变多时，对比图和评估图会自动调整布局。
-

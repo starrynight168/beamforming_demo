@@ -13,6 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
+from algorithms.common_params import COMMON_PARAMS
 
 try:
     import yaml
@@ -80,13 +81,20 @@ def algorithm_params(config, algorithm):
     return all_params.get(algorithm, {}) or {}
 
 
+def common_params(config):
+    params = COMMON_PARAMS.copy()
+    params.update(config.get("params", {}) or {})
+    params["select_angles"] = str(params.get("select_angles", COMMON_PARAMS["select_angles"]))
+    return params
+
+
 def algorithm_label(config, algorithm):
     labels = config.get("algorithm_labels", {}) or {}
     return labels.get(algorithm, algorithm.upper())
 
 
 def build_algorithm_cmd(args, config, scene, algorithm, scene_dir):
-    params = config.get("params", {})
+    params = common_params(config)
     method_params = algorithm_params(config, algorithm)
     script = ROOT / "algorithms" / f"{algorithm}.py"
     if not script.exists():
@@ -97,15 +105,15 @@ def build_algorithm_cmd(args, config, scene, algorithm, scene_dir):
         "--h5_path", str(resolve_path(scene["h5_path"])),
         "--h5_sample_idx", str(scene["sample_idx"]),
         "--output_dir", str(scene_dir),
-        "--select_angles", str(params.get("select_angles", "center")),
-        "--f_number", str(params.get("f_number", 1.5)),
-        "--dr", str(params.get("dr", 60)),
-        "--window", str(params.get("window", "rect")),
-        "--interp", str(params.get("interp", "cubic")),
+        "--select_angles", str(params["select_angles"]),
+        "--f_number", str(params["f_number"]),
+        "--dr", str(params["dr"]),
+        "--window", str(params["window"]),
+        "--interp", str(params["interp"]),
     ]
-    flag(cmd, bool(params.get("dynamic_aperture", True)), "--dynamic_aperture", "--no_dynamic_aperture")
-    flag(cmd, bool(params.get("tgc", True)), "--tgc", "--no_tgc")
-    cmd.extend(["--tgc_alpha", str(params.get("tgc_alpha", 0.5))])
+    flag(cmd, bool(params["dynamic_aperture"]), "--dynamic_aperture", "--no_dynamic_aperture")
+    flag(cmd, bool(params["tgc"]), "--tgc", "--no_tgc")
+    cmd.extend(["--tgc_alpha", str(params["tgc_alpha"])])
     for name, value in method_params.items():
         cmd.extend(value_to_cli_args(name, value))
     cmd.extend(args.extra_algorithm_args)
@@ -176,7 +184,7 @@ def can_reuse_existing(scene_dir, config, scene, method, args):
 
     expected = {
         "scene": scene,
-        "params": config.get("params", {}) or {},
+        "params": common_params(config),
         "method_params": algorithm_params(config, method),
         "extra_algorithm_args": args.extra_algorithm_args,
     }
@@ -190,8 +198,9 @@ def can_reuse_existing(scene_dir, config, scene, method, args):
         return False, "旧结果参数与当前配置不一致"
     return True, "参数一致"
 
+
 def run_evaluation(args, config, scene, scene_dir, comparison_path, methods):
-    params = config.get("params", {})
+    params = common_params(config)
     labels = [algorithm_label(config, method) for method in methods]
     cmd = [
         args.python_exe, str(ROOT / "evaluation" / "evaluate.py"),
@@ -200,7 +209,7 @@ def run_evaluation(args, config, scene, scene_dir, comparison_path, methods):
         "--h5_sample_idx", str(scene["sample_idx"]),
         "--methods", ",".join(methods),
         "--method_labels", ",".join(labels),
-        "--dr", str(params.get("dr", 60)),
+        "--dr", str(params["dr"]),
         "--out_dir", str(scene_dir / "metrics"),
         "--phantom_mode", scene.get("phantom_mode", "auto"),
         "--phantom_source", scene.get("phantom_source", "auto"),
@@ -214,7 +223,7 @@ def run_evaluation(args, config, scene, scene_dir, comparison_path, methods):
         plot_cmd = [
             args.python_exe, str(ROOT / "evaluation" / "plot_metrics.py"),
             "--metrics_dir", str(metrics_dir),
-            "--dr", str(params.get("dr", 60)),
+            "--dr", str(params["dr"]),
         ]
         result = subprocess.run(plot_cmd, cwd=ROOT, text=True)
         if result.returncode != 0:
@@ -246,8 +255,8 @@ def main():
         if result.returncode != 0 or not expected.exists():
             raise RuntimeError(f"Algorithm failed or output missing: {method}")
 
-    params = config.get("params", {})
-    dr = float(params.get("dr", 60))
+    params = common_params(config)
+    dr = float(params["dr"])
     has_gt = bool(scene.get("has_gt", True))
     extent_mm, gt = load_grid_and_gt(resolve_path(scene["h5_path"]), int(scene["sample_idx"]), has_gt)
 

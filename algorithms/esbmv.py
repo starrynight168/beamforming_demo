@@ -10,17 +10,20 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.gridspec import GridSpec
+from beamforming_utils import (
+    dynamic_aperture_channel_count,
+    db_display_range,
+    interpolate_channel_samples,
+    optional_aperture_window_1d,
+    parse_selected_angles,
+    resolve_project_path,
+    tgc_gain,
+)
+from common_params import add_common_arguments, add_io_arguments
 
 # ================= 命令行参数配置 =================
 parser = argparse.ArgumentParser(description='ESBMV+FBSS Beamforming')
-parser.add_argument('--select_angles', type=str, default='center', help='角度选择: all, center, N(数量)')
-parser.add_argument('--f_number', type=float, default=1.5, help='F-Number')
-parser.add_argument('--dr', type=float, default=60.0, help='动态范围 dB')
-parser.add_argument('--dynamic_aperture', action='store_true', default=True, help='启用动态孔径')
-parser.add_argument('--no_dynamic_aperture', dest='dynamic_aperture', action='store_false', help='禁用动态孔径')
-parser.add_argument('--tgc', action='store_true', default=True, help='启用 TGC')
-parser.add_argument('--no_tgc', dest='tgc', action='store_false', help='禁用 TGC')
-parser.add_argument('--tgc_alpha', type=float, default=0.5, help='TGC 衰减系数')
+add_common_arguments(parser, window_help='子孔径预加权窗')
 
 # ---- MV 核心参数 ----
 parser.add_argument('--mv_dl', type=float, default=0.0, help='对角加载系数')
@@ -28,18 +31,12 @@ parser.add_argument('--fbss', action='store_true', default=True, help='启用前
 parser.add_argument('--no_fbss', dest='fbss', action='store_false', help='禁用 FBSS')
 parser.add_argument('--subarray_ratio', type=float, default=0.25, help='子阵列比例 L = K * ratio')
 parser.add_argument('--temporal_win', type=int, default=9, help='协方差时间平均窗口，必须为正奇数；1 表示关闭')
-parser.add_argument('--window', type=str, default='rect', choices=['hann', 'rect', 'tukey'], help='子孔径预加权窗')
-parser.add_argument('--interp', type=str, default='cubic', choices=['linear', 'nearest', 'cubic'], help='插值方式')
-
 # ---- ESBMV 子空间参数 ----
 parser.add_argument('--num_eig', type=int, default=0, help='信号子空间特征向量数量；<=0 时使用 eig_threshold 自动选择')
 parser.add_argument('--eig_threshold', type=float, default=0.05, help='自动选择时保留 lambda >= threshold * lambda_max 的特征向量')
 parser.add_argument('--force_gpu_eigh', action='store_true', default=False, help='强制在 GPU 上进行特征值分解')
 
-parser.add_argument('--h5_path', type=str, default='data/simulation.h5')
-parser.add_argument('--h5_sample_idx', type=int, default=0)
-parser.add_argument('--output_dir', type=str, default='results')
-parser.add_argument('--save_gt', action='store_true', default=False)
+add_io_arguments(parser)
 args = parser.parse_args()
 if args.temporal_win < 1 or args.temporal_win % 2 == 0:
     parser.error('--temporal_win must be a positive odd integer')
@@ -49,13 +46,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
 
-def resolve_input_path(path):
-    if os.path.isabs(path):
-        return path
-    return os.path.join(PROJECT_ROOT, path)
-
-
-H5_PATH = resolve_input_path(args.h5_path)
+H5_PATH = resolve_project_path(args.h5_path, PROJECT_ROOT)
 OUTPUT_DIR = os.path.join(args.output_dir, METHOD_NAME)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -86,28 +77,6 @@ def load_from_h5(h5_path, sample_idx=0):
 
         NUM_CHANNELS, IMG_H, IMG_W = n_elem, len(z_grid), len(x_grid)
     return c_global, fc_global, fs, pitch, n_elem, angles, t0_vec, z_grid, x_grid, I_data, Q_data, gt_data, has_gt
-
-
-def parse_selected_angles(angles, select_str):
-    select_str = select_str.strip().lower()
-    if select_str == 'all':
-        return np.arange(len(angles)), angles
-    elif select_str == 'center':
-        ci = int(np.argmin(np.abs(angles)))
-        return np.array([ci]), np.array([angles[ci]])
-    elif select_str.isdigit():
-        K = max(1, min(int(select_str), len(angles)))
-        if K == 1:
-            ci = int(np.argmin(np.abs(angles)))
-            return np.array([ci]), np.array([angles[ci]])
-        sorted_indices = np.argsort(angles)
-        sel = np.linspace(0, len(angles) - 1, K, dtype=int)
-        indices = sorted_indices[sel]
-        return indices, angles[indices]
-    else:
-        indices = [int(x) for x in select_str.split(',')]
-        indices = [i for i in indices if 0 <= i < len(angles)]
-        return np.array(indices), angles[indices]
 
 
 def print_physical_summary(c, fc, fs, pitch, n_elem, angles, t0, H, W, dz, dx,
@@ -187,27 +156,13 @@ class RowDynamicMVBeamformerIQ:
         self.row_cache = self._build_row_cache()
 
     def _aperture_window(self, k):
-        if args.window == 'rect':
-            return None
-        x_norm = torch.linspace(-1, 1, k, device=device)
-        if args.window == 'hann':
-            return 0.5 * (1.0 + torch.cos(np.pi * x_norm))
-        beta = 0.25
-        win_w = torch.ones_like(x_norm)
-        transition = x_norm.abs() > (1.0 - beta)
-        win_w[transition] = 0.5 * (1.0 + torch.cos(
-            np.pi * (x_norm[transition].abs() - (1.0 - beta)) / beta))
-        return win_w
+        return optional_aperture_window_1d(k, args.window, device)
 
     def _build_row_cache(self):
         cache = []
         for hz in range(self.H):
-            if args.dynamic_aperture:
-                depth = float(self.z_grid[hz].item())
-                half_a = depth / (2 * args.f_number)
-                k = min(max(int(2 * half_a / self.pitch) + 1, 4), self.N)
-            else:
-                k = self.N
+            depth = float(self.z_grid[hz].item())
+            k = dynamic_aperture_channel_count(depth, args.f_number, self.pitch, self.N, args.dynamic_aperture)
             l = max(int(k * self.subarray_ratio), 2)
             m = k - l + 1
             idx_start = torch.clamp(self.c_idx - k // 2, 0, self.N - k)
@@ -260,42 +215,7 @@ class RowDynamicMVBeamformerIQ:
                 sample = sample_center.unsqueeze(-1) + offsets_f
                 sample.clamp_(0.0, max_sample)
 
-                if args.interp == 'nearest':
-                    idx0 = sample.round().long().clamp(0, n_s - 1)
-                    I_samples = I_angle[idx0, self.ch]
-                    Q_samples = Q_angle[idx0, self.ch]
-                elif args.interp == 'cubic':
-                    idx0 = sample.floor().long()
-                    frac = sample - idx0.float()
-                    frac2 = frac * frac
-                    frac3 = frac2 * frac
-                    c_m1 = -0.5 * frac3 + frac2 - 0.5 * frac
-                    c_0 = 1.5 * frac3 - 2.5 * frac2 + 1.0
-                    c_1 = -1.5 * frac3 + 2.0 * frac2 + 0.5 * frac
-                    c_2 = 0.5 * frac3 - 0.5 * frac2
-                    idx_m1 = torch.clamp(idx0 - 1, 0, n_s - 1)
-                    idx_0 = torch.clamp(idx0, 0, n_s - 1)
-                    idx_1 = torch.clamp(idx0 + 1, 0, n_s - 1)
-                    idx_2 = torch.clamp(idx0 + 2, 0, n_s - 1)
-                    I_samples = (
-                        I_angle[idx_m1, self.ch] * c_m1
-                        + I_angle[idx_0, self.ch] * c_0
-                        + I_angle[idx_1, self.ch] * c_1
-                        + I_angle[idx_2, self.ch] * c_2
-                    )
-                    Q_samples = (
-                        Q_angle[idx_m1, self.ch] * c_m1
-                        + Q_angle[idx_0, self.ch] * c_0
-                        + Q_angle[idx_1, self.ch] * c_1
-                        + Q_angle[idx_2, self.ch] * c_2
-                    )
-                else:
-                    idx0 = sample.floor().long()
-                    frac = sample - idx0.float()
-                    idx1 = torch.clamp(idx0 + 1, 0, n_s - 1)
-                    idx0 = torch.clamp(idx0, 0, n_s - 1)
-                    I_samples = I_angle[idx0, self.ch] * (1.0 - frac) + I_angle[idx0 + 1, self.ch] * frac
-                    Q_samples = Q_angle[idx0, self.ch] * (1.0 - frac) + Q_angle[idx0 + 1, self.ch] * frac
+                I_samples, Q_samples = interpolate_channel_samples(I_angle, Q_angle, sample, self.ch, args.interp)
 
                 # 2. 接收端相位旋转 (3D)
                 cos_rx = cos_rx_global[hz].unsqueeze(-1)
@@ -408,6 +328,7 @@ class RowDynamicMVBeamformerIQ:
 
 # ================= 保存函数 =================
 def save_comparison_figure(mv_db, gt_norm, extent_mm, out_path, title_str, dr=60.0):
+    vmin, vmax = db_display_range(dr)
     def to_2d(arr):
         if arr.ndim == 3:
             return arr[0] if arr.shape[0] == 1 else arr[:, :, 0]
@@ -427,7 +348,7 @@ def save_comparison_figure(mv_db, gt_norm, extent_mm, out_path, title_str, dr=60
 
     # ESBMV Result
     ax2 = fig.add_subplot(gs[0, 1])
-    im2 = ax2.imshow(mv_db, cmap='gray', vmin=-dr, vmax=0, extent=extent_mm, aspect='equal')
+    im2 = ax2.imshow(mv_db, cmap='gray', vmin=vmin, vmax=vmax, extent=extent_mm, aspect='equal')
     ax2.set_title(f"ESBMV\n{title_str}", fontsize=9, pad=10)
     ax2.set_xlabel("Lateral (mm)")
     ax2.set_ylabel("Depth (mm)")
@@ -452,8 +373,9 @@ def save_comparison_figure(mv_db, gt_norm, extent_mm, out_path, title_str, dr=60
 
 
 def save_figure(db_img, extent_mm, out_path, title_str, dr=60.0):
+    vmin, vmax = db_display_range(dr)
     fig, ax = plt.subplots(figsize=(6, 8), dpi=300)
-    im = ax.imshow(db_img, cmap='gray', vmin=-dr, vmax=0, extent=extent_mm, aspect='equal')
+    im = ax.imshow(db_img, cmap='gray', vmin=vmin, vmax=vmax, extent=extent_mm, aspect='equal')
     ax.set_xlabel("Lateral (mm)")
     ax.set_ylabel("Depth (mm)")
     ax.set_title(f"ESBMV\n{title_str}", fontsize=9, pad=15)
@@ -506,7 +428,7 @@ def main():
 
     # TGC
     if args.tgc:
-        tgc = 10 ** (args.tgc_alpha * (fc / 1e6) * (z_grid * 100) * 2.0 / 20.0)
+        tgc = tgc_gain(z_grid, fc, args.tgc_alpha)
     else:
         tgc = np.ones_like(z_grid)
 
