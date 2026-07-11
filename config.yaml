@@ -22,7 +22,7 @@ params:
   tgc: true
   tgc_alpha: 0.5
   window: rect
-  interp: cubic
+  interp: linear
 
 algorithm_params:
   das: {}
@@ -107,9 +107,3 @@ scenes:
     phantom_source: in_vivo
     has_gt: true
 
-  - id: invivo_15002
-    h5_path: data/invivo_15002_packed.h5
-    sample_idx: 0
-    phantom_mode: in_vivo
-    phantom_source: in_vivo
-    has_gt: true

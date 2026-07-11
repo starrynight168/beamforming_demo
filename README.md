@@ -152,7 +152,7 @@ params:
   tgc: true
   tgc_alpha: 0.5
   window: rect
-  interp: cubic
+  interp: linear
 ```
 
 - `select_angles`: 选择发射角。`"1"` 和 `center` 都表示中心单角度；`all` 表示全部角度；也可以填角度数量如 `3`、`11`，或 0 基角度索引列表如 `0,37,74`。
@@ -318,17 +318,19 @@ in vivo 数据使用多角度 DAS 生成的 reference 作为 GT，因此会计�
 
 `plot_metrics.py` 会根据算法数量自适应图像布局。算法较多时，普通指标图会自动改为横向柱状图；指标太多时会按指标分页，例如 `standard_metrics_page2.png`。
 
-## 添加新算法
+## 扩展工程
 
-推荐方式是从模板复制一个新脚本。只要脚本名、`METHOD_NAME`、输出文件名一致，`run_one.py` / `run_all.py` 就可以通过 `config.yaml` 自动调用它。
+工程按“算法脚本 + 配置文件 + 可选交互入口”的方式组织。大多数扩展只需要改 `algorithms/` 和 `config.yaml`；只有希望中文向导、消融向导也展示新选项时，才需要改对应的交互脚本。
 
-### 1. 复制模板
+### 添加新算法
+
+推荐从模板复制一个新脚本：
 
 ```bash
 cp algorithms/template_algorithm.py algorithms/new_method.py
 ```
 
-然后在 `algorithms/new_method.py` 中修改：
+然后在 `algorithms/new_method.py` 中修改算法名：
 
 ```python
 METHOD_NAME = "new_method"
@@ -342,9 +344,7 @@ METHOD_NAME: new_method
 输出文件:    output_dir/new_method/new_method.npy
 ```
 
-### 2. 实现算法主体
-
-实现模板中的：
+实现模板中的 `beamform()`：
 
 ```python
 def beamform(data, args):
@@ -377,9 +377,7 @@ shape = [len(z_grid), len(x_grid)]
 最大值通常归一化到 0 dB
 ```
 
-### 3. 保留通用命令行参数
-
-模板已经包含 `run_one.py` 会传入的通用参数。新算法即使用不到，也建议保留：
+模板已经通过 `common_params.py` 和 `beamforming_utils.py` 接好了公共命令行参数、路径解析、角度选择和图像保存逻辑。新算法即使用不到某些参数，也建议保留这些入口，方便 `run_one.py` / `run_all.py` 统一调用：
 
 ```text
 --h5_path
@@ -396,7 +394,7 @@ shape = [len(z_grid), len(x_grid)]
 --save_gt
 ```
 
-可以单独测试：
+单独测试算法脚本：
 
 ```bash
 python algorithms/new_method.py \
@@ -414,9 +412,7 @@ output_dir/new_method/new_method.png
 output_dir/new_method/params.json
 ```
 
-### 4. 加入 `config.yaml`
-
-如果希望默认参与 `run_one.py` / `run_all.py`，在 `config.yaml` 顶部加入算法名，并在 `algorithm_params` 里写该算法的默认超参数：
+让 `run_one.py` / `run_all.py` 默认运行这个算法时，在 `config.yaml` 中加入算法名、显示名和算法专属参数：
 
 ```yaml
 algorithms:
@@ -438,7 +434,7 @@ algorithm_params:
     use_filter: true
 ```
 
-之后直接运行：
+之后直接运行场景即可：
 
 ```bash
 python run_one.py --scene simulation_contrast_speckle
@@ -456,23 +452,14 @@ python run_all.py
 python run_one.py --scene simulation_contrast_speckle --algorithms das,mv,new_method
 ```
 
-### 5. 方法专属参数
-
-如果新算法有自己的参数，例如：
-
-```bash
---alpha 0.5
---num_iter 10
-```
-
-优先在算法脚本中设置默认值：
+算法专属参数要在脚本里先定义 argparse 参数：
 
 ```python
 parser.add_argument("--alpha", type=float, default=0.5)
 parser.add_argument("--num_iter", type=int, default=10)
 ```
 
-统一实验时，把默认超参数写在 `config.yaml` 的 `algorithm_params` 中：
+再把统一实验使用的默认值写入 `config.yaml`：
 
 ```yaml
 algorithm_params:
@@ -487,24 +474,140 @@ algorithm_params:
 --alpha 0.8 --num_iter 20
 ```
 
-布尔参数会自动转换。`true` 会变成 `--use_filter`，`false` 会变成 `--no_use_filter`。因此如果算法支持从配置关闭某个布尔参数，脚本里要同时提供正反两个参数：
+布尔参数会自动转换。`true` 会变成 `--use_filter`，`false` 会变成 `--no_use_filter`。如果希望从配置里开关某个布尔参数，算法脚本里要同时提供正反两个参数：
 
 ```python
 parser.add_argument("--use_filter", action="store_true", default=True)
 parser.add_argument("--no_use_filter", dest="use_filter", action="store_false")
 ```
 
-普通新算法不需要修改 `run_one.py`。只要脚本支持 argparse，并且 `config.yaml` 里算法名和 `algorithm_params` 块名称一致即可。只有特别复杂的调度规则，例如某个参数要根据场景自动变化、或者一个参数需要转换成多个命令行参数时，才需要改 `run_one.py`。
+普通新算法不需要修改 `run_one.py`。只要脚本名、`METHOD_NAME`、输出目录名、`config.yaml` 中的算法名一致，入口脚本就能自动调用。只有特别复杂的调度规则，例如某个参数要根据场景自动变化、或者一个配置值需要转换成多个命令行参数时，才需要改 `run_one.py`。
 
-### 6. 显示名称可选
+### 让中文向导显示新算法
 
-如果不改显示名称，图中会显示算法名的大写形式。想要更漂亮的名称，在 `config.yaml` 里加入：
+`run_wizard_cn.py` 的算法列表来自文件顶部的 `ALGORITHMS` 字典。希望交互式向导里出现新算法时，加入一行：
 
-```yaml
-algorithm_labels:
-  new_method: New Method
+```python
+ALGORITHMS = {
+    "das": "DAS：最基础、最快，适合入门观察",
+    "new_method": "New Method：这里写一句中文说明",
+}
 ```
 
-这不是必需步骤，不影响运行。
+向导运行时会把用户选择的算法写入临时配置，并继续调用 `run_one.py`。如果不改 `run_wizard_cn.py`，新算法仍然可以通过命令行或 `config.yaml` 使用，只是不出现在中文菜单里。
 
-只要遵守输入输出约定，`run_one.py` / `run_all.py` 会自动调用新算法、拼接对比图，并复用 `evaluation/evaluate.py` 生成指标、`evaluation/plot_metrics.py` 生成评估图。算法数量变多时，对比图和评估图会自动调整布局。
+### 让消融向导识别新参数
+
+`run_ablation_cn.py` 会从 `config.yaml` 自动读取可消融参数：
+
+- `params` 中的通用参数会作为全局参数出现。
+- `algorithm_params.<算法名>` 中的参数会作为算法专属参数出现。
+
+如果希望消融菜单里有更清楚的中文解释，可以在 `run_ablation_cn.py` 顶部补充：
+
+```python
+ALGORITHM_PARAM_DESCRIPTIONS = {
+    "alpha": "控制 new_method 的加权强度。",
+    "num_iter": "迭代次数。",
+}
+
+PARAM_VALUE_LABELS = {
+    "alpha": "alpha",
+    "num_iter": "iter",
+}
+```
+
+`PARAM_VALUE_LABELS` 只影响输出目录命名，不影响算法运行。对于字符串参数，如果需要限制合法取值，可以在 `validate_values()` 里补充校验规则。
+
+### 添加新场景或新数据
+
+如果已经有符合工程格式的 H5 文件，只需要在 `config.yaml` 的 `scenes` 中增加场景：
+
+```yaml
+scenes:
+  - id: my_scene
+    h5_path: data/my_data.h5
+    sample_idx: 0
+    phantom_mode: auto
+    phantom_source: auto
+    has_gt: true
+```
+
+字段含义：
+
+- `id`: 场景名，也是结果子目录名。
+- `h5_path`: H5 文件路径，相对项目根目录或绝对路径都可以。
+- `sample_idx`: H5 中的样本编号。
+- `phantom_mode`: phantom 类型。常用 `contrast_speckle`、`resolution_distorsion`、`in_vivo`、`auto`。
+- `phantom_source`: 数据来源。常用 `simulation`、`experiments`、`in_vivo`、`auto`。
+- `has_gt`: 是否把 H5 中的 `all_envdb_norm` 当作参考图加入对比和评估。
+
+加入后可以运行：
+
+```bash
+python run_one.py --scene my_scene
+```
+
+如果要把原始数据打包成工程使用的 H5，需要按 `data/pack_data.py` 里的字段格式生成：
+
+```text
+all_multi_I, all_multi_Q, time_start_vector, fs, c, fc, pitch,
+num_channels, z_grid, x_grid, angles
+```
+
+有参考图时，再写入：
+
+```text
+all_envdb_norm
+```
+
+### 添加或修改通用参数
+
+通用参数是所有算法共享的参数，例如角度选择、F-Number、窗函数、插值和 TGC。它们集中在：
+
+- `algorithms/common_params.py`: 默认值和 argparse 参数。
+- `algorithms/beamforming_utils.py`: 角度选择、窗函数、插值等公共实现。
+- `config.yaml` 的 `params`: 项目默认值。
+- `run_one.py`: 把通用参数传给算法脚本。
+
+如果只是改变默认值，通常只改 `config.yaml`。如果要增加全新的通用参数，需要同时检查以上几个位置；如果中文向导或消融向导也要支持这个参数，还要更新 `run_wizard_cn.py` 和 `run_ablation_cn.py`。
+
+### 添加插值方式或窗函数
+
+插值方式和窗函数属于公共能力。
+
+添加插值方式时，修改 `algorithms/beamforming_utils.py`：
+
+- 在 `INTERP_CHOICES` 中加入名称。
+- 在 `interpolate_channel_samples()` 中实现单角度数据取样。
+- 在 `interpolate_multi_angle_channel_samples()` 中实现多角度数据取样。
+
+添加窗函数时，同样修改 `algorithms/beamforming_utils.py`：
+
+- 在 `WINDOW_CHOICES` 中加入名称。
+- 在 `aperture_window_from_dx()` 中实现按孔径位置生成权重。
+- 在 `aperture_window_1d()` 中实现一维子孔径窗。
+
+如果希望用户在中文向导里选择新选项，更新 `run_wizard_cn.py` 中的选项列表；如果希望消融向导允许新取值，更新 `run_ablation_cn.py` 中 `validate_values()` 的合法值。
+
+### 扩展后的检查
+
+改完后建议先做语法检查：
+
+```bash
+python -m py_compile algorithms/*.py run_one.py run_all.py run_wizard_cn.py run_ablation_cn.py
+```
+
+再跑一个最小场景：
+
+```bash
+python run_one.py --scene simulation_contrast_speckle --algorithms das --no_evaluate
+```
+
+如果是新算法，单独跑：
+
+```bash
+python run_one.py --scene simulation_contrast_speckle --algorithms new_method --no_evaluate
+```
+
+只要遵守输入输出约定，`run_one.py` / `run_all.py` 会自动调用算法、拼接对比图，并复用 `evaluation/evaluate.py` 生成指标、`evaluation/plot_metrics.py` 生成评估图。算法数量变多时，对比图和评估图会自动调整布局。
