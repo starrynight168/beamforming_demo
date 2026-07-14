@@ -125,15 +125,15 @@ class RowDynamicMVBeamformerIQ:
     固定使用 positive IQ 相位补偿
     """
     def __init__(self, z_grid, x_grid, n_elem, pitch, c, fs, t0_all, angles_rad,
-                 dl_factor=0.01, use_fbss=True, subarray_ratio=0.5,
+                 mv_dl=0.01, fbss=True, subarray_ratio=0.5,
                  temporal_win=1):
         self.H, self.W, self.N = len(z_grid), len(x_grid), n_elem
         self.x_grid = torch.from_numpy(x_grid).float().to(device)
         self.z_grid = torch.from_numpy(z_grid).float().to(device)
         self.angles_rad = torch.from_numpy(angles_rad).float().to(device)
         self.pitch, self.fs, self.sc = pitch, fs, fs / c
-        self.dl_factor = dl_factor
-        self.use_fbss = use_fbss
+        self.dl_factor = mv_dl
+        self.use_fbss = fbss
         self.subarray_ratio = subarray_ratio
         self.temporal_win = temporal_win
 
@@ -370,7 +370,7 @@ def main():
     # 初始化标准 MV + FBSS 波束合成器
     bf = RowDynamicMVBeamformerIQ(
         z_grid, x_grid, n_elem, pitch, c, fs, t0_sub, angles_all,
-        dl_factor=args.mv_dl, use_fbss=args.fbss, subarray_ratio=args.subarray_ratio,
+        mv_dl=args.mv_dl, fbss=args.fbss, subarray_ratio=args.subarray_ratio,
         temporal_win=args.temporal_win
     )
 
