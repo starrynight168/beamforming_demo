@@ -285,7 +285,6 @@ def process_scene(scene, source_root, row_block=24):
         "angles": angles,
         "scale_ref": scale_ref,
         "norm_ref": norm_ref,
-        "gt_safe_max": safe_max,
         "meta": scene,
     }
 
@@ -365,7 +364,6 @@ def pack_dataset(scenes, output_path, source_root, row_block=24, save_gt_images_
 
         hf.create_dataset("all_scale_ref", data=np.array([item["scale_ref"] for item in items], dtype=np.float32))
         hf.create_dataset("all_norm_ref", data=np.array([item["norm_ref"] for item in items], dtype=np.float32))
-        hf.create_dataset("gt_safe_max", data=np.array([item["gt_safe_max"] for item in items], dtype=np.float32))
 
         max_a = max(item["t0"].shape[1] for item in items)
         t0_padded = []
