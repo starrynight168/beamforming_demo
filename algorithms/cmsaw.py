@@ -2,6 +2,7 @@ import os
 import sys
 import subprocess
 import json
+import importlib
 import numpy as np
 import torch
 import time
@@ -222,6 +223,147 @@ def delayed_iq(sample, angle_idx):
     aligned_i = i * cos_rx - q * sin_rx
     aligned_q = i * sin_rx + q * cos_rx
     return torch.complex(aligned_i, aligned_q) * valid
+
+
+class CMSAWBeamformerIQ:
+    """
+    Pack-time CMSAW teacher interface.
+
+    CMSAW 本身是基于 MV baseline 的显示域/幅值加权方法；这里为了统一 H5 GT 打包接口，
+    采用“MV 复数 IQ × CMSAW 实值权重”的定义：
+      - 相位沿用 MV baseline；
+      - 幅值按 CMSAW coherence 权重调整；
+      - 返回 I_out, Q_out，供 pack_EPFL.py 后续统一生成 envdb。
+    """
+
+    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fs, t0_all, angles_rad,
+                 mv_dl=0.0, fbss=True, subarray_ratio=0.25, temporal_win=9,
+                 lmax_ratio=0.5, min_subarray_len=2, delta_max=1.0,
+                 gamma=0.5, clip_percentile=90.0, depth_smooth_rows=1,
+                 baseline_mv=None):
+        if not 0 < lmax_ratio <= 0.5 or min_subarray_len < 2:
+            raise ValueError("Require lmax_ratio in (0, 0.5] and min_subarray_len >= 2")
+        if not 0 <= delta_max <= 1 or not 0 < gamma <= 1 or not 0 < clip_percentile <= 100:
+            raise ValueError("Require delta_max in [0,1], gamma in (0,1], clip_percentile in (0,100]")
+        if temporal_win < 1 or temporal_win % 2 == 0:
+            raise ValueError("temporal_win must be a positive odd integer")
+
+        self.z_grid = np.asarray(z_grid, dtype=np.float32)
+        self.x_grid = np.asarray(x_grid, dtype=np.float32)
+        self.n_elem = int(n_elem)
+        self.pitch = float(pitch)
+        self.c = float(c)
+        self.fs = float(fs)
+        self.fc = float(fc_global)
+        self.lmax_ratio = float(lmax_ratio)
+        self.min_subarray_len = int(min_subarray_len)
+        self.delta_max = float(delta_max)
+        self.gamma = float(gamma)
+        self.clip_percentile = float(clip_percentile)
+        self.depth_smooth_rows = int(depth_smooth_rows)
+
+        old_argv = sys.argv[:]
+        try:
+            sys.argv = ['mv.py']
+            self.mv_module = importlib.import_module('mv')
+        finally:
+            sys.argv = old_argv
+        self.mv_module.args = args
+        self.mv_module.fc_global = self.fc
+        self.mv_module.c_global = self.c
+        self.mv_bf = self.mv_module.RowDynamicMVBeamformerIQ(
+            self.z_grid, self.x_grid, self.n_elem, self.pitch, self.c, self.fs,
+            t0_all, angles_rad,
+            mv_dl=mv_dl, fbss=fbss,
+            subarray_ratio=subarray_ratio, temporal_win=temporal_win,
+        )
+
+    def _weight_from_delayed_data(self, data):
+        H, W, n_channels = data.shape
+        x_t = torch.from_numpy(self.x_grid).to(device)
+        element_x = (torch.arange(n_channels, device=device) - (n_channels - 1) / 2.0) * self.pitch
+        centers = torch.argmin(torch.abs(x_t[:, None] - element_x[None]), dim=1)
+
+        row_cache = []
+        for depth in self.z_grid:
+            k = dynamic_aperture_channel_count(depth, args.f_number, self.pitch, n_channels, args.dynamic_aperture)
+            starts = torch.clamp(centers - k // 2, 0, n_channels - k)
+            channels = starts[:, None] + torch.arange(k, device=device)[None]
+            row_cache.append((k, channels, aperture_window_1d(k, args.window, device)[None]))
+
+        sigma = torch.empty((H, W), dtype=torch.float32, device=device)
+        active_rows, k_rows = [], []
+        for iz, (k, channels, win) in enumerate(row_cache):
+            active = torch.gather(data[iz], 1, channels) * win
+            sigma[iz] = torch.std(torch.abs(active), dim=1, unbiased=False)
+            active_rows.append(active)
+            k_rows.append(k)
+
+        sigma_prime = torch.pow(sigma + 1e-12, -1.0 / 3.0)
+        sigma_prime = (sigma_prime - sigma_prime.min()) / (sigma_prime.max() - sigma_prime.min() + 1e-12)
+        weight = torch.zeros_like(sigma)
+
+        for iz, active in enumerate(active_rows):
+            k = k_rows[iz]
+            lmax = max(self.min_subarray_len, int(np.floor(k * self.lmax_ratio)))
+            min_l = min(self.min_subarray_len, lmax)
+            lengths = torch.floor(sigma_prime[iz] * lmax).long().clamp(min_l, lmax)
+            coherent = torch.abs(active.sum(dim=1)).square()
+            total = k * torch.abs(active).square().sum(dim=1)
+            coherence = (coherent / (total + 1e-12)).clamp(0, 1)
+            delta = torch.pow(coherence + 1e-12, sigma_prime[iz]) * self.delta_max
+
+            for length_tensor in torch.unique(lengths):
+                length = int(length_tensor.item())
+                columns = torch.where(lengths == length)[0]
+                subset = active[columns]
+                sub = subset.unfold(1, length, 1).transpose(1, 2)
+                covariance = sub @ sub.mH / float(k - length + 1)
+                eye = torch.eye(length, dtype=torch.complex64, device=device)
+                exchange = torch.flip(eye, dims=(0,))
+                transpose = covariance.transpose(-2, -1)
+                rotary = 0.25 * (covariance + exchange @ transpose + exchange @ covariance @ exchange + transpose @ exchange)
+                diagonal = torch.diag_embed(torch.diagonal(rotary, dim1=-2, dim2=-1))
+                matrix = torch.abs(rotary - delta[columns, None, None] * diagonal)
+                weight[iz, columns] = matrix.mean(dim=(-2, -1)) / (matrix.std(dim=(-2, -1), unbiased=False) + 1e-12)
+
+        if self.depth_smooth_rows > 1:
+            rows = self.depth_smooth_rows + 1 if self.depth_smooth_rows % 2 == 0 else self.depth_smooth_rows
+            coord = torch.arange(rows, device=device).float() - rows // 2
+            kernel = torch.exp(-0.5 * (coord / max(rows / 4.0, 1.0)) ** 2)
+            kernel = (kernel / kernel.sum()).view(1, 1, rows, 1)
+            log_weight = torch.log(weight.clamp_min(1e-12))[None, None]
+            log_weight = torch.nn.functional.pad(log_weight, (0, 0, rows // 2, rows // 2), mode="reflect")
+            weight = torch.exp(torch.nn.functional.conv2d(log_weight, kernel)[0, 0])
+
+        weight /= torch.median(weight.clamp_min(1e-12))
+        weight.clamp_(max=torch.quantile(weight, self.clip_percentile / 100.0))
+        weight.pow_(self.gamma)
+        return weight
+
+    def __call__(self, I_data, Q_data, selected_angles, t_starts, fs):
+        if len(selected_angles) != 1:
+            raise ValueError("CMSAWBeamformerIQ requires exactly one selected angle")
+
+        I_mv, Q_mv = self.mv_bf(I_data, Q_data, selected_angles, t_starts, fs)
+        t0 = np.asarray(t_starts, dtype=np.float32).reshape(-1)
+        if t0.size == 1:
+            t0 = np.repeat(t0, len(selected_angles))
+        sample = {
+            "I": I_data.astype(np.float32),
+            "Q": Q_data.astype(np.float32),
+            "t0": t0.astype(np.float32),
+            "z": self.z_grid,
+            "x": self.x_grid,
+            "angles": np.asarray(selected_angles, dtype=np.float32),
+            "fs": float(fs),
+            "c": self.c,
+            "fc": self.fc,
+            "pitch": self.pitch,
+        }
+        data = delayed_iq(sample, np.arange(len(selected_angles)))[0]
+        weight = self._weight_from_delayed_data(data).cpu().numpy().astype(np.float32)
+        return I_mv * weight, Q_mv * weight
 
 
 # ================= 保存函数 =================
