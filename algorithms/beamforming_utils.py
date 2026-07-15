@@ -40,10 +40,11 @@ def aperture_half_width(depth, f_number, n_channels, pitch, dynamic_aperture):
     return torch.full_like(depth, (n_channels - 1) * pitch / 2.0)
 
 
-def dynamic_aperture_channel_count(depth, f_number, pitch, n_channels, dynamic_aperture, min_channels=4):
+def dynamic_aperture_channel_count(depth, f_number, pitch, n_channels, dynamic_aperture):
+    """Discrete fixed-F-number receive aperture with no shallow-depth floor."""
     if not dynamic_aperture:
         return n_channels
-    return min(max(int(depth / (f_number * pitch)) + 1, min_channels), n_channels)
+    return min(max(int(depth / (f_number * pitch)) + 1, 1), n_channels)
 
 
 def apply_tgc_image(env, z_grid, fc, tgc_alpha):
