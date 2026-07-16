@@ -349,7 +349,8 @@ def standard_contrast_score(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padd
     outside = db_img[(dist2 >= rout1 ** 2) & (dist2 <= rout2 ** 2)]
     if inside.size < 8 or outside.size < 8:
         return np.nan
-    denom = math.sqrt((float(np.var(inside)) + float(np.var(outside))) / 2.0)
+    # Match MATLAB var() in the official PICMUS evaluator (sample variance, N-1).
+    denom = math.sqrt((float(np.var(inside, ddof=1)) + float(np.var(outside, ddof=1))) / 2.0)
     if denom <= 0:
         return np.nan
     value = 20.0 * math.log10(abs(float(np.mean(inside)) - float(np.mean(outside))) / denom)
@@ -478,8 +479,9 @@ def profile_sidelobe_metrics(profile_db):
 
 
 def target_resolution(db_img, x_mm, z_mm, target, window_mm, target_idx=None, source="simulation"):
-    x_mask = np.abs(x_mm - target["x_mm"]) <= window_mm
-    z_mask = np.abs(z_mm - target["z_mm"]) <= window_mm
+    # Official PICMUS ROI uses strict bounds: center-window < coordinate < center+window.
+    x_mask = np.abs(x_mm - target["x_mm"]) < window_mm
+    z_mask = np.abs(z_mm - target["z_mm"]) < window_mm
     patch = db_img[np.ix_(z_mask, x_mask)]
     if patch.size == 0:
         return None
@@ -495,14 +497,6 @@ def target_resolution(db_img, x_mm, z_mm, target, window_mm, target_idx=None, so
     PSLR_dB = mean_or_nan([PSLR_axial_dB, PSLR_lateral_dB])
     ISLR_dB = mean_or_nan([ISLR_axial_dB, ISLR_lateral_dB])
     peak_offset = math.sqrt((x_mm[ix] - target["x_mm"]) ** 2 + (z_mm[iz] - target["z_mm"]) ** 2)
-    distortion_pass = np.nan
-    if source == "simulation" and target_idx is not None and target_idx in {1, 5, 8, 9, 14, 15, 20}:
-        corrected_z = target["z_mm"] + 0.2
-        inside = (
-            abs(x_mm[ix] - target["x_mm"]) < 0.2957
-            and abs(z_mm[iz] - corrected_z) < 0.2957
-        )
-        distortion_pass = 1.0 if inside else 0.0
     return {
         "target_x_mm": target["x_mm"],
         "target_z_mm": target["z_mm"],
@@ -517,8 +511,30 @@ def target_resolution(db_img, x_mm, z_mm, target, window_mm, target_idx=None, so
         "ISLR_lateral_dB": float(ISLR_lateral_dB),
         "ISLR_dB": float(ISLR_dB),
         "distortion_mm": float(peak_offset),
-        "distortion_pass": distortion_pass,
+        "distortion_pass": np.nan,
     }
+
+
+def picmus_distortion_pass(db_img, x_mm, z_mm, target, window_mm, target_idx, source):
+    """Reproduce the official simulated PICMUS distortion test."""
+    if source != "simulation" or target_idx not in {1, 5, 8, 9, 14, 15, 20}:
+        return np.nan
+
+    corrected_z = target["z_mm"] + 0.2
+    x_mask = np.abs(x_mm - target["x_mm"]) < window_mm
+    z_mask = np.abs(z_mm - corrected_z) < window_mm
+    patch = db_img[np.ix_(z_mask, x_mask)]
+    if patch.size == 0 or not np.any(np.isfinite(patch)):
+        return np.nan
+
+    pz, px = np.unravel_index(np.nanargmax(patch), patch.shape)
+    peak_x = float(x_mm[np.where(x_mask)[0][px]])
+    peak_z = float(z_mm[np.where(z_mask)[0][pz]])
+    inside = (
+        abs(peak_x - target["x_mm"]) < 0.2957
+        and abs(peak_z - corrected_z) < 0.2957
+    )
+    return 1.0 if inside else 0.0
 
 
 def mean_or_nan(values):
@@ -695,11 +711,23 @@ def main():
     h5_path = resolve(args.h5_path)
     out_dir = resolve(args.out_dir)
     meta_from_h5 = read_sample_meta(h5_path, args.h5_sample_idx)
+    has_gt = infer_has_gt(args, h5_path, args.h5_sample_idx)
+    if (
+        not has_gt
+        and (
+            args.phantom_mode == "in_vivo"
+            or args.phantom_source == "in_vivo"
+            or meta_from_h5.get("phantom_mode") == "in_vivo"
+            or meta_from_h5.get("phantom_source") == "in_vivo"
+        )
+    ):
+        print("In-vivo scene: skipped metric export.")
+        return
+
     comparison = np.load(comparison_path).astype(np.float64)
     x_mm, z_mm = load_grids(h5_path)
     if comparison.shape[1:] != (len(z_mm), len(x_mm)):
         raise ValueError(f"Image shape {comparison.shape[1:]} does not match H5 grids {(len(z_mm), len(x_mm))}")
-    has_gt = infer_has_gt(args, h5_path, args.h5_sample_idx)
     methods = load_method_names(args, comparison_path, comparison.shape[0], has_gt)
 
     mode = infer_mode(args, comparison)
@@ -799,6 +827,15 @@ def main():
             stats = target_resolution(db_img, x_mm, z_mm, target, args.fwhm_window_mm, target_idx=idx + 1, source=source)
             if stats is None:
                 continue
+            stats["distortion_pass"] = picmus_distortion_pass(
+                db_img,
+                x_mm,
+                z_mm,
+                target,
+                args.fwhm_window_mm,
+                idx + 1,
+                source,
+            )
             target_rows.append({"method": method, "target_idx": idx + 1, **stats})
             target_stats.append(stats)
         row["FWHM_axial_mm"] = mean_or_nan([s["FWHM_axial_mm"] for s in target_stats])
@@ -860,6 +897,7 @@ def main():
         "contrast_roi_count": len(rois),
         "speckle_roi_count": len(speckle_rois),
         "resolution_target_count": len(targets),
+        "fwhm_window_mm": args.fwhm_window_mm,
         "contrast_groups": picmus_contrast_groups(source, len(rois)),
         "resolution_groups": picmus_resolution_groups(source, len(targets)),
         "note": "Standard metrics use the predefined phantom ROI and target definitions when available.",
@@ -878,5 +916,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

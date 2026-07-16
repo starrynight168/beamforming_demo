@@ -302,20 +302,33 @@ def save_roi_plot(path, display, x_mm, z_mm, rois, targets, target_rows=None, pe
     plt.close(fig)
 
 
-def save_lateral_profile_plot(out_dir, comparison, x_mm, z_mm, rois, targets, methods):
+def save_lateral_profile_plot(
+    out_dir,
+    comparison,
+    x_mm,
+    z_mm,
+    rois,
+    targets,
+    methods,
+    fwhm_window_mm=1.8,
+    display_window_mm=5.0,
+):
     if rois:
         target_cyst = min(rois, key=lambda c: (c["x_mm"] - 0.0) ** 2 + (c["z_mm"] - 25.0) ** 2)
         iz = int(np.argmin(np.abs(z_mm - target_cyst["z_mm"])))
+        cyst_radius = target_cyst["diameter_mm"] / 2.0
+        display_half_width = max(5.0, 1.75 * cyst_radius)
+        display_x_mask = np.abs(x_mm - target_cyst["x_mm"]) < display_half_width
         fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
         for i, method in enumerate(methods):
-            ax.plot(x_mm, comparison[i, iz, :], label=method, color=get_color(method),
+            ax.plot(x_mm[display_x_mask], comparison[i, iz, display_x_mask], label=method, color=get_color(method),
                     linestyle="--" if method.upper() == "GT" else "-", linewidth=1.5 if method.upper() != "GT" else 1.2)
         ax.axvline(target_cyst["x_mm"] - target_cyst["diameter_mm"] / 2, color="grey", linestyle=":", alpha=0.7, label="Cyst Boundary")
         ax.axvline(target_cyst["x_mm"] + target_cyst["diameter_mm"] / 2, color="grey", linestyle=":", alpha=0.7)
-        ax.set_title(f"1D Lateral Cyst Profile (Depth z = {z_mm[iz]:.1f} mm)", fontsize=12, fontweight="bold", pad=12)
+        ax.set_title("Lateral Cyst Profile", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("Lateral coordinate (mm)")
         ax.set_ylabel("Amplitude (dB)")
-        ax.set_ylim(-65, 5)
+        ax.set_ylim(-60, 0)
         ax.grid(True, linestyle="--", alpha=0.5)
         ax.legend(loc="lower right", fontsize=9)
         fig.tight_layout()
@@ -323,16 +336,24 @@ def save_lateral_profile_plot(out_dir, comparison, x_mm, z_mm, rois, targets, me
         plt.close(fig)
     if targets:
         target_point = min(targets, key=lambda t: (t["x_mm"] - 0.0) ** 2 + (t["z_mm"] - 25.0) ** 2)
-        iz = int(np.argmin(np.abs(z_mm - target_point["z_mm"])))
+        peak_x_mask = np.abs(x_mm - target_point["x_mm"]) < fwhm_window_mm
+        z_mask = np.abs(z_mm - target_point["z_mm"]) < fwhm_window_mm
+        display_x_mask = np.abs(x_mm - target_point["x_mm"]) < display_window_mm
         fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
         for i, method in enumerate(methods):
-            ax.plot(x_mm, comparison[i, iz, :], label=method, color=get_color(method),
+            patch = comparison[i][np.ix_(z_mask, peak_x_mask)]
+            if patch.size == 0 or not np.any(np.isfinite(patch)):
+                continue
+            peak_z_local, peak_x_local = np.unravel_index(np.nanargmax(patch), patch.shape)
+            peak_z_index = np.where(z_mask)[0][peak_z_local]
+            peak_db = float(patch[peak_z_local, peak_x_local])
+            profile = comparison[i, peak_z_index, display_x_mask].astype(np.float64) - peak_db
+            ax.plot(x_mm[display_x_mask], profile, label=method, color=get_color(method),
                     linestyle="--" if method.upper() == "GT" else "-", linewidth=1.5 if method.upper() != "GT" else 1.2)
-        ax.axvline(target_point["x_mm"], color="grey", linestyle=":", alpha=0.7, label="Point Target Center")
-        ax.set_title(f"1D Lateral Point Profile (Depth z = {z_mm[iz]:.1f} mm)", fontsize=12, fontweight="bold", pad=12)
+        ax.set_title("Normalized Lateral Beam Profile", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("Lateral coordinate (mm)")
-        ax.set_ylabel("Amplitude (dB)")
-        ax.set_ylim(-65, 5)
+        ax.set_ylabel("Amplitude relative to local target peak (dB)")
+        ax.set_ylim(-60, 2)
         ax.grid(True, linestyle="--", alpha=0.5)
         ax.legend(loc="lower right", fontsize=9)
         fig.tight_layout()
@@ -386,7 +407,16 @@ def main():
             display = db_to_display(comparison[0], args.dr)
             peak_method = next((method for method in methods if method != "GT"), methods[0] if methods else None)
             save_roi_plot(os.path.join(metrics_dir, "roi_targets.png"), display, x_mm, z_mm, rois, targets, target_rows, peak_method)
-        save_lateral_profile_plot(metrics_dir, comparison, x_mm, z_mm, rois, targets, methods)
+        save_lateral_profile_plot(
+            metrics_dir,
+            comparison,
+            x_mm,
+            z_mm,
+            rois,
+            targets,
+            methods,
+            float(meta.get("fwhm_window_mm", 1.8)),
+        )
 
     print(f"Saved plots in: {metrics_dir}")
 
