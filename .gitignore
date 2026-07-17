@@ -41,6 +41,7 @@ Thumbs.db
 # Project specific ignores
 PICMUS/
 data/*.h5
+data/logs/
 results/
 .ipynb_checkpoints/
 *.log

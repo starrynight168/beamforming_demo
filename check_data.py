@@ -1,4 +1,10 @@
-import os
+"""打包 H5 文件简洁体检脚本。"""
+from __future__ import annotations
+
+import argparse
+import sys
+import unicodedata
+from datetime import datetime
 from pathlib import Path
 
 import h5py
@@ -6,15 +12,10 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parent
-PICMUS = ROOT / "data" / "PICMUS"
+DATA_DIR = ROOT / "data"
+LOG_DIR = DATA_DIR / "logs"
 
-PACKED_FILES = [
-    ("simulation", ROOT / "data" / "simulation.h5", True, 2),
-    ("experiments", ROOT / "data" / "experiments.h5", True, 2),
-    ("in_vivo", ROOT / "data" / "in_vivo.h5", True, 2),
-]
-
-REQUIRED_H5_KEYS = [
+REQUIRED_FIELDS = [
     "all_multi_I",
     "all_multi_Q",
     "time_start_vector",
@@ -26,9 +27,25 @@ REQUIRED_H5_KEYS = [
     "z_grid",
     "x_grid",
     "angles",
+    "all_scale_ref",
+    "all_norm_ref",
 ]
 
-REQUIRED_STRING_KEYS = [
+KEY_FIELDS = [
+    "all_multi_I",
+    "all_multi_Q",
+    "all_envdb_norm",
+    "all_scale_ref",
+    "all_norm_ref",
+    "fs",
+    "c",
+    "fc",
+    "pitch",
+    "num_channels",
+    "z_grid",
+    "x_grid",
+    "angles",
+    "time_start_vector",
     "sample_names",
     "phantom_mode",
     "phantom_source",
@@ -36,305 +53,285 @@ REQUIRED_STRING_KEYS = [
     "scan_path",
     "phantom_path",
     "gt_path",
-]
-
-NUMERIC_FIELD_INFO = {
-    "fs": ("fs", "sampling frequency", "Hz", 1e5, 1e9),
-    "c": ("c", "sound speed", "m/s", 1000.0, 2000.0),
-    "fc": ("fc", "center frequency", "Hz", 1e5, 1e9),
-    "pitch": ("pitch", "element pitch", "m", 1e-6, 5e-3),
-    "num_channels": ("num_channels", "channel count", "", 1, 4096),
-}
-
-GRID_FIELD_INFO = {
-    "z_grid": ("z_grid", "depth grid", "m"),
-    "x_grid": ("x_grid", "lateral grid", "m"),
-    "angles": ("angles", "plane-wave angles", "rad"),
-}
-
-SEPARATOR = "-" * 90
-
-META_FIELD_MAP = {
-    "sample_names": "meta.name",
-    "phantom_mode": "meta.mode",
-    "phantom_source": "meta.source",
-    "iq_path": "meta.iq",
-    "scan_path": "meta.scan",
-    "phantom_path": "meta.phantom",
-    "gt_path": "meta.gt",
-}
-
-PICMUS_PHANTOMS = [
-    ("simulation contrast", PICMUS / "database/simulation/contrast_speckle/contrast_speckle_simu_phantom.hdf5", "contrast"),
-    ("simulation resolution", PICMUS / "database/simulation/resolution_distorsion/resolution_distorsion_simu_phantom.hdf5", "resolution"),
-    ("experiments contrast", PICMUS / "database/experiments/contrast_speckle/contrast_speckle_expe_phantom.hdf5", "contrast"),
-    ("experiments resolution", PICMUS / "database/experiments/resolution_distorsion/resolution_distorsion_expe_phantom.hdf5", "resolution"),
-]
-
-PICMUS_IN_VIVO = [
-    PICMUS / "database/in_vivo/carotid_cross/carotid_cross_expe_dataset_iq.hdf5",
-    PICMUS / "database/in_vivo/carotid_cross/carotid_cross_expe_scan.hdf5",
-    PICMUS / "database/in_vivo/carotid_long/carotid_long_expe_dataset_iq.hdf5",
-    PICMUS / "database/in_vivo/carotid_long/carotid_long_expe_scan.hdf5",
+    "has_gt",
 ]
 
 
-def ok(message):
-    print(f"[OK]   {message}")
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text: str) -> None:
+        for stream in self.streams:
+            stream.write(text)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
 
 
-def warn(message):
-    print(f"[WARN] {message}")
+def default_log_path() -> Path:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return LOG_DIR / f"check_data_{stamp}.txt"
 
 
-def fail(message):
-    print(f"[FAIL] {message}")
+def decode_value(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, np.bytes_):
+        return value.astype(str).item()
+    arr = np.asarray(value)
+    if arr.shape == ():
+        item = arr.item()
+        if isinstance(item, bytes):
+            return item.decode("utf-8", errors="replace")
+        return item
+    return value
 
 
-def section(title):
-    print()
-    print("=" * 90)
-    print(title)
-    print("=" * 90)
+def display_width(value) -> int:
+    width = 0
+    for char in str(value):
+        width += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+    return width
 
 
-def print_item(label, value):
-    print(f"  {label:<28}: {value}")
+def shorten_text(text, limit: int = 110) -> str:
+    text = str(text).replace("\n", " | ")
+    return text if display_width(text) <= limit else text[:limit] + " ..."
 
 
-def exists(path):
-    if path.exists():
-        ok(str(path.relative_to(ROOT)))
-        return True
-    fail(f"missing: {path.relative_to(ROOT)}")
-    return False
+def format_value(value, max_items: int = 1) -> str:
+    decoded = decode_value(value)
+    if isinstance(decoded, np.ndarray):
+        if decoded.dtype.kind in {"S", "O", "U"}:
+            flat = [decode_value(item) for item in decoded.reshape(-1)]
+            return " | ".join(shorten_text(item) for item in flat[:max_items])
+        if decoded.ndim == 0:
+            return shorten_text(decode_value(decoded[()]))
+        return np.array2string(decoded, threshold=decoded.size, max_line_width=120)
+    return shorten_text(decoded)
 
 
-def read_strings(dataset):
-    values = dataset[:]
-    out = []
-    for value in values:
-        out.append(value.decode("utf-8") if isinstance(value, bytes) else str(value))
-    return out
+def dataset_preview(ds: h5py.Dataset) -> str:
+    if ds.shape == ():
+        return format_value(ds[()])
+    if ds.size == 0:
+        return "空"
+    if ds.dtype.kind in {"S", "U", "O"}:
+        return format_value(ds[:])
+
+    if ds.size <= 4096:
+        arr = np.asarray(ds[:], dtype=np.float64)
+    else:
+        index = (0,) + tuple(slice(None) for _ in range(ds.ndim - 1))
+        arr = np.asarray(ds[index], dtype=np.float64)
+    if arr.size == 0:
+        return "空"
+    if not np.isfinite(arr).all():
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            return "非有限值"
+        return f"[{finite.min():.4g}, {finite.max():.4g}] + 非有限值"
+    return f"[{arr.min():.4g}, {arr.max():.4g}]"
 
 
-def check_string_dataset(name, path_name, hf, key, expected_samples, allow_empty=False):
+def dataset_storage_bytes(ds: h5py.Dataset) -> int:
+    try:
+        return int(ds.id.get_storage_size())
+    except Exception:
+        return 0
+
+
+def format_bytes(num_bytes: int) -> str:
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    value = float(num_bytes)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.3f} {unit}"
+        value /= 1024
+    return f"{num_bytes} B"
+
+
+def format_shape(shape) -> str:
+    return "标量" if shape == () else "x".join(str(dim) for dim in shape)
+
+
+def pad_display(value, width: int) -> str:
+    text = str(value)
+    return text + " " * max(width - display_width(text), 0)
+
+
+def print_table(rows, headers) -> None:
+    widths = [display_width(header) for header in headers]
+    for row in rows:
+        for idx, cell in enumerate(row):
+            widths[idx] = max(widths[idx], display_width(cell))
+    print("  " + "  ".join(pad_display(cell, widths[idx]) for idx, cell in enumerate(headers)))
+    print("  " + "  ".join("-" * width for width in widths))
+    for row in rows:
+        print("  " + "  ".join(pad_display(cell, widths[idx]) for idx, cell in enumerate(row)))
+
+
+def scalar_float(hf: h5py.File, key: str) -> float | None:
     if key not in hf:
-        fail(f"{path_name}: missing string key {key}")
+        return None
+    try:
+        return float(decode_value(hf[key][()]))
+    except Exception:
+        return None
+
+
+def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
+    problems: list[str] = []
+    missing = [key for key in REQUIRED_FIELDS if key not in hf]
+    if missing:
+        problems.append("缺少字段: " + ", ".join(missing))
+
+    if "all_multi_I" in hf and "all_multi_Q" in hf:
+        if hf["all_multi_I"].shape != hf["all_multi_Q"].shape:
+            problems.append("all_multi_I / all_multi_Q 形状不一致")
+
+    if {"all_multi_I", "all_envdb_norm"} <= set(hf.keys()):
+        if hf["all_multi_I"].shape[0] != hf["all_envdb_norm"].shape[0]:
+            problems.append("输入 IQ 与 GT 帧数不一致")
+
+    if {"all_multi_I", "time_start_vector"} <= set(hf.keys()):
+        if hf["time_start_vector"].shape[:2] != hf["all_multi_I"].shape[:2]:
+            problems.append("time_start_vector 形状应匹配 [N,A]")
+
+    if {"all_multi_I", "angles"} <= set(hf.keys()):
+        if hf["angles"].shape[0] != hf["all_multi_I"].shape[1]:
+            problems.append("angles 数量应匹配输入角度维度")
+
+    if {"all_multi_I", "num_channels"} <= set(hf.keys()):
+        channels = int(decode_value(hf["num_channels"][()]))
+        if channels != hf["all_multi_I"].shape[-1]:
+            problems.append(f"num_channels={channels}, 输入通道数={hf['all_multi_I'].shape[-1]}")
+
+    for key in ("all_multi_I", "all_multi_Q", "all_envdb_norm"):
+        if key in hf and hf[key].shape:
+            arr = np.asarray(hf[key][0])
+            if not np.isfinite(arr).all():
+                problems.append(f"{key} 第 0 帧包含 NaN/Inf")
+
+    return ("通过" if not problems else "失败"), problems
+
+
+def inspect_file(path: Path) -> bool:
+    print()
+    print("=" * 100)
+    print(f"文件: {path.name}")
+    print(f"路径: {path}")
+
+    if not path.exists():
+        print("状态: 失败")
+        print("原因: 文件不存在")
         return False
-
-    passed = True
-    values = read_strings(hf[key])
-    if len(values) != expected_samples:
-        fail(f"{path_name}: {key} count {len(values)}, expected {expected_samples}")
-        passed = False
-
-    empty_indices = [idx for idx, value in enumerate(values) if value == ""]
-    if empty_indices and not allow_empty:
-        fail(f"{path_name}: {key} has empty values at {empty_indices}")
-        passed = False
 
     try:
-        [value.encode("utf-8").decode("utf-8") for value in values]
-    except UnicodeError:
-        fail(f"{path_name}: {key} contains non-UTF8 string values")
-        passed = False
+        with h5py.File(path, "r") as hf:
+            status, problems = run_checks(hf)
+            file_size = path.stat().st_size / 1024**2
+            n_frames = hf["all_multi_I"].shape[0] if "all_multi_I" in hf else "?"
+            input_shape = format_shape(hf["all_multi_I"].shape) if "all_multi_I" in hf else "缺失"
+            gt_shape = format_shape(hf["all_envdb_norm"].shape) if "all_envdb_norm" in hf else "无"
+            fs = scalar_float(hf, "fs")
+            fc = scalar_float(hf, "fc")
 
-    if os.name == "nt":
-        absolute_values = [value for value in values if len(value) > 2 and value[1:3] in (":\\", ":/")]
-    else:
-        absolute_values = [value for value in values if value.startswith("/")]
-    if absolute_values:
-        fail(f"{path_name}: {key} contains absolute paths: {absolute_values}")
-        passed = False
-
-    if passed:
-        display_key = META_FIELD_MAP.get(key, key)
-        print_item(f"{display_key} -> {key}", values)
-    return passed
-
-
-def scalar_value(dataset):
-    value = dataset[()]
-    return value.item() if hasattr(value, "item") else value
-
-
-def check_numeric_fields(name, path_name, hf):
-    passed = True
-    for key, (field_name, label, unit, low, high) in NUMERIC_FIELD_INFO.items():
-        if key not in hf:
-            fail(f"{path_name}: missing numeric key {key}")
-            passed = False
-            continue
-        value = scalar_value(hf[key])
-        if not np.isscalar(value) or not np.isfinite(value):
-            fail(f"{path_name}: {key} is not a finite scalar: {value}")
-            passed = False
-            continue
-        if not (low <= float(value) <= high):
-            fail(f"{path_name}: {key}={value} outside expected range [{low}, {high}]")
-            passed = False
-        else:
-            suffix = f" {unit}" if unit else ""
-            print_item(f"{field_name} -> {key}", f"{value}{suffix} ({label})")
-
-    for key, (field_name, label, unit) in GRID_FIELD_INFO.items():
-        if key not in hf:
-            fail(f"{path_name}: missing grid key {key}")
-            passed = False
-            continue
-        values = np.asarray(hf[key][:], dtype=float)
-        if values.ndim != 1 or len(values) == 0:
-            fail(f"{path_name}: {key} must be a non-empty 1D array, got shape {values.shape}")
-            passed = False
-            continue
-        if not np.all(np.isfinite(values)):
-            fail(f"{path_name}: {key} contains non-finite values")
-            passed = False
-            continue
-        diffs = np.diff(values)
-        monotonic = len(values) == 1 or np.all(diffs > 0) or np.all(diffs < 0)
-        if not monotonic:
-            fail(f"{path_name}: {key} is not monotonic")
-            passed = False
-        unit_suffix = f" {unit}" if unit else ""
-        if len(values) > 1:
-            step = float(np.median(np.abs(diffs)))
-            print_item(
-                f"{field_name} -> {key}",
-                f"len={len(values)}, range=[{values.min():.6g}, {values.max():.6g}]{unit_suffix}, step~{step:.6g}{unit_suffix} ({label})",
-            )
-        else:
-            print_item(f"{field_name} -> {key}", f"len=1, value={values[0]:.6g}{unit_suffix} ({label})")
-
-    if "time_start_vector" in hf:
-        t0 = np.asarray(hf["time_start_vector"][:], dtype=float)
-        if t0.shape[0] == 0 or not np.all(np.isfinite(t0)):
-            fail(f"{path_name}: time_start_vector is empty or non-finite")
-            passed = False
-        else:
-            print_item("t0 -> time_start_vector", f"shape={t0.shape}, range=[{t0.min():.6g}, {t0.max():.6g}] s")
-
-    if "all_multi_I" in hf and "num_channels" in hf:
-        num_channels = int(scalar_value(hf["num_channels"]))
-        actual_channels = int(hf["all_multi_I"].shape[-1])
-        if num_channels != actual_channels:
-            fail(f"{path_name}: num_channels={num_channels}, I channel dim={actual_channels}")
-            passed = False
-    return passed
-
-
-def check_packed_h5(name, path, expect_gt, expected_samples):
-    if not exists(path):
-        return False
-    passed = True
-    section(f"{name} | {path.relative_to(ROOT)}")
-    with h5py.File(path, "r") as hf:
-        for key in REQUIRED_H5_KEYS:
-            if key not in hf:
-                fail(f"{path.name}: missing key {key}")
-                passed = False
-        has_gt = "all_envdb_norm" in hf
-        if has_gt != expect_gt:
-            fail(f"{path.name}: GT presence is {has_gt}, expected {expect_gt}")
-            passed = False
-        if "all_multi_I" in hf and "all_multi_Q" in hf:
-            i_shape = hf["all_multi_I"].shape
-            q_shape = hf["all_multi_Q"].shape
-            if i_shape != q_shape:
-                fail(f"{path.name}: I/Q shape mismatch {i_shape} vs {q_shape}")
-                passed = False
-            elif i_shape[0] != expected_samples:
-                fail(f"{path.name}: sample count {i_shape[0]}, expected {expected_samples}")
-                passed = False
-            else:
-                print_item("I -> all_multi_I", f"shape={i_shape}, dtype={hf['all_multi_I'].dtype}")
-                print_item("Q -> all_multi_Q", f"shape={q_shape}, dtype={hf['all_multi_Q'].dtype}")
-        if "all_envdb_norm" in hf:
-            gt_shape = hf["all_envdb_norm"].shape
-            print_item("gt -> all_envdb_norm", f"shape={gt_shape}, dtype={hf['all_envdb_norm'].dtype}")
-        elif expect_gt:
-            fail(f"{path.name}: missing gt -> all_envdb_norm")
-            passed = False
-        else:
-            print_item("gt -> all_envdb_norm", "absent (expected)")
-        print(SEPARATOR)
-        passed = check_numeric_fields(name, path.name, hf) and passed
-        print(SEPARATOR)
-        for key in REQUIRED_STRING_KEYS:
-            allow_empty = key == "phantom_path" and name == "in_vivo" or (key in {"phantom_path", "gt_path"} and not expect_gt)
-            passed = check_string_dataset(name, path.name, hf, key, expected_samples, allow_empty) and passed
-        if "has_gt" in hf:
-            has_gt_values = hf["has_gt"][:].astype(bool).tolist()
-            if len(has_gt_values) != expected_samples:
-                fail(f"{path.name}: has_gt count {len(has_gt_values)}, expected {expected_samples}")
-                passed = False
-            elif any(value != expect_gt for value in has_gt_values):
-                fail(f"{path.name}: has_gt = {has_gt_values}, expected all {expect_gt}")
-                passed = False
-            else:
-                print_item("meta.has_gt -> has_gt", has_gt_values)
-        else:
-            fail(f"{path.name}: missing key has_gt")
-            passed = False
-    return passed
-
-
-def check_phantom(label, path, kind):
-    if not exists(path):
-        return False
-    base = "US/US_DATASET0000"
-    passed = True
-    with h5py.File(path, "r") as hf:
-        if kind == "contrast":
-            required = [
-                "phantom_occlusionCenterX",
-                "phantom_occlusionCenterZ",
-                "phantom_occlusionDiameter",
-                "phantom_RoiCenterX",
-                "phantom_RoiCenterZ",
-                "phantom_RoiPsfTimeX",
-                "phantom_RoiPsfTimeZ",
+            summary_rows = [
+                ("检查状态", status),
+                ("文件大小", f"{file_size:.3f} MiB"),
+                ("样本帧数", n_frames),
+                ("输入 IQ", input_shape),
+                ("GT 图像", gt_shape),
+                ("采样率 fs", f"{fs / 1e6:.6g} MHz" if fs else "缺失"),
+                ("中心频率 fc", f"{fc / 1e6:.6g} MHz" if fc else "缺失"),
+                ("全部字段数", len(hf.keys())),
             ]
-        else:
-            required = ["phantom_xPts", "phantom_zPts"]
-        for key in required:
-            full_key = f"{base}/{key}"
-            if full_key not in hf:
-                fail(f"{label}: missing {key}")
-                passed = False
-        if kind == "contrast" and f"{base}/phantom_occlusionCenterX" in hf:
-            ok(f"{label}: contrast ROIs = {len(hf[f'{base}/phantom_occlusionCenterX'])}")
-        if kind == "resolution" and f"{base}/phantom_xPts" in hf:
-            xs = np.asarray(hf[f"{base}/phantom_xPts"][:])
-            ok(f"{label}: point targets = {int(np.isfinite(xs).sum())}")
-    return passed
+            print_table(summary_rows, ("项目", "值"))
+
+            field_rows = []
+            keys = [key for key in KEY_FIELDS if key in hf]
+            keys.extend(sorted(key for key in hf.keys() if key not in keys))
+            for key in keys:
+                ds = hf[key]
+                if not isinstance(ds, h5py.Dataset):
+                    continue
+                storage_bytes = dataset_storage_bytes(ds)
+                row = (
+                    key,
+                    format_shape(ds.shape),
+                    str(ds.dtype),
+                    format_bytes(storage_bytes),
+                    dataset_preview(ds),
+                )
+                field_rows.append((storage_bytes, row))
+            field_rows.sort(key=lambda item: item[0], reverse=True)
+
+            print()
+            print("[字段占用]")
+            print_table([row for _, row in field_rows], ("字段", "形状", "类型", "占用空间", "范围/示例"))
+
+            if problems:
+                print()
+                print("[问题]")
+                for item in problems:
+                    print(f"  - {item}")
+
+            return status == "通过"
+    except Exception as exc:
+        print("状态: 失败")
+        print(f"原因: {exc}")
+        return False
 
 
-def main():
-    print(f"Project: {ROOT}")
-    print()
+def discover_default_files() -> list[Path]:
+    return sorted(DATA_DIR.glob("*.h5"))
 
-    passed = True
-    for name, path, expect_gt, expected_samples in PACKED_FILES:
-        passed = check_packed_h5(name, path, expect_gt, expected_samples) and passed
 
-    print()
-    for label, path, kind in PICMUS_PHANTOMS:
-        passed = check_phantom(label, path, kind) and passed
+def resolve_files(values: list[str] | None) -> list[Path]:
+    if not values:
+        return discover_default_files()
+    return [Path(value).resolve() for value in values]
 
-    print()
-    for path in PICMUS_IN_VIVO:
-        passed = exists(path) and passed
 
-    print()
-    for path in [ROOT / "config.yaml", ROOT / "run_one.py", ROOT / "run_all.py", ROOT / "evaluation" / "evaluate.py"]:
-        passed = exists(path) and passed
+def main() -> None:
+    parser = argparse.ArgumentParser(description="打包 H5 文件简洁体检。")
+    parser.add_argument("files", nargs="*", help="H5 文件；默认检查 data/*.h5")
+    parser.add_argument("--files", dest="files_opt", nargs="*", default=None, help="H5 文件列表。")
+    parser.add_argument("--h5_path", nargs="*", default=None, help="等价于 --files。")
+    parser.add_argument("--log", default=None, help="日志路径；默认 data/logs/check_data_*.txt")
+    parser.add_argument("--no_log", action="store_true", help="只打印到命令行。")
+    args = parser.parse_args()
 
-    print()
-    if passed:
-        ok("data check passed")
+    file_args = args.h5_path or args.files_opt or args.files
+    files = resolve_files(file_args)
+    if not files:
+        raise SystemExit("未找到 H5 文件。请把 H5 放到 data/ 下，或显式传入路径。")
+
+    def run() -> list[bool]:
+        return [inspect_file(path) for path in files]
+
+    if args.no_log:
+        results = run()
     else:
+        log_path = Path(args.log) if args.log else default_log_path()
+        log_path = log_path if log_path.is_absolute() else (ROOT / log_path).resolve()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("w", encoding="utf-8", errors="replace") as f:
+            old_stdout = sys.stdout
+            sys.stdout = Tee(old_stdout, f)
+            try:
+                results = run()
+                print()
+                print(f"日志: {log_path}")
+            finally:
+                sys.stdout = old_stdout
+
+    if not all(results):
         raise SystemExit(1)
 
 
