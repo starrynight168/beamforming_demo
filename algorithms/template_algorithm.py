@@ -4,6 +4,10 @@ Template for adding a new beamforming algorithm.
 Copy this file to algorithms/my_method.py, change METHOD_NAME, then implement
 beamform(). The command-line interface and output format are kept compatible
 with run_one.py and run_all.py.
+
+This template is for ordinary reconstruction/comparison scripts. To use a new
+method as an H5 pack-time teacher, also implement one unique *BeamformerIQ
+class whose __call__ returns I_out, Q_out; see data/scripts/pack_EPFL.py.
 """
 
 import argparse
@@ -77,6 +81,9 @@ def beamform(data, args):
     Return:
         image_db: 2D B-mode image in dB, shape [len(z_grid), len(x_grid)].
                   The maximum should normally be normalized to 0 dB.
+
+    If the method performs delayed channel sampling, mask out-of-range samples
+    and renormalize the remaining aperture weights before summation.
     """
     raise NotImplementedError("Copy this file, set METHOD_NAME, and implement beamform().")
 
