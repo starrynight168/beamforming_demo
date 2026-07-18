@@ -162,6 +162,29 @@ params:
 - `tgc`: 是否启用深度增益补偿；开启时 `tgc_alpha` 生效。
 - `dr`: 显示和评估使用的动态范围，单位 dB。
 
+### 动态孔径的统一对照与 DAS 专用模式
+
+默认实验使用按通道数扩张的离散动态孔径（`discrete`）：DAS、MV、ESBMV、GCF-MV 等算法在每个深度使用一致的离散有效通道数。这使算法间的分辨率、旁瓣和散斑差异主要来自波束形成方法本身，而不是不同的孔径筛选规则；同时避免 MV 在逐像素协方差估计与求解之外，再承担连续几何孔径计算，便于保持运行效率。
+
+因此，主配置不把几何孔径作为公共模式。DAS 保留两种可选接收孔径模式，供单独实验或消融使用：
+
+- `discrete`：默认值；按离散通道数选择孔径，与 MV 的对照设置一致。
+- `geometry`：DAS 专用；按连续几何半宽和窗函数选择孔径，适合研究几何孔径本身的影响，不建议与默认 MV 结果直接作为严格公平对照。
+
+在 `config.yaml` 中设置 DAS 的模式：
+
+```yaml
+algorithm_params:
+  das:
+    aperture_mode: discrete  # 或 geometry
+```
+
+也可以临时覆盖：
+
+```bash
+python run_one.py --scene simulation_contrast_speckle --algorithms das --aperture_mode geometry
+```
+
 命令行示例：
 
 ```bash

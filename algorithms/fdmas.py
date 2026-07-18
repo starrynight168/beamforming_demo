@@ -11,9 +11,9 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.gridspec import GridSpec
 from beamforming_utils import (
-    aperture_half_width,
-    aperture_window_from_dx,
+    aperture_window_1d,
     db_display_range,
+    dynamic_aperture_channel_count,
     interpolate_channel_samples,
     parse_selected_angles,
     resolve_project_path,
@@ -121,9 +121,16 @@ class FDMASBeamformerIQ:
         self.X, self.Z = X, Z
         self.drs = torch.sqrt((X[..., None] - self.ep)**2 + Z[..., None]**2) * self.sc
 
-        dx = X[..., None] - self.ep
-        half_a = aperture_half_width(Z[..., None], args.f_number, n_elem, pitch, args.dynamic_aperture)
-        win = aperture_window_from_dx(dx, half_a, args.window)
+        win = torch.zeros((self.H, self.W, self.N), dtype=torch.float32, device=device)
+        centers = torch.argmin(torch.abs(self.x_grid[:, None] - self.ep[None, :]), dim=1)
+        for iz, depth in enumerate(self.z_grid):
+            k = dynamic_aperture_channel_count(
+                float(depth.item()), args.f_number, pitch, n_elem, args.dynamic_aperture
+            )
+            starts = torch.clamp(centers - k // 2, 0, n_elem - k)
+            channels = starts[:, None] + torch.arange(k, device=device)[None, :]
+            row_window = aperture_window_1d(k, args.window, device).expand(self.W, -1)
+            win[iz].scatter_(1, channels, row_window)
         self.window = win / (win.sum(-1, keepdim=True) + 1e-9)
         self.ch = torch.arange(n_elem, device=device).view(1, 1, -1)
 
@@ -182,6 +189,7 @@ class FDMASBeamformerIQ:
                 I_center, Q_center = interpolate_channel_samples(I_angle, Q_angle, sample, ch, args.interp)
 
                 valid_w = valid.float() * weights_b
+                valid_w = valid_w / (valid_w.sum(dim=-1, keepdim=True) + 1e-9)
                 I_rx = I_center * cos_rx - Q_center * sin_rx
                 Q_rx = I_center * sin_rx + Q_center * cos_rx
                 pair_sum = self._complex_fdmas(I_rx, Q_rx, valid_w)
@@ -351,4 +359,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

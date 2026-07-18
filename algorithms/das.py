@@ -12,8 +12,10 @@ import matplotlib.patches as patches
 from matplotlib.gridspec import GridSpec
 from beamforming_utils import (
     aperture_half_width,
+    aperture_window_1d,
     aperture_window_from_dx,
     db_display_range,
+    dynamic_aperture_channel_count,
     interpolate_channel_samples,
     parse_selected_angles,
     resolve_project_path,
@@ -26,6 +28,10 @@ parser = argparse.ArgumentParser(description='DAS Beamforming - Baseband IQ Data
 add_common_arguments(parser)
 add_io_arguments(parser, save_gt_help='保存GT图像')
 parser.add_argument('--row_block', type=int, default=24, help='GPU按深度方向分块行数；<=0 表示整幅一次计算')
+parser.add_argument(
+    '--aperture_mode', choices=['discrete', 'geometry'], default='discrete',
+    help='DAS 接收孔径：discrete=与 MV 相同的离散 K；geometry=连续几何截断',
+)
 args = parser.parse_args()
 
 METHOD_NAME = 'das'
@@ -97,6 +103,7 @@ def print_physical_summary(c, fc, fs, pitch, n_elem, angles, t0, H, W, dz, dx,
     print(f"{'=' * 70}")
     print(f"  F-Number     : {args.f_number}")
     print(f"  Aperture     : {'Dynamic' if args.dynamic_aperture else 'Fixed Full'}")
+    print(f"  Aperture mode: {args.aperture_mode}")
     print(f"  Window       : {args.window.upper()}")
     print(f"  Interp       : {args.interp}")
     print(f"  TGC          : {'Enabled' if args.tgc else 'Disabled'}")
@@ -121,9 +128,23 @@ class DASBeamformerIQ:
         self.X, self.Z = X, Z
         self.drs = torch.sqrt((X[..., None] - self.ep)**2 + Z[..., None]**2) * self.sc
 
-        dx = X[..., None] - self.ep
-        half_a = aperture_half_width(Z[..., None], args.f_number, n_elem, pitch, args.dynamic_aperture)
-        win = aperture_window_from_dx(dx, half_a, args.window)
+        if args.aperture_mode == 'geometry':
+            dx = X[..., None] - self.ep
+            half_a = aperture_half_width(
+                Z[..., None], args.f_number, n_elem, pitch, args.dynamic_aperture
+            )
+            win = aperture_window_from_dx(dx, half_a, args.window)
+        else:
+            win = torch.zeros((self.H, self.W, self.N), dtype=torch.float32, device=device)
+            centers = torch.argmin(torch.abs(self.x_grid[:, None] - self.ep[None, :]), dim=1)
+            for iz, depth in enumerate(self.z_grid):
+                k = dynamic_aperture_channel_count(
+                    float(depth.item()), args.f_number, pitch, n_elem, args.dynamic_aperture
+                )
+                starts = torch.clamp(centers - k // 2, 0, n_elem - k)
+                channels = starts[:, None] + torch.arange(k, device=device)[None, :]
+                row_window = aperture_window_1d(k, args.window, device).expand(self.W, -1)
+                win[iz].scatter_(1, channels, row_window)
         self.window = win / (win.sum(-1, keepdim=True) + 1e-9)
         self.ch = torch.arange(n_elem, device=device).view(1, 1, -1)
 
@@ -174,6 +195,7 @@ class DASBeamformerIQ:
                 I_center, Q_center = interpolate_channel_samples(I_angle, Q_angle, sample, ch, args.interp)
 
                 valid_w = valid.float() * weights_b
+                valid_w = valid_w / (valid_w.sum(dim=-1, keepdim=True) + 1e-9)
                 I_rx = I_center * cos_rx - Q_center * sin_rx
                 Q_rx = I_center * sin_rx + Q_center * cos_rx
                 I_sum = (I_rx * valid_w).sum(dim=-1)
@@ -323,13 +345,13 @@ def main():
     
     save_figure(das_db, extent_mm,
                 os.path.join(OUTPUT_DIR, f'{out_name}.png'),
-                title_params,
+        f'{title_params} | {args.aperture_mode}',
                 dr=args.dr)
     
     if has_gt and args.save_gt:
         save_comparison_figure(das_db, gt_data, extent_mm,
                                os.path.join(OUTPUT_DIR, f'{out_name}_comparison.png'),
-                               title_params,
+                               f'{title_params} | {args.aperture_mode}',
                                dr=args.dr)
 
     params = vars(args).copy()
@@ -344,4 +366,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

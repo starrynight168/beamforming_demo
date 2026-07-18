@@ -25,7 +25,9 @@ params:
   interp: linear
 
 algorithm_params:
-  das: {}
+  das:
+    # 默认与其他算法一致：按通道数使用离散动态孔径。
+    aperture_mode: discrete
 
   mv:
     mv_dl: 0.0
@@ -106,4 +108,3 @@ scenes:
     phantom_mode: in_vivo
     phantom_source: in_vivo
     has_gt: true
-

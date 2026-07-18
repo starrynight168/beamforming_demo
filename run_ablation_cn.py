@@ -47,6 +47,7 @@ GLOBAL_PARAM_DESCRIPTIONS = {
 }
 
 ALGORITHM_PARAM_DESCRIPTIONS = {
+    "aperture_mode": "DAS 接收孔径模式。discrete 为与 MV 一致的离散通道孔径；geometry 为 DAS 专用的连续几何孔径。",
     "mv_dl": "MV 对角加载。增大通常更稳定，但可能牺牲分辨率。",
     "fbss": "是否启用前后向空间平滑。通常提升稳健性。",
     "subarray_ratio": "子阵长度比例。越大孔径越大，分辨率/稳定性会变化。",
@@ -85,6 +86,7 @@ PARAM_VALUE_LABELS = {
     "tgc_alpha": "tgc_alpha",
     "window": "window",
     "interp": "interp",
+    "aperture_mode": "aperture",
 }
 
 
