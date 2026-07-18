@@ -205,6 +205,7 @@ def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, 
                     Q_center = Q_angle[idx0, ch] * (1.0 - frac) + Q_angle[idx0 + 1, ch] * frac
 
                 valid_w = valid.float() * weights
+                valid_w = valid_w / (valid_w.sum(dim=-1, keepdim=True) + 1e-9)
                 I_rx = I_center * cos_rx - Q_center * sin_rx
                 Q_rx = I_center * sin_rx + Q_center * cos_rx
                 I_sum = (I_rx * valid_w).sum(dim=-1)
