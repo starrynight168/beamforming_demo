@@ -36,6 +36,8 @@ def parse_args():
     parser.add_argument("--output_root", default="results")
     parser.add_argument("--python_exe", default=sys.executable)
     parser.add_argument("--no_evaluate", action="store_true", default=False)
+    parser.add_argument("--no_individual_images", action="store_true", default=False,
+                        help="不生成场景目录下的 individual_images 单图目录")
     parser.add_argument("--keep_existing", action="store_true", default=False, help="Reuse existing algorithm npy files")
     args, extra_algorithm_args = parser.parse_known_args()
     args.extra_algorithm_args = extra_algorithm_args
@@ -172,6 +174,25 @@ def save_comparison(images, titles, extent_mm, output_path, dr):
     plt.close(fig)
 
 
+def save_single_image(image, title, extent_mm, output_path, dr):
+    fig, ax = plt.subplots(figsize=(4.2, 4.6), dpi=300, constrained_layout=True)
+    im = ax.imshow(image, cmap="gray", vmin=-dr, vmax=0, extent=extent_mm, aspect="equal")
+    ax.set_title(title, fontsize=12, pad=8, fontweight="bold")
+    ax.set_xlabel("Lateral (mm)")
+    ax.set_ylabel("Depth (mm)")
+    add_scale_bar(ax, extent_mm)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Amplitude (dB)")
+    fig.savefig(output_path, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
+def save_individual_images(images, titles, image_names, extent_mm, output_dir, dr):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for image, title, name in zip(images, titles, image_names):
+        save_single_image(image, title, extent_mm, output_dir / f"{name}.png", dr)
+
+
 def can_reuse_existing(scene_dir, config, scene, method, args):
     params_path = scene_dir / "run_params.json"
     if not params_path.exists():
@@ -262,18 +283,25 @@ def main():
 
     images = []
     titles = []
+    image_names = []
     if has_gt and gt is not None:
         images.append(gt_norm_to_db(gt, dr))
         titles.append("Ground Truth")
+        image_names.append("ground_truth")
     for method in methods:
         path = scene_dir / method / f"{method}.npy"
         images.append(np.load(path).astype(np.float32))
         titles.append(algorithm_label(config, method))
+        image_names.append(method)
 
     comparison = np.stack(images, axis=0)
     comparison_path = scene_dir / "comparison.npy"
     np.save(comparison_path, comparison)
     save_comparison(images, titles, extent_mm, scene_dir / "comparison.png", dr)
+    individual_dir = None
+    if not args.no_individual_images:
+        individual_dir = scene_dir / "individual_images"
+        save_individual_images(images, titles, image_names, extent_mm, individual_dir, dr)
 
     run_params = {
         "scene": scene,
@@ -292,6 +320,8 @@ def main():
         run_evaluation(args, config, scene, scene_dir, comparison_path, methods)
 
     print(f"\nDone: {scene_dir}")
+    if individual_dir is not None:
+        print(f"Individual images: {individual_dir}")
 
 
 if __name__ == "__main__":

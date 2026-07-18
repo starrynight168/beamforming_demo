@@ -1,6 +1,7 @@
 import csv
 import json
 import math
+import shutil
 import subprocess
 import sys
 from copy import deepcopy
@@ -64,19 +65,6 @@ ALGORITHM_PARAM_DESCRIPTIONS = {
     "depth_smooth_rows": "CMSAW 深度方向平滑行数。",
 }
 
-METRIC_OPTIONS = {
-    "SSIM_vs_GT": ("越大越好", "max"),
-    "PSNR_dB_vs_GT": ("越大越好", "max"),
-    "MAE_dB_vs_GT": ("越小越好", "min"),
-    "contrast_dB": ("通常绝对值/场景相关，不建议自动最优", "max"),
-    "CNR": ("越大越好", "max"),
-    "gCNR": ("越大越好", "max"),
-    "FWHM_axial_mm": ("越小越好", "min"),
-    "FWHM_lateral_mm": ("越小越好", "min"),
-    "PSLR_dB": ("通常越低越好", "min"),
-    "ISLR_dB": ("通常越低越好", "min"),
-}
-
 PARAM_VALUE_LABELS = {
     "select_angles": "angles",
     "f_number": "fnumber",
@@ -87,6 +75,12 @@ PARAM_VALUE_LABELS = {
     "window": "window",
     "interp": "interp",
     "aperture_mode": "aperture",
+}
+
+CATEGORICAL_PARAM_CHOICES = {
+    "aperture_mode": ("discrete", "geometry"),
+    "window": ("rect", "tukey", "hann", "hamming", "blackman", "kaiser"),
+    "interp": ("nearest", "linear", "cubic", "quintic", "farrow", "sinc"),
 }
 
 
@@ -149,6 +143,14 @@ def numeric_range_values():
 
 
 def validate_values(param_name, default_value, values):
+    if param_name in CATEGORICAL_PARAM_CHOICES:
+        allowed = set(CATEGORICAL_PARAM_CHOICES[param_name])
+        normalized = [str(value).lower() for value in values]
+        bad = [value for value in normalized if value not in allowed]
+        if bad:
+            raise ValueError(f"{param_name} 只能从 {', '.join(CATEGORICAL_PARAM_CHOICES[param_name])} 里选。")
+        return normalized
+
     if param_name == "select_angles":
         for value in values:
             if isinstance(value, bool) or isinstance(value, float):
@@ -159,13 +161,6 @@ def validate_values(param_name, default_value, values):
                 continue
             raise ValueError("select_angles 只能填 center/all 或整数角度数，例如 center,all,1,3,11。")
         return values
-
-    if param_name in ("window", "interp"):
-        allowed = {"window": {"rect", "hann", "tukey"}, "interp": {"nearest", "linear", "cubic", "quintic", "farrow", "sinc"}}[param_name]
-        bad = [value for value in values if not isinstance(value, str) or value.lower() not in allowed]
-        if bad:
-            raise ValueError(f"{param_name} 只能从 {', '.join(sorted(allowed))} 里选。")
-        return [value.lower() for value in values]
 
     if isinstance(default_value, bool):
         if not all(isinstance(value, bool) for value in values):
@@ -211,27 +206,38 @@ def choose_param(config, algorithm):
 
 
 def choose_values(param_name, default_value):
+    if param_name == "aperture_mode":
+        values = list(CATEGORICAL_PARAM_CHOICES[param_name])
+        print(f"\n{param_name} 是固定枚举参数，将比较：{', '.join(values)}")
+        return values
+
     if param_name == "select_angles":
         print("\nselect_angles 示例：center,all,1,3,11")
         print("注意：如果你想扫 1.2、1.5 这种小数，请返回上一步选择 f_number。")
+    elif param_name in CATEGORICAL_PARAM_CHOICES:
+        print(f"\n{param_name} 可选值：{', '.join(CATEGORICAL_PARAM_CHOICES[param_name])}")
     if isinstance(default_value, bool):
         default_values = [True, False]
         print("\n布尔参数默认使用两个取值：true / false")
         if ask_yes_no("是否使用默认布尔取值", default=True):
             return default_values
+
+    list_only = (
+        param_name == "select_angles"
+        or param_name in CATEGORICAL_PARAM_CHOICES
+        or isinstance(default_value, bool)
+    )
     while True:
-        mode = ask_choice(
+        mode = "list" if list_only else ask_choice(
             "请选择取值输入方式",
             [
-                ("list", "手动列举：例如 1.0,1.5,2.0 或 rect,hann,tukey"),
+                ("list", "手动列举：例如 1.0,1.5,2.0"),
                 ("range", "数值范围：输入起始值、结束值、步长"),
             ],
             default_index=0,
         )
         try:
             if mode == "range":
-                if isinstance(default_value, bool) or param_name in ("select_angles", "window", "interp"):
-                    raise ValueError("这个参数不适合用数值范围，请使用手动列举。")
                 values = numeric_range_values()
             else:
                 raw = ask_text("请输入消融取值，多个用逗号分隔")
@@ -270,7 +276,31 @@ def save_config(config, out_dir, idx, param_name, value):
     return path
 
 
-def run_one(config_path, scene_id, output_root, evaluate, keep_existing):
+def can_reuse_flat_result(config_path, scene_dir, algorithm):
+    output_path = scene_dir / f"{algorithm}.npy"
+    params_path = scene_dir / "params.json"
+    if not output_path.exists() or not params_path.exists():
+        return False
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+    with open(params_path, "r", encoding="utf-8") as f:
+        actual = json.load(f)
+    expected = dict(config.get("params", {}) or {})
+    expected.update((config.get("algorithm_params", {}) or {}).get(algorithm, {}) or {})
+    scene = (config.get("scenes", []) or [{}])[0]
+    expected["h5_path"] = str((ROOT / scene.get("h5_path", "")).resolve())
+    expected["h5_sample_idx"] = int(scene.get("sample_idx", 0))
+    expected["method"] = algorithm
+    return all(actual.get(name) == value for name, value in expected.items())
+
+
+def run_one(config_path, scene_id, output_root, keep_existing):
+    scene_dir = Path(output_root) / scene_id
+    algorithm = (yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}).get("algorithms", [""])[0]
+    if keep_existing and can_reuse_flat_result(config_path, scene_dir, algorithm):
+        print(f"Reuse {scene_dir / f'{algorithm}.npy'}")
+        return 0, []
+
     cmd = [
         sys.executable,
         str(ROOT / "run_one.py"),
@@ -281,17 +311,15 @@ def run_one(config_path, scene_id, output_root, evaluate, keep_existing):
         "--output_root",
         str(output_root),
     ]
-    if not evaluate:
-        cmd.append("--no_evaluate")
+    # 消融统一在根目录完成一次多方法评估，子目录只负责重建。
+    cmd.append("--no_evaluate")
+    cmd.append("--no_individual_images")
     if keep_existing:
         cmd.append("--keep_existing")
 
-    scene_dir = Path(output_root) / scene_id
     scene_dir.mkdir(parents=True, exist_ok=True)
-    command_path = scene_dir / "run_command.txt"
     log_path = scene_dir / "run.log"
     command_text = " ".join(("\"" + str(part) + "\"") if " " in str(part) else str(part) for part in cmd)
-    command_path.write_text(command_text + "\n", encoding="utf-8")
     with open(log_path, "w", encoding="utf-8") as log_file:
         log_file.write(command_text + "\n\n")
         log_file.flush()
@@ -299,37 +327,42 @@ def run_one(config_path, scene_id, output_root, evaluate, keep_existing):
     return result.returncode, cmd
 
 
-def metric_method_names(config, algorithm):
-    label = (config.get("algorithm_labels", {}) or {}).get(algorithm, "")
-    names = {algorithm.lower()}
-    if label:
-        names.add(str(label).lower())
-    names.add(algorithm.replace("_", "-").lower())
-    return names
+def method_output_path(scene_dir, algorithm, suffix):
+    direct = scene_dir / f"{algorithm}.{suffix}"
+    if direct.exists():
+        return direct
+    return scene_dir / algorithm / f"{algorithm}.{suffix}"
 
 
-def read_metric(scene_dir, method_names, metric):
-    csv_path = scene_dir / "metrics" / "summary_metrics.csv"
-    if not csv_path.exists():
-        return math.nan
-    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
-        for row in csv.DictReader(f):
-            if row.get("method", "").lower() in method_names:
-                raw = row.get(metric, "")
-                try:
-                    return float(raw)
-                except ValueError:
-                    return math.nan
-    return math.nan
+def flatten_ablation_result(scene_dir, algorithm):
+    method_dir = scene_dir / algorithm
+    if not method_dir.exists():
+        return
+    for source in method_dir.iterdir():
+        target = scene_dir / source.name
+        if target.exists():
+            if target.is_file():
+                target.unlink()
+            else:
+                shutil.rmtree(target)
+        shutil.move(str(source), str(target))
+    method_dir.rmdir()
+    for name in ("comparison.npy", "comparison.png", "run_params.json", "run.log"):
+        (scene_dir / name).unlink(missing_ok=True)
+    for name in ("metrics", "individual_images"):
+        path = scene_dir / name
+        if path.exists():
+            shutil.rmtree(path)
 
 
 def write_summary(rows, out_path):
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["index", "parameter", "value", "scene_id", "status", "metric", "metric_value", "result_dir"]
+    fields = ["index", "parameter", "value", "scene_id", "status", "result_dir"]
     with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
-        writer.writerows(rows)
+        for row in rows:
+            writer.writerow({name: row.get(name, "") for name in fields})
 
 
 def save_ablation_overview(rows, out_dir, algorithm, param_name):
@@ -354,7 +387,7 @@ def save_ablation_overview(rows, out_dir, algorithm, param_name):
                 with open(params_path, "r", encoding="utf-8") as f:
                     run_params = json.load(f)
                 row_dr = float((run_params.get("params", {}) or {}).get("dr", row_dr))
-        method_path = scene_dir / algorithm / f"{algorithm}.npy"
+        method_path = method_output_path(scene_dir, algorithm, "npy")
         if not method_path.exists():
             continue
         comparison_path = scene_dir / "comparison.npy"
@@ -401,19 +434,65 @@ def save_ablation_overview(rows, out_dir, algorithm, param_name):
     return path
 
 
-def choose_metric():
-    options = []
-    for key, (desc, _) in METRIC_OPTIONS.items():
-        options.append((key, f"{key}：{desc}"))
-    return ask_choice("请选择用于自动挑选最优的指标", options, default_index=0)
-
-
-def best_row(rows, metric, direction):
-    valid = [row for row in rows if row["status"] == "ok" and not math.isnan(row["metric_value"])]
-    if not valid:
+def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt):
+    comparison_path = out_dir / "ablation_comparison.npy"
+    if not comparison_path.exists():
         return None
-    reverse = direction == "max"
-    return sorted(valid, key=lambda row: row["metric_value"], reverse=reverse)[0]
+    valid_rows = [row for row in rows if row["status"] == "ok"]
+    if not valid_rows:
+        return None
+    method_ids = [f"ablation_{row['index']:02d}" for row in valid_rows]
+    method_labels = [f"{row['parameter']}={row['value']}" for row in valid_rows]
+    metrics_dir = out_dir / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    evaluate_cmd = [
+        sys.executable,
+        str(ROOT / "evaluation" / "evaluate.py"),
+        "--comparison_npy", str(comparison_path),
+        "--h5_path", str(h5_path),
+        "--h5_sample_idx", str(sample_idx),
+        "--methods", ",".join(method_ids),
+        "--method_labels", ",".join(method_labels),
+        "--out_dir", str(metrics_dir),
+        "--phantom_mode", "auto",
+        "--phantom_source", "auto",
+        "--has_gt", "true" if has_gt else "false",
+    ]
+    result = subprocess.run(evaluate_cmd, cwd=ROOT, text=True)
+    if result.returncode != 0:
+        raise RuntimeError("消融统一评估失败")
+    plot_cmd = [
+        sys.executable,
+        str(ROOT / "evaluation" / "plot_metrics.py"),
+        "--metrics_dir", str(metrics_dir),
+    ]
+    result = subprocess.run(plot_cmd, cwd=ROOT, text=True)
+    if result.returncode != 0:
+        raise RuntimeError("消融统一指标绘图失败")
+    return metrics_dir
+
+
+def collect_ablation_individual_images(rows, out_dir, algorithm, param_name):
+    output_dir = out_dir / "individual_images"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    copied_gt = False
+    for row in rows:
+        if row["status"] != "ok":
+            continue
+        scene_dir = Path(row["result_dir"])
+        source = method_output_path(scene_dir, algorithm, "png")
+        if not source.exists():
+            continue
+        filename = f"{row['index']:02d}_{param_name}_{safe_name(row['value'])}_{algorithm}.png"
+        shutil.copy2(source, output_dir / filename)
+        copied += 1
+
+        gt_source = scene_dir / "individual_images" / "ground_truth.png"
+        if not copied_gt and gt_source.exists():
+            shutil.copy2(gt_source, output_dir / "ground_truth.png")
+            copied_gt = True
+    return output_dir if copied else None
 
 
 def main():
@@ -447,12 +526,9 @@ def main():
         state["has_gt"] = ask_yes_no("是否把 H5 里的 GT 加入对比图", default=state.get("has_gt", has_gt_default)) if has_gt_default else False
 
     def step_evaluate():
-        state["evaluate"] = ask_yes_no("是否计算指标", default=state.get("evaluate", state["has_gt"]))
-        if state["evaluate"]:
-            state["metric"] = choose_metric()
-        else:
-            state["metric"] = ""
-        state["direction"] = METRIC_OPTIONS.get(state["metric"], ("", "max"))[1]
+        state["evaluate"] = ask_yes_no(
+            "是否在消融根目录统一计算指标", default=state.get("evaluate", state["has_gt"])
+        )
 
     def step_keep_existing():
         state["keep_existing"] = ask_yes_no("如果某组结果已存在，是否复用", default=state.get("keep_existing", False))
@@ -478,7 +554,7 @@ def main():
         print(f"算法: {state['algorithm']}")
         print(f"消融参数: {state['param_name']} ({'通用参数' if state['scope'] == 'global' else '算法参数'})")
         print(f"取值: {state['values']}")
-        print(f"计算指标: {'是，最优指标=' + state['metric'] if state['evaluate'] else '否'}")
+        print(f"计算指标: {'是' if state['evaluate'] else '否'}")
         print(f"输出目录: {state['run_root']}")
         state["execute"] = ask_yes_no("确认开始消融吗", default=True)
 
@@ -504,7 +580,6 @@ def main():
         return
 
     rows = []
-    method_names = metric_method_names(state["config"], state["algorithm"])
     for idx, value in enumerate(state["values"], 1):
         scene_id = value_scene_id(state["param_name"], value)
         cfg = build_config(
@@ -520,18 +595,17 @@ def main():
         )
         cfg_path = save_config(cfg, state["config_dir"], idx, state["param_name"], value)
         print_title(f"运行 {idx}/{len(state['values'])}: {state['param_name']} = {value}")
-        code, cmd = run_one(cfg_path, scene_id, state["run_root"], state["evaluate"], state["keep_existing"])
+        code, cmd = run_one(cfg_path, scene_id, state["run_root"], state["keep_existing"])
         scene_dir = state["run_root"] / scene_id
         status = "ok" if code == 0 else f"failed({code})"
-        metric_value = read_metric(scene_dir, method_names, state["metric"]) if state["evaluate"] else math.nan
+        if code == 0:
+            flatten_ablation_result(scene_dir, state["algorithm"])
         rows.append({
             "index": idx,
             "parameter": state["param_name"],
             "value": value,
             "scene_id": scene_id,
             "status": status,
-            "metric": state["metric"],
-            "metric_value": metric_value,
             "result_dir": str(scene_dir),
         })
         if code != 0:
@@ -540,21 +614,23 @@ def main():
     summary_path = state["run_root"] / "ablation_summary.csv"
     write_summary(rows, summary_path)
     overview_path = save_ablation_overview(rows, state["run_root"], state["algorithm"], state["param_name"])
+    metrics_dir = None
+    if state["evaluate"]:
+        metrics_dir = run_ablation_evaluation(
+            rows, state["run_root"], state["h5_path"], state["sample_idx"], state["has_gt"]
+        )
+    individual_dir = collect_ablation_individual_images(
+        rows, state["run_root"], state["algorithm"], state["param_name"]
+    )
 
     print_title("消融完成")
     print(f"汇总表: {summary_path}")
+    if metrics_dir:
+        print(f"指标目录: {metrics_dir}")
     if overview_path:
         print(f"总览图: {overview_path}")
-    if state["evaluate"]:
-        winner = best_row(rows, state["metric"], state["direction"])
-        if winner is None:
-            print("没有可用于自动选择最优的有效指标。")
-        else:
-            print(f"按 {state['metric']}（{METRIC_OPTIONS[state['metric']][0]}）选择的最优值:")
-            print(f"  {state['param_name']} = {winner['value']}")
-            print(f"  指标值 = {winner['metric_value']}")
-            print(f"  结果目录 = {winner['result_dir']}")
-
+    if individual_dir:
+        print(f"单图目录: {individual_dir}")
     append_run_log({
         "type": "ablation",
         "dir": str(relative_to_root(state["run_root"])).replace("\\", "/"),
@@ -566,7 +642,6 @@ def main():
         "values": state["values"],
         "has_gt": state["has_gt"],
         "evaluate": state["evaluate"],
-        "metric": state["metric"],
     })
 
 

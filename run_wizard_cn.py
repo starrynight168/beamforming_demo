@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -297,7 +298,7 @@ def build_config(base_config, h5_path, sample_idx, algorithms, params):
         "algorithms": algorithms,
         "algorithm_labels": base_config.get("algorithm_labels", {}),
         "params": params,
-        "algorithm_params": base_config.get("algorithm_params", {}),
+        "algorithm_params": deepcopy(base_config.get("algorithm_params", {})),
         "scenes": [scene],
     }
     return config, scene_id
@@ -357,6 +358,21 @@ def main():
         algorithm_options = [(key, desc) for key, desc in ALGORITHMS.items()]
         explain(state["teaching"], "algorithm")
         state["algorithms"] = ask_multi_choice("请选择成像方法", algorithm_options, default_keys=state.get("algorithms", ["das"]))
+
+    def step_das_aperture_mode():
+        if "das" not in state["algorithms"]:
+            return
+        default = ((state["base_config"].get("algorithm_params", {}) or {}).get("das", {}) or {}).get(
+            "aperture_mode", "discrete"
+        )
+        state["das_aperture_mode"] = ask_choice(
+            "请选择 DAS 接收孔径模式",
+            [
+                ("discrete", "discrete：与 MV 等算法一致的离散通道孔径（默认，适合公平对照）"),
+                ("geometry", "geometry：DAS 专用连续几何孔径（适合单独研究）"),
+            ],
+            default_index=0 if default == "discrete" else 1,
+        )
 
     def step_angles():
         explain(state["teaching"], "angles")
@@ -452,6 +468,8 @@ def main():
         run_id = f"wizard_{timestamp}"
         config, _ = build_config(state["base_config"], state["h5_path"], state["sample_idx"], state["algorithms"], params)
         config["scenes"][0]["id"] = run_id
+        if "das" in state["algorithms"]:
+            config.setdefault("algorithm_params", {}).setdefault("das", {})["aperture_mode"] = state["das_aperture_mode"]
         config_path = make_temp_config_path(state["output_root"], run_id)
         cmd = [
             sys.executable,
@@ -478,6 +496,8 @@ def main():
         print(f"H5 文件: {relative_to_root(state['h5_path'])}")
         print(f"样本编号: {state['sample_idx']}")
         print(f"算法: {', '.join(state['algorithms'])}")
+        if "das" in state["algorithms"]:
+            print(f"DAS 孔径模式: {state['das_aperture_mode']}")
         print(f"角度选择: {state['select_angles']}")
         print(f"F-Number: {state['f_number']}")
         print(f"动态范围: {state['dr']} dB")
@@ -499,6 +519,7 @@ def main():
             step_h5,
             step_sample,
             step_algorithms,
+            step_das_aperture_mode,
             step_angles,
             step_dr,
             step_aperture,

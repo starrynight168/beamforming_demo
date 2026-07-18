@@ -118,6 +118,10 @@ results/simulation_contrast_speckle/
   fdmas/
   comparison.npy
   comparison.png
+  individual_images/             # GT 与各算法的独立图片，便于逐张比较
+    ground_truth.png
+    das.png
+    mv.png
   run_params.json
   metrics/
 ```
@@ -255,19 +259,25 @@ python run_wizard_cn.py
   ```text
   results/ablation/ablation_das_f_number/
     configs/                      # 每次运行生成的临时配置文件
-    fnumber1.2/                   # 对应参数值的原生结果目录
-      comparison.png
-      comparison.npy
-      run_params.json
-      das/
-        das.npy
+    fnumber1.2/                   # 对应参数值的扁平算法输出
+      das.npy
+      das.png
+      params.json
     fnumber1.5/
     ...
     ablation_summary.csv          # 指标消融汇总 CSV
     ablation_comparison.png       # 自动生成的对比拼接总览图
     ablation_comparison.npy       # 对比图像数据
+    individual_images/            # 各参数取值的独立图片
+      01_f_number_1.2_das.png
+      02_f_number_1.5_das.png
+    metrics/                      # 将各参数取值视作独立算法的统一评估
+      standard_metrics.png
+      roi_targets.png
+      point_profile.png
   ```
-- **智能对比总览图**：消融结束后，脚本会自动读取每个子目录中的 `.npy` 图像数据，将 Ground Truth（若有）作为第一张，随后拼接各个参数取值的成像图，生成 `ablation_comparison.png`。子图布局支持自动折行（每行最多 4 张），并优先读取自身配置的 `dr` 动态范围进行完美显示。
+- **智能对比总览图**：消融结束后，脚本会自动读取扁平子目录中的 `.npy` 图像数据，将 Ground Truth（若有）作为第一张，随后拼接各个参数取值的成像图，生成 `ablation_comparison.png`。子图布局支持自动折行（每行最多 4 张），并优先读取自身配置的 `dr` 动态范围进行显示。
+- **单图与统一评估**：消融会把每个参数取值的单图集中到根目录 `individual_images/`，并将它们作为独立算法统一写入根目录 `metrics/`，生成标准指标、ROI 和点剖面图。
 
 使用方法：
 
