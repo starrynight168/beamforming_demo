@@ -1,7 +1,6 @@
 """Provide Python utilities for run_one."""
 
 import argparse
-import hashlib
 import json
 import math
 import subprocess
@@ -128,49 +127,6 @@ def algorithm_label(config, algorithm):
     """Execute algorithm label."""
     labels = config.get("algorithm_labels", {}) or {}
     return labels.get(algorithm, algorithm.upper())
-
-
-def file_fingerprint(path, content_hash=False):
-    """Execute file fingerprint."""
-    path = Path(path).resolve()
-    stat = path.stat()
-    fingerprint = {
-        "path": str(path),
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-    }
-    if content_hash:
-        digest = hashlib.sha256()
-        with open(path, "rb") as file:
-            for chunk in iter(lambda: file.read(1024 * 1024), b""):
-                digest.update(chunk)
-        fingerprint["sha256"] = digest.hexdigest()
-    return fingerprint
-
-
-def run_fingerprints(scene, methods):
-    """Execute run fingerprints."""
-    shared_sources = [
-        ALGORITHMS_DIR / "beamforming_utils.py",
-        ALGORITHMS_DIR / "common_params.py",
-        ALGORITHMS_DIR / "h5_loader.py",
-    ]
-    algorithm_sources = {}
-    for method in methods:
-        fingerprint = file_fingerprint(
-            ALGORITHMS_DIR / f"{method}.py",
-            content_hash=True,
-        )
-        if method == "cmsaw":
-            fingerprint["dependencies"] = {
-                "mv.py": file_fingerprint(ALGORITHMS_DIR / "mv.py", content_hash=True),
-            }
-        algorithm_sources[method] = fingerprint
-    return {
-        "input_h5": file_fingerprint(resolve_path(scene["h5_path"])),
-        "shared_sources": {path.name: file_fingerprint(path, content_hash=True) for path in shared_sources},
-        "algorithms": algorithm_sources,
-    }
 
 
 def build_algorithm_cmd(args, config, scene, algorithm, scene_dir):
@@ -352,7 +308,7 @@ def save_individual_images(images, titles, image_names, extent_mm, output_dir, d
         save_single_image(image, title, extent_mm, output_dir / f"{name}.png", dr)
 
 
-def can_reuse_existing(scene_dir, config, scene, method, args, fingerprints):
+def can_reuse_existing(scene_dir, config, scene, method, args):
     """Execute can reuse existing."""
     params_path = scene_dir / "run_params.json"
     if not params_path.exists():
@@ -368,20 +324,12 @@ def can_reuse_existing(scene_dir, config, scene, method, args, fingerprints):
         "params": common_params(config),
         "method_params": algorithm_params(config, method),
         "extra_algorithm_args": args.extra_algorithm_args,
-        "input_h5": fingerprints["input_h5"],
-        "shared_sources": fingerprints["shared_sources"],
-        "algorithm_source": fingerprints["algorithms"][method],
     }
     actual = {
         "scene": previous.get("scene"),
         "params": previous.get("params", {}) or {},
         "method_params": (previous.get("algorithm_params", {}) or {}).get(method, {}) or {},
         "extra_algorithm_args": previous.get("extra_algorithm_args", []),
-        "input_h5": (previous.get("fingerprints", {}) or {}).get("input_h5"),
-        "shared_sources": (previous.get("fingerprints", {}) or {}).get(
-            "shared_sources",
-        ),
-        "algorithm_source": ((previous.get("fingerprints", {}) or {}).get("algorithms", {}) or {}).get(method),
     }
     if actual != expected:
         return False, "旧结果参数与当前配置不一致"
@@ -444,8 +392,6 @@ def main():
         raise ValueError(f"算法列表包含重复项: {methods}")
     scene_dir = resolve_path(args.output_root) / scene["id"]
     scene_dir.mkdir(parents=True, exist_ok=True)
-    fingerprints = run_fingerprints(scene, methods)
-
     start_all = time.time()
     for method in methods:
         expected = scene_dir / method / f"{method}.npy"
@@ -456,7 +402,6 @@ def main():
                 scene,
                 method,
                 args,
-                fingerprints,
             )
             if reusable:
                 print(f"Reuse {expected}")
@@ -516,7 +461,6 @@ def main():
         "algorithm_params": {method: algorithm_params(config, method) for method in methods},
         "extra_algorithm_args": args.extra_algorithm_args,
         "runtime_sec": time.time() - start_all,
-        "fingerprints": fingerprints,
         "output": {"methods": ",".join(methods)},
     }
     with open(scene_dir / "run_params.json", "w", encoding="utf-8") as f:
