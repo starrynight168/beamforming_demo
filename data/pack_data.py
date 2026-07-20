@@ -1,21 +1,25 @@
+"""Provide Python utilities for pack_data."""
+
 import argparse
-import os
 from pathlib import Path
 
 import h5py
+import matplotlib
 import numpy as np
 import torch
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
+import yaml
 
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib import patches
+
+COMPARISON_VALUE_2 = 2
 
 BASE = "US/US_DATASET0000"
 DYNAMIC_RANGE = 60.0
 TGC_ALPHA = 0.5
 F_NUMBER = 1.5
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 SIMULATION_SCENES = [
@@ -83,32 +87,50 @@ IN_VIVO_SCENES = [
 
 
 def project_root():
+    """Execute project root."""
     return Path(__file__).resolve().parents[1]
 
 
 def default_source_root():
+    """Execute default source root."""
     return project_root() / "data" / "PICMUS"
 
 
 def complex_rms_normalization(i_data, q_data):
+    """Execute complex rms normalization."""
     i_data = i_data.astype(np.float32)
     q_data = q_data.astype(np.float32)
-    rms = np.sqrt(np.mean(i_data ** 2 + q_data ** 2) + 1e-12)
+    rms = np.sqrt(np.mean(i_data**2 + q_data**2) + 1e-12)
     return i_data / rms, q_data / rms, rms
 
 
 def read_gt(gt_path):
+    """Read gt."""
     with h5py.File(gt_path, "r") as f:
         real = f[f"{BASE}/data/real"][:][-1].T
         imag = f[f"{BASE}/data/imag"][:][-1].T
-    env_sq = real ** 2 + imag ** 2
+    env_sq = real**2 + imag**2
     safe_max = float(np.sqrt(np.max(env_sq)) + 1e-12)
-    env_sq /= safe_max ** 2 + 1e-24
+    env_sq /= safe_max**2 + 1e-24
     db = 10.0 * np.log10(env_sq + 1e-24)
     norm = (np.clip(db, -DYNAMIC_RANGE, 0.0) + DYNAMIC_RANGE) / DYNAMIC_RANGE
     return norm[np.newaxis, np.newaxis, ...].astype(np.float32), safe_max
 
-def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, z_grid, interp='cubic', row_block=24):
+
+def das_reference_from_iq(
+    i_data,
+    q_data,
+    fs,
+    c,
+    fc,
+    pitch,
+    t0,
+    angles,
+    x_grid,
+    z_grid,
+    interp="cubic",
+    row_block=24,
+):
     """Build an in-vivo multi-angle DAS reference with GPU tensor operations using row blocks."""
     n_angles, n_times, n_channels = i_data.shape
     t0 = np.asarray(t0, dtype=np.float32).reshape(-1)
@@ -118,7 +140,7 @@ def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, 
     with torch.no_grad():
         z_t = torch.from_numpy(z_grid.astype(np.float32)).to(device)
         x_t = torch.from_numpy(x_grid.astype(np.float32)).to(device)
-        x_mesh, z_mesh = torch.meshgrid(x_t, z_t, indexing='xy')
+        x_mesh, z_mesh = torch.meshgrid(x_t, z_t, indexing="xy")
 
         sc = fs / c
         elements = torch.linspace(
@@ -131,13 +153,17 @@ def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, 
         transmit_x = x_mesh * sc
         ch = torch.arange(n_channels, device=device, dtype=torch.long).view(1, 1, -1)
 
-        I_t = torch.from_numpy(i_data.astype(np.float32)).to(device)
-        Q_t = torch.from_numpy(q_data.astype(np.float32)).to(device)
+        i_tensor = torch.from_numpy(i_data.astype(np.float32)).to(device)
+        q_tensor = torch.from_numpy(q_data.astype(np.float32)).to(device)
         cos_a = torch.from_numpy(np.cos(angles).astype(np.float32)).to(device)
         sin_a = torch.from_numpy(np.sin(angles).astype(np.float32)).to(device)
         t_starts_t = torch.from_numpy(t0.astype(np.float32)).to(device) * fs
 
-        out_i = torch.zeros((len(z_grid), len(x_grid)), dtype=torch.float32, device=device)
+        out_i = torch.zeros(
+            (len(z_grid), len(x_grid)),
+            dtype=torch.float32,
+            device=device,
+        )
         out_q = torch.zeros_like(out_i)
         max_sample = float(n_times - 2)
         row_block = len(z_grid) if row_block <= 0 else max(1, row_block)
@@ -158,7 +184,11 @@ def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, 
             phi_rx = 2.0 * np.pi * fc * (receive_samples / fs)
             cos_rx = torch.cos(phi_rx)
             sin_rx = torch.sin(phi_rx)
-            block_i = torch.zeros((z1 - z0, len(x_grid)), dtype=torch.float32, device=device)
+            block_i = torch.zeros(
+                (z1 - z0, len(x_grid)),
+                dtype=torch.float32,
+                device=device,
+            )
             block_q = torch.zeros_like(block_i)
 
             for i in range(n_angles):
@@ -166,14 +196,14 @@ def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, 
                 sample = tx_samples[..., None] + receive_samples - t_starts_t[i]
                 valid = (sample >= 0) & (sample < n_times - 1)
                 sample.clamp_(0.0, max_sample)
-                I_angle = I_t[i]
-                Q_angle = Q_t[i]
+                i_angle = i_tensor[i]
+                q_angle = q_tensor[i]
 
-                if interp == 'nearest':
+                if interp == "nearest":
                     idx = sample.round().long().clamp(0, n_times - 1)
-                    I_center = I_angle[idx, ch]
-                    Q_center = Q_angle[idx, ch]
-                elif interp == 'cubic':
+                    i_center = i_angle[idx, ch]
+                    q_center = q_angle[idx, ch]
+                elif interp == "cubic":
                     idx0 = sample.floor().long()
                     frac = sample - idx0.float()
                     frac2 = frac * frac
@@ -186,36 +216,26 @@ def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, 
                     idx_0 = torch.clamp(idx0, 0, n_times - 1)
                     idx_1 = torch.clamp(idx0 + 1, 0, n_times - 1)
                     idx_2 = torch.clamp(idx0 + 2, 0, n_times - 1)
-                    I_center = (
-                        I_angle[idx_m1, ch] * c_m1
-                        + I_angle[idx_0, ch] * c_0
-                        + I_angle[idx_1, ch] * c_1
-                        + I_angle[idx_2, ch] * c_2
-                    )
-                    Q_center = (
-                        Q_angle[idx_m1, ch] * c_m1
-                        + Q_angle[idx_0, ch] * c_0
-                        + Q_angle[idx_1, ch] * c_1
-                        + Q_angle[idx_2, ch] * c_2
-                    )
-                else: # linear
+                    i_center = i_angle[idx_m1, ch] * c_m1 + i_angle[idx_0, ch] * c_0 + i_angle[idx_1, ch] * c_1 + i_angle[idx_2, ch] * c_2
+                    q_center = q_angle[idx_m1, ch] * c_m1 + q_angle[idx_0, ch] * c_0 + q_angle[idx_1, ch] * c_1 + q_angle[idx_2, ch] * c_2
+                else:  # linear
                     idx0 = sample.floor().long()
                     frac = sample - idx0.float()
-                    I_center = I_angle[idx0, ch] * (1.0 - frac) + I_angle[idx0 + 1, ch] * frac
-                    Q_center = Q_angle[idx0, ch] * (1.0 - frac) + Q_angle[idx0 + 1, ch] * frac
+                    i_center = i_angle[idx0, ch] * (1.0 - frac) + i_angle[idx0 + 1, ch] * frac
+                    q_center = q_angle[idx0, ch] * (1.0 - frac) + q_angle[idx0 + 1, ch] * frac
 
                 valid_w = valid.float() * weights
                 valid_w = valid_w / (valid_w.sum(dim=-1, keepdim=True) + 1e-9)
-                I_rx = I_center * cos_rx - Q_center * sin_rx
-                Q_rx = I_center * sin_rx + Q_center * cos_rx
-                I_sum = (I_rx * valid_w).sum(dim=-1)
-                Q_sum = (Q_rx * valid_w).sum(dim=-1)
+                i_rx = i_center * cos_rx - q_center * sin_rx
+                q_rx = i_center * sin_rx + q_center * cos_rx
+                i_sum = (i_rx * valid_w).sum(dim=-1)
+                q_sum = (q_rx * valid_w).sum(dim=-1)
 
                 phi_tx = 2.0 * np.pi * fc * (tx_samples / fs)
                 cos_tx = torch.cos(phi_tx)
                 sin_tx = torch.sin(phi_tx)
-                block_i.add_(I_sum * cos_tx - Q_sum * sin_tx)
-                block_q.add_(I_sum * sin_tx + Q_sum * cos_tx)
+                block_i.add_(i_sum * cos_tx - q_sum * sin_tx)
+                block_q.add_(i_sum * sin_tx + q_sum * cos_tx)
 
             out_i[z0:z1] = block_i / n_angles
             out_q[z0:z1] = block_q / n_angles
@@ -226,8 +246,13 @@ def das_reference_from_iq(i_data, q_data, fs, c, fc, pitch, t0, angles, x_grid, 
         env = env / (safe_max + 1e-12)
         db = 20.0 * torch.log10(torch.clamp(env, min=1e-12))
         norm = (torch.clamp(db, -DYNAMIC_RANGE, 0.0) + DYNAMIC_RANGE) / DYNAMIC_RANGE
-        return norm.cpu().numpy()[np.newaxis, np.newaxis, ...].astype(np.float32), float(safe_max.cpu())
+        return norm.cpu().numpy()[np.newaxis, np.newaxis, ...].astype(
+            np.float32,
+        ), float(safe_max.cpu())
+
+
 def process_scene(scene, source_root, row_block=24):
+    """Execute process scene."""
     print(f"Processing {scene['name']}")
     iq_path = source_root / scene["iq"]
     scan_path = source_root / scene["scan"]
@@ -257,7 +282,10 @@ def process_scene(scene, source_root, row_block=24):
             pitch = float(abs(np.median(np.diff(geom[0]))))
         else:
             pitch = 0.300e-3
-        t0 = np.repeat(np.array(f[f"{BASE}/initial_time"]).flatten(), i_trans.shape[0]).astype(np.float32)
+        t0 = np.repeat(
+            np.array(f[f"{BASE}/initial_time"]).flatten(),
+            i_trans.shape[0],
+        ).astype(np.float32)
         angles = np.array(f[f"{BASE}/angles"]).flatten().astype(np.float32)
 
     with h5py.File(scan_path, "r") as f:
@@ -265,7 +293,19 @@ def process_scene(scene, source_root, row_block=24):
         z_grid = np.array(f[f"{BASE}/z_axis"]).flatten().astype(np.float32)
 
     if scene["gt"] == "generated:multi_angle_das":
-        gt, safe_max = das_reference_from_iq(i_raw_trans, q_raw_trans, fs, c, fc, pitch, t0, angles, x_grid, z_grid, row_block=row_block)
+        gt, safe_max = das_reference_from_iq(
+            i_raw_trans,
+            q_raw_trans,
+            fs,
+            c,
+            fc,
+            pitch,
+            t0,
+            angles,
+            x_grid,
+            z_grid,
+            row_block=row_block,
+        )
     else:
         gt, safe_max = read_gt(gt_path) if gt_path else (None, np.nan)
 
@@ -291,25 +331,162 @@ def process_scene(scene, source_root, row_block=24):
 
 
 def pad_and_concat(items, key):
+    """Execute pad and concat."""
     arrays = [item[key] for item in items]
     max_a = max(arr.shape[1] for arr in arrays)
     max_t = max(arr.shape[2] for arr in arrays)
     max_c = max(arr.shape[3] for arr in arrays)
     padded = []
     for arr in arrays:
-        pad_cfg = ((0, 0), (0, max_a - arr.shape[1]), (0, max_t - arr.shape[2]), (0, max_c - arr.shape[3]))
+        pad_cfg = (
+            (0, 0),
+            (0, max_a - arr.shape[1]),
+            (0, max_t - arr.shape[2]),
+            (0, max_c - arr.shape[3]),
+        )
         padded.append(np.pad(arr, pad_cfg, mode="constant"))
     return np.concatenate(padded, axis=0)
 
 
+def build_embedded_config(items, output_path, row_block):
+    """Build embedded config."""
+    has_official_gt = any(item["meta"]["gt"] and not item["meta"]["gt"].startswith("generated:") for item in items)
+    has_generated_gt = any(item["meta"]["gt"] == "generated:multi_angle_das" for item in items)
+    ground_truth = {
+        "dataset": "/all_envdb_norm",
+        "output_domain": "envelope_db_mapped_to_unit_interval",
+        "dynamic_range_db": DYNAMIC_RANGE,
+        "normalization": {
+            "reference": "per_sample_envelope_peak",
+            "db_formula": "20*log10(envelope/reference)",
+            "clipped_db_range": [-DYNAMIC_RANGE, 0.0],
+            "mapped_range": [0.0, 1.0],
+            "norm_reference_dataset": "/all_norm_ref",
+            "norm_reference_formula": "ground_truth_peak / input_scale_ref",
+        },
+    }
+    if has_official_gt:
+        ground_truth["official_picmus_reference"] = {
+            "source_domain": "complex_baseband_iq",
+            "frame_selection": "last",
+            "spatial_transpose": True,
+            "envelope": "sqrt(real^2 + imag^2)",
+            "peak_epsilon": 1.0e-12,
+            "power_log_epsilon": 1.0e-24,
+        }
+    if has_generated_gt:
+        ground_truth["generated_multi_angle_das"] = {
+            "source_domain": "unnormalized_PICMUS_baseband_iq",
+            "angle_selection": "all_available_input_angles",
+            "element_positions": "centered_uniform_linear_array_from_pitch",
+            "transmit_model": "plane_wave",
+            "receive_model": "spherical_distance",
+            "baseband_phase_rotation": "receive_then_transmit",
+            "aperture_mode": "geometry",
+            "dynamic_aperture": True,
+            "f_number": F_NUMBER,
+            "window": "rect",
+            "aperture_weight_normalization": True,
+            "interpolation": "cubic_convolution_a_minus_0.5",
+            "interpolation_boundary": "clamped_indices",
+            "out_of_range_samples": "zero",
+            "valid_weight_renormalization": True,
+            "angle_compounding": "complex_mean",
+            "peak_division_epsilon": 1.0e-12,
+            "envelope_log_floor": 1.0e-12,
+            "tgc": {
+                "enabled": True,
+                "alpha_db_cm_mhz": TGC_ALPHA,
+                "two_way": True,
+                "formula": "10**(alpha*(fc_MHz)*(depth_cm)*2/20)",
+            },
+            "implementation": {
+                "depth_row_block": int(row_block),
+                "nonpositive_row_block_means_full_image": True,
+            },
+        }
+
+    return {
+        "schema_version": 1,
+        "dataset": {
+            "id": output_path.stem,
+            "type": "PICMUS",
+            "purpose": "algorithm_evaluation",
+        },
+        "provenance": {
+            "generator": "data/pack_data.py",
+            "source_kind": "official_PICMUS_data",
+        },
+        "h5_schema": {
+            "iq_layout": ["sample", "angle", "time", "channel"],
+            "ground_truth_layout": ["sample", "image_channel", "z", "x"],
+            "padding": {
+                "value": 0.0,
+                "time_valid_length_dataset": "/valid_time_samples",
+            },
+            "sample_metadata": "config_yaml.source_samples",
+            "units": {
+                "fs": "Hz",
+                "c": "m/s",
+                "fc": "Hz",
+                "pitch": "m",
+                "x_grid": "m",
+                "z_grid": "m",
+                "angles": "rad",
+                "time_start_vector": "s",
+            },
+            "coordinate_system": {
+                "x": "lateral_positive_right",
+                "z": "depth_positive_away_from_probe",
+                "array_origin": "center_of_linear_array",
+            },
+        },
+        "generation": {
+            "input_iq": {
+                "source": "PICMUS_baseband_iq",
+                "source_layout": ["angle", "channel", "time"],
+                "angle_selection": "all_available",
+                "normalization": {
+                    "mode": "complex_rms",
+                    "formula": "sqrt(mean(I^2 + Q^2) + epsilon)",
+                    "epsilon": 1.0e-12,
+                    "scale_reference_dataset": "/all_scale_ref",
+                },
+            },
+            "ground_truth": ground_truth,
+        },
+        "source_samples": [
+            {
+                "sample_index": index,
+                "id": item["meta"]["name"],
+                "phantom_mode": item["meta"]["mode"],
+                "phantom_source": item["meta"]["source"],
+                "iq_path": item["meta"]["iq"],
+                "scan_path": item["meta"]["scan"],
+                "phantom_path": item["meta"]["phantom"],
+                "gt_path": item["meta"]["gt"],
+            }
+            for index, item in enumerate(items)
+        ],
+        "path_convention": {
+            "type": "relative",
+            "base": "PICMUS_ROOT",
+        },
+    }
+
+
 def save_gt_images(items, image_dir, dr=DYNAMIC_RANGE):
+    """Save gt images."""
     image_dir.mkdir(parents=True, exist_ok=True)
 
     def add_scale_bar(ax, extent_mm):
+        """Execute add scale bar."""
         bar_length = 5.0
         bar_x = extent_mm[1] - bar_length - 2.0
         bar_y = extent_mm[2] - 2.0
-        ax.add_patch(patches.Rectangle((bar_x, bar_y), bar_length, 0.5, color="white", zorder=5))
+        ax.add_patch(
+            patches.Rectangle((bar_x, bar_y), bar_length, 0.5, color="white", zorder=5),
+        )
         ax.text(
             bar_x + bar_length / 2,
             bar_y - 1.0,
@@ -331,15 +508,27 @@ def save_gt_images(items, image_dir, dr=DYNAMIC_RANGE):
 
         x_grid = np.asarray(item.get("x_grid", []), dtype=np.float32)
         z_grid = np.asarray(item.get("z_grid", []), dtype=np.float32)
-        if x_grid.size < 2 or z_grid.size < 2:
+        if x_grid.size < COMPARISON_VALUE_2 or z_grid.size < COMPARISON_VALUE_2:
             plt.imsave(out_path, gt_sample, cmap="gray", vmin=0.0, vmax=1.0)
             continue
 
-        extent_mm = [x_grid[0] * 1000.0, x_grid[-1] * 1000.0, z_grid[-1] * 1000.0, z_grid[0] * 1000.0]
+        extent_mm = [
+            x_grid[0] * 1000.0,
+            x_grid[-1] * 1000.0,
+            z_grid[-1] * 1000.0,
+            z_grid[0] * 1000.0,
+        ]
         gt_db = np.clip(gt_sample, 0.0, 1.0) * dr - dr
 
         fig, ax = plt.subplots(figsize=(6, 7), dpi=150)
-        im = ax.imshow(gt_db, cmap="gray", vmin=-dr, vmax=0.0, extent=extent_mm, aspect="equal")
+        im = ax.imshow(
+            gt_db,
+            cmap="gray",
+            vmin=-dr,
+            vmax=0.0,
+            extent=extent_mm,
+            aspect="equal",
+        )
         ax.set_title(f"GT: {sample_name}", fontsize=11, fontweight="bold")
         ax.set_xlabel("Lateral (mm)")
         ax.set_ylabel("Depth (mm)")
@@ -350,45 +539,124 @@ def save_gt_images(items, image_dir, dr=DYNAMIC_RANGE):
 
         plt.savefig(out_path, bbox_inches="tight")
         plt.close(fig)
-def pack_dataset(scenes, output_path, source_root, row_block=24, save_gt_images_enabled=True):
+
+
+def validate_shared_metadata(items):
+    """Validate the shared physical and grid definition."""
+    if not items:
+        raise ValueError("至少需要一个待打包样本")
+    base = items[0]
+    scalar_keys = ("fs", "c", "fc", "pitch")
+    exact_keys = ("num_channels",)
+    array_keys = ("z_grid", "x_grid", "angles")
+    for index, item in enumerate(items[1:], 1):
+        for key in scalar_keys:
+            if not np.isclose(item[key], base[key], rtol=1e-6, atol=0.0):
+                raise ValueError(
+                    f"样本 {index} 的 {key}={item[key]} 与首样本 {base[key]} 不一致",
+                )
+        for key in exact_keys:
+            if item[key] != base[key]:
+                raise ValueError(
+                    f"样本 {index} 的 {key}={item[key]} 与首样本 {base[key]} 不一致",
+                )
+        for key in array_keys:
+            current = np.asarray(item[key])
+            reference = np.asarray(base[key])
+            if current.shape != reference.shape or not np.allclose(
+                current,
+                reference,
+                rtol=1e-6,
+                atol=1e-9,
+            ):
+                raise ValueError(
+                    f"样本 {index} 的 {key} 与首样本不一致,当前 H5 schema 无法共同打包",
+                )
+
+
+def pack_dataset(
+    scenes,
+    output_path,
+    source_root,
+    row_block=24,
+    save_gt_images_enabled=True,
+):
+    """Execute pack dataset."""
     items = [process_scene(scene, source_root, row_block=row_block) for scene in scenes]
+    validate_shared_metadata(items)
     base = items[0]
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with h5py.File(output_path, "w") as hf:
-        hf.create_dataset("all_multi_I", data=pad_and_concat(items, "I"), compression="gzip", compression_opts=4)
-        hf.create_dataset("all_multi_Q", data=pad_and_concat(items, "Q"), compression="gzip", compression_opts=4)
+        hf.create_dataset(
+            "all_multi_I",
+            data=pad_and_concat(items, "I"),
+            compression="gzip",
+            compression_opts=4,
+        )
+        hf.create_dataset(
+            "all_multi_Q",
+            data=pad_and_concat(items, "Q"),
+            compression="gzip",
+            compression_opts=4,
+        )
 
         if all(item["gt"] is not None for item in items):
-            hf.create_dataset("all_envdb_norm", data=np.concatenate([item["gt"] for item in items], axis=0),
-                              compression="gzip", compression_opts=4)
+            hf.create_dataset(
+                "all_envdb_norm",
+                data=np.concatenate([item["gt"] for item in items], axis=0),
+                compression="gzip",
+                compression_opts=4,
+            )
 
-        hf.create_dataset("all_scale_ref", data=np.array([item["scale_ref"] for item in items], dtype=np.float32))
-        hf.create_dataset("all_norm_ref", data=np.array([item["norm_ref"] for item in items], dtype=np.float32))
+        hf.create_dataset(
+            "all_scale_ref",
+            data=np.array([item["scale_ref"] for item in items], dtype=np.float32),
+        )
+        hf.create_dataset(
+            "all_norm_ref",
+            data=np.array([item["norm_ref"] for item in items], dtype=np.float32),
+        )
+        hf.create_dataset(
+            "valid_time_samples",
+            data=np.array([item["I"].shape[2] for item in items], dtype=np.int32),
+        )
 
         max_a = max(item["t0"].shape[1] for item in items)
-        t0_padded = []
-        for item in items:
-            t0_padded.append(np.pad(item["t0"], ((0, 0), (0, max_a - item["t0"].shape[1])), mode="constant"))
-        hf.create_dataset("time_start_vector", data=np.concatenate(t0_padded, axis=0), compression="gzip", compression_opts=4)
+        t0_padded = [
+            np.pad(
+                item["t0"],
+                ((0, 0), (0, max_a - item["t0"].shape[1])),
+                mode="constant",
+            )
+            for item in items
+        ]
+        hf.create_dataset(
+            "time_start_vector",
+            data=np.concatenate(t0_padded, axis=0),
+            compression="gzip",
+            compression_opts=4,
+        )
 
-        for meta_key in ["fs", "c", "fc", "pitch", "num_channels", "z_grid", "x_grid", "angles"]:
+        for meta_key in [
+            "fs",
+            "c",
+            "fc",
+            "pitch",
+            "num_channels",
+            "z_grid",
+            "x_grid",
+            "angles",
+        ]:
             hf.create_dataset(meta_key, data=base[meta_key])
 
         string_dtype = h5py.string_dtype(encoding="utf-8")
-        for key in ["name", "mode", "source", "iq", "scan", "phantom", "gt"]:
-            values = [item["meta"][key] for item in items]
-            dataset_name = {
-                "name": "sample_names",
-                "mode": "phantom_mode",
-                "source": "phantom_source",
-                "iq": "iq_path",
-                "scan": "scan_path",
-                "phantom": "phantom_path",
-                "gt": "gt_path",
-            }[key]
-            hf.create_dataset(dataset_name, data=np.array(values, dtype=object), dtype=string_dtype)
-        hf.create_dataset("has_gt", data=np.array([item["gt"] is not None for item in items], dtype=np.bool_))
+        config_yaml = yaml.safe_dump(
+            build_embedded_config(items, output_path, row_block),
+            sort_keys=False,
+            allow_unicode=True,
+        )
+        hf.create_dataset("config_yaml", data=config_yaml, dtype=string_dtype)
 
     if save_gt_images_enabled:
         save_gt_images(items, output_path.parent / "gt_preview")
@@ -397,16 +665,31 @@ def pack_dataset(scenes, output_path, source_root, row_block=24, save_gt_images_
 
 
 def parse_args():
+    """Parse args."""
     parser = argparse.ArgumentParser(description="Pack project H5 datasets.")
     parser.add_argument("--source_root", default=str(default_source_root()))
     parser.add_argument("--out_dir", default=str(project_root() / "data"))
-    parser.add_argument("--only", default="all", help="all, simulation, experiments, in_vivo")
-    parser.add_argument("--row_block", type=int, default=24, help="GPU按深度方向分块行数；<=0 表示整幅一次计算")
-    parser.add_argument("--no_save_gt_images", action="store_true", help="不额外输出GT预览图")
+    parser.add_argument(
+        "--only",
+        default="all",
+        help="all, simulation, experiments, in_vivo",
+    )
+    parser.add_argument(
+        "--row_block",
+        type=int,
+        default=24,
+        help="GPU按深度方向分块行数;<=0 表示整幅一次计算",
+    )
+    parser.add_argument(
+        "--no_save_gt_images",
+        action="store_true",
+        help="不额外输出GT预览图",
+    )
     return parser.parse_args()
 
 
 def main():
+    """Run the command-line workflow."""
     args = parse_args()
     source_root = Path(args.source_root)
     out_dir = Path(args.out_dir)
@@ -418,14 +701,14 @@ def main():
     }
     for choice in choices:
         scenes, output_path = scene_map[choice]
-        pack_dataset(scenes, output_path, source_root, row_block=args.row_block, save_gt_images_enabled=not args.no_save_gt_images)
+        pack_dataset(
+            scenes,
+            output_path,
+            source_root,
+            row_block=args.row_block,
+            save_gt_images_enabled=not args.no_save_gt_images,
+        )
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-

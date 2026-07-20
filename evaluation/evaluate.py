@@ -1,5 +1,4 @@
-"""
-Evaluate compare.py output.
+"""Evaluate run_one.py comparison output.
 
 Default input:
     results/<scene>/comparison.npy
@@ -13,8 +12,20 @@ import os
 
 import h5py
 import numpy as np
+import yaml
 from scipy.ndimage import convolve, uniform_filter
 from scipy.stats import kstest
+
+COMPARISON_VALUE_0_05 = 0.05
+COMPARISON_VALUE_0_5 = 0.5
+COMPARISON_VALUE_1ENEG_9 = 1e-9
+COMPARISON_VALUE_2 = 2
+COMPARISON_VALUE_20 = 20
+COMPARISON_VALUE_3 = 3
+COMPARISON_VALUE_5 = 5
+COMPARISON_VALUE_7 = 7
+COMPARISON_VALUE_8 = 8
+COMPARISON_VALUE_9 = 9
 
 try:
     from skimage.metrics import peak_signal_noise_ratio, structural_similarity
@@ -31,12 +42,24 @@ PICMUS_ROOT = os.path.join(PROJECT_ROOT, "data", "PICMUS")
 
 
 def parse_args():
+    """Parse args."""
     parser = argparse.ArgumentParser(
-        description="Evaluate compare.py output."
+        description="Evaluate run_one.py comparison output.",
     )
-    parser.add_argument("--comparison_npy", default=os.path.join("results", "comparison.npy"))
-    parser.add_argument("--methods", default=None, help="逗号分隔算法名，不含GT；默认从run_params.json读取")
-    parser.add_argument("--method_labels", default=None, help="逗号分隔显示名，不含GT；默认使用run_params.json或算法名大写")
+    parser.add_argument(
+        "--comparison_npy",
+        default=os.path.join("results", "comparison.npy"),
+    )
+    parser.add_argument(
+        "--methods",
+        default=None,
+        help="逗号分隔算法名,不含GT;默认从run_params.json读取",
+    )
+    parser.add_argument(
+        "--method_labels",
+        default=None,
+        help="逗号分隔显示名,不含GT;默认使用run_params.json或算法名大写",
+    )
     parser.add_argument("--h5_path", default=os.path.join("data", "simulation.h5"))
     parser.add_argument("--h5_sample_idx", type=int, default=0)
     parser.add_argument("--dr", type=float, default=60.0)
@@ -57,7 +80,6 @@ def parse_args():
         default="auto",
         help="Phantom source; auto uses experiments for validation H5 files and simulation otherwise.",
     )
-    parser.add_argument("--has_gt", choices=["auto", "true", "false"], default="auto")
     parser.add_argument("--roi_ring_inner_mm", type=float, default=3.5)
     parser.add_argument("--roi_ring_outer_mm", type=float, default=5.5)
     parser.add_argument("--auto_roi_radius_mm", type=float, default=2.0)
@@ -68,17 +90,15 @@ def parse_args():
 
 
 def load_method_names(args, comparison_path, n_panels, has_gt):
+    """Load method names."""
     if args.methods:
         methods = [m.strip().lower() for m in args.methods.split(",") if m.strip()]
-        if args.method_labels:
-            names = [m.strip() for m in args.method_labels.split(",") if m.strip()]
-        else:
-            names = [m.upper() for m in methods]
+        names = [m.strip() for m in args.method_labels.split(",") if m.strip()] if args.method_labels else [m.upper() for m in methods]
     else:
         params_path = os.path.join(os.path.dirname(comparison_path), "run_params.json")
         names = None
         if os.path.exists(params_path):
-            with open(params_path, "r", encoding="utf-8") as f:
+            with open(params_path, encoding="utf-8") as f:
                 params = json.load(f)
             label_map = params.get("algorithm_labels", {}) or {}
             method_text = params.get("output", {}).get("methods")
@@ -92,13 +112,16 @@ def load_method_names(args, comparison_path, n_panels, has_gt):
             else:
                 names = DEFAULT_METHODS + [f"Method{i + 1}" for i in range(len(DEFAULT_METHODS), n_methods)]
     if has_gt:
-        names = ["GT"] + names
+        names = ["GT", *names]
     if len(names) != n_panels:
-        raise ValueError(f"Method count {len(names)} does not match stacked image count {n_panels}")
+        raise ValueError(
+            f"Method count {len(names)} does not match stacked image count {n_panels}",
+        )
     return names
 
 
 def resolve(path):
+    """Execute resolve."""
     if path in ("auto", "none", None):
         return path
     if os.path.isabs(path):
@@ -107,6 +130,7 @@ def resolve(path):
 
 
 def resolve_existing(relative_path):
+    """Execute resolve existing."""
     if not relative_path:
         return "none"
     if os.path.isabs(relative_path):
@@ -123,33 +147,43 @@ def resolve_existing(relative_path):
     return "none"
 
 
-def h5_string_at(hf, key, idx, default=""):
-    if key not in hf:
-        return default
-    value = hf[key][idx]
+def h5_embedded_config(hf):
+    """Execute h5 embedded config."""
+    value = hf["config_yaml"][()]
     if isinstance(value, bytes):
-        return value.decode("utf-8")
-    return str(value)
-
-
-def h5_bool_at(hf, key, idx, default=False):
-    if key not in hf:
-        return default
-    return bool(hf[key][idx])
+        value = value.decode("utf-8")
+    try:
+        config = yaml.safe_load(value) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid config_yaml: {exc}") from exc
+    if not isinstance(config, dict):
+        raise ValueError("config_yaml top level must be a mapping")
+    return config
 
 
 def read_sample_meta(h5_path, sample_idx):
-    out = {}
+    """Read sample meta."""
     with h5py.File(h5_path, "r") as hf:
-        out["has_gt"] = h5_bool_at(hf, "has_gt", sample_idx, "all_envdb_norm" in hf)
-        out["phantom_mode"] = h5_string_at(hf, "phantom_mode", sample_idx, "")
-        out["phantom_source"] = h5_string_at(hf, "phantom_source", sample_idx, "")
-        out["phantom_path"] = h5_string_at(hf, "phantom_path", sample_idx, "")
-        out["sample_name"] = h5_string_at(hf, "sample_names", sample_idx, "")
-    return out
+        has_gt = "all_envdb_norm" in hf and 0 <= sample_idx < hf["all_envdb_norm"].shape[0]
+        source_samples = h5_embedded_config(hf).get("source_samples", [])
+        if not isinstance(source_samples, list) or not 0 <= sample_idx < len(
+            source_samples,
+        ):
+            raise IndexError(f"source_samples has no sample index {sample_idx}")
+        sample_config = source_samples[sample_idx]
+        if not isinstance(sample_config, dict):
+            raise ValueError(f"source_samples[{sample_idx}] must be a mapping")
+        return {
+            "has_gt": has_gt,
+            "sample_name": str(sample_config["id"]),
+            "phantom_mode": str(sample_config["phantom_mode"]),
+            "phantom_source": str(sample_config["phantom_source"]),
+            "phantom_path": str(sample_config["phantom_path"] or ""),
+        }
 
 
 def load_grids(h5_path):
+    """Load grids."""
     with h5py.File(h5_path, "r") as hf:
         x_mm = hf["x_grid"][:].astype(float) * 1000.0
         z_mm = hf["z_grid"][:].astype(float) * 1000.0
@@ -157,14 +191,17 @@ def load_grids(h5_path):
 
 
 def db_to_display(db, dr):
+    """Execute db to display."""
     return np.clip((db + dr) / dr, 0.0, 1.0)
 
 
 def db_to_envelope(db):
+    """Execute db to envelope."""
     return 10.0 ** (db / 20.0)
 
 
 def psnr(image, reference, data_range=1.0):
+    """Execute psnr."""
     mse = float(np.mean((image - reference) ** 2))
     if mse == 0.0:
         return float("inf")
@@ -172,6 +209,7 @@ def psnr(image, reference, data_range=1.0):
 
 
 def local_ssim(image, reference, data_range=1.0, win_size=11):
+    """Execute local ssim."""
     image = image.astype(np.float64)
     reference = reference.astype(np.float64)
     c1 = (0.01 * data_range) ** 2
@@ -184,24 +222,29 @@ def local_ssim(image, reference, data_range=1.0, win_size=11):
     vx = uxx - ux * ux
     vy = uyy - uy * uy
     vxy = uxy - ux * uy
-    score = ((2.0 * ux * uy + c1) * (2.0 * vxy + c2)) / (
-        (ux * ux + uy * uy + c1) * (vx + vy + c2)
-    )
+    score = ((2.0 * ux * uy + c1) * (2.0 * vxy + c2)) / ((ux * ux + uy * uy + c1) * (vx + vy + c2))
     return float(np.mean(score))
 
 
 def disk_kernel(radius_mm, dx_mm, dz_mm):
+    """Execute disk kernel."""
     rx = max(int(np.ceil(radius_mm / abs(dx_mm))), 1)
     rz = max(int(np.ceil(radius_mm / abs(dz_mm))), 1)
-    yy, xx = np.mgrid[-rz:rz + 1, -rx:rx + 1]
-    kernel = ((xx * dx_mm) ** 2 + (yy * dz_mm) ** 2 <= radius_mm ** 2).astype(float)
+    yy, xx = np.mgrid[-rz : rz + 1, -rx : rx + 1]
+    kernel = ((xx * dx_mm) ** 2 + (yy * dz_mm) ** 2 <= radius_mm**2).astype(float)
     return kernel / max(kernel.sum(), 1.0)
 
 
 def auto_dark_rois(gt_db, x_mm, z_mm, radius_mm):
+    """Execute auto dark rois."""
     gt_env = db_to_envelope(gt_db)
     kernel = disk_kernel(radius_mm, x_mm[1] - x_mm[0], z_mm[1] - z_mm[0])
-    local_mean = convolve(gt_env, kernel, mode="constant", cval=float(np.nanmax(gt_env)))
+    local_mean = convolve(
+        gt_env,
+        kernel,
+        mode="constant",
+        cval=float(np.nanmax(gt_env)),
+    )
     x_margin = 0.15 * (x_mm[-1] - x_mm[0])
     z_margin = 0.15 * (z_mm[-1] - z_mm[0])
     valid = (
@@ -212,10 +255,18 @@ def auto_dark_rois(gt_db, x_mm, z_mm, radius_mm):
     )
     score = np.where(valid, local_mean, np.inf)
     iz, ix = np.unravel_index(np.argmin(score), score.shape)
-    return [{"x_mm": float(x_mm[ix]), "z_mm": float(z_mm[iz]), "diameter_mm": 2.0 * radius_mm, "source": "auto_gt_dark"}]
+    return [
+        {
+            "x_mm": float(x_mm[ix]),
+            "z_mm": float(z_mm[iz]),
+            "diameter_mm": 2.0 * radius_mm,
+            "source": "auto_gt_dark",
+        },
+    ]
 
 
 def auto_bright_targets(gt_db, x_mm, z_mm, max_targets, min_distance_mm):
+    """Execute auto bright targets."""
     valid = np.isfinite(gt_db)
     x_margin = 0.08 * (x_mm[-1] - x_mm[0])
     z_margin = 0.08 * (z_mm[-1] - z_mm[0])
@@ -236,7 +287,7 @@ def auto_bright_targets(gt_db, x_mm, z_mm, max_targets, min_distance_mm):
             break
         x = float(x_mm[ix])
         z = float(z_mm[iz])
-        too_close = any((x - t["x_mm"]) ** 2 + (z - t["z_mm"]) ** 2 < min_distance_mm ** 2 for t in targets)
+        too_close = any((x - t["x_mm"]) ** 2 + (z - t["z_mm"]) ** 2 < min_distance_mm**2 for t in targets)
         if not too_close:
             targets.append({"x_mm": x, "z_mm": z, "source": "auto_gt_bright"})
     targets.sort(key=lambda t: (t["z_mm"], t["x_mm"]))
@@ -244,6 +295,7 @@ def auto_bright_targets(gt_db, x_mm, z_mm, max_targets, min_distance_mm):
 
 
 def read_phantom(phantom_path):
+    """Read phantom."""
     out = {
         "contrast_rois": [],
         "speckle_rois": [],
@@ -263,10 +315,15 @@ def read_phantom(phantom_path):
                 out["lateral_resolution_mm"] = float(np.squeeze(hf[f"{base}/phantom_lateralResolution"][()])) * 1000.0
             if f"{base}/phantom_axialResolution" in hf:
                 out["axial_resolution_mm"] = float(np.squeeze(hf[f"{base}/phantom_axialResolution"][()])) * 1000.0
-            for x, z, d in zip(xs, zs, ds):
+            for x, z, d in zip(xs, zs, ds, strict=True):
                 if d > 0:
                     out["contrast_rois"].append(
-                        {"x_mm": float(x), "z_mm": float(z), "diameter_mm": float(d), "source": "phantom"}
+                        {
+                            "x_mm": float(x),
+                            "z_mm": float(z),
+                            "diameter_mm": float(d),
+                            "source": "phantom",
+                        },
                     )
         if f"{base}/phantom_RoiCenterX" in hf:
             xs = hf[f"{base}/phantom_RoiCenterX"][:].astype(float) * 1000.0
@@ -277,20 +334,29 @@ def read_phantom(phantom_path):
                 out["lateral_resolution_mm"] = float(np.squeeze(hf[f"{base}/phantom_lateralResolution"][()])) * 1000.0
             if f"{base}/phantom_axialResolution" in hf:
                 out["axial_resolution_mm"] = float(np.squeeze(hf[f"{base}/phantom_axialResolution"][()])) * 1000.0
-            for x, z, tx, tz in zip(xs, zs, txs, tzs):
+            for x, z, tx, tz in zip(xs, zs, txs, tzs, strict=True):
                 out["speckle_rois"].append(
-                    {"x_mm": float(x), "z_mm": float(z), "psf_time_x": float(tx), "psf_time_z": float(tz), "source": "phantom"}
+                    {
+                        "x_mm": float(x),
+                        "z_mm": float(z),
+                        "psf_time_x": float(tx),
+                        "psf_time_z": float(tz),
+                        "source": "phantom",
+                    },
                 )
         if f"{base}/phantom_xPts" in hf:
             xs = hf[f"{base}/phantom_xPts"][:].astype(float) * 1000.0
             zs = hf[f"{base}/phantom_zPts"][:].astype(float) * 1000.0
-            for x, z in zip(xs, zs):
-                if np.isfinite(x) and np.isfinite(z) and (abs(x) > 1e-9 or abs(z) > 1e-9):
-                    out["resolution_targets"].append({"x_mm": float(x), "z_mm": float(z), "source": "phantom"})
+            for x, z in zip(xs, zs, strict=True):
+                if np.isfinite(x) and np.isfinite(z) and (abs(x) > COMPARISON_VALUE_1ENEG_9 or abs(z) > COMPARISON_VALUE_1ENEG_9):
+                    out["resolution_targets"].append(
+                        {"x_mm": float(x), "z_mm": float(z), "source": "phantom"},
+                    )
     return out
 
 
 def infer_source(args):
+    """Execute infer source."""
     if args.phantom_source != "auto":
         return args.phantom_source
     meta = read_sample_meta(resolve(args.h5_path), args.h5_sample_idx)
@@ -303,18 +369,30 @@ def infer_source(args):
 
 
 def default_phantom(mode, source):
+    """Execute default phantom."""
     if mode == "in_vivo" or source == "in_vivo":
         return "none"
     if mode == "resolution_distorsion":
         prefix = "expe" if source == "experiments" else "simu"
-        rel = os.path.join("database", source, "resolution_distorsion", f"resolution_distorsion_{prefix}_phantom.hdf5")
+        rel = os.path.join(
+            "database",
+            source,
+            "resolution_distorsion",
+            f"resolution_distorsion_{prefix}_phantom.hdf5",
+        )
     else:
         prefix = "expe" if source == "experiments" else "simu"
-        rel = os.path.join("database", source, "contrast_speckle", f"contrast_speckle_{prefix}_phantom.hdf5")
+        rel = os.path.join(
+            "database",
+            source,
+            "contrast_speckle",
+            f"contrast_speckle_{prefix}_phantom.hdf5",
+        )
     return resolve_existing(rel)
 
 
 def infer_mode(args, comparison):
+    """Execute infer mode."""
     if args.phantom_mode != "auto":
         return args.phantom_mode
     meta = read_sample_meta(resolve(args.h5_path), args.h5_sample_idx)
@@ -327,15 +405,15 @@ def infer_mode(args, comparison):
     return "contrast_speckle"
 
 
-def infer_has_gt(args, h5_path, sample_idx):
-    if args.has_gt == "true":
-        return True
-    if args.has_gt == "false":
-        return False
-    return read_sample_meta(h5_path, sample_idx).get("has_gt", False)
-
-
-def standard_contrast_score(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padding=1.0):
+def standard_contrast_score(
+    db_img,
+    x_mm,
+    z_mm,
+    roi,
+    lateral_resolution_mm,
+    padding=1.0,
+):
+    """Execute standard contrast score."""
     if not lateral_resolution_mm or not np.isfinite(lateral_resolution_mm):
         return np.nan
     x = x_mm[None, :]
@@ -343,21 +421,26 @@ def standard_contrast_score(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padd
     radius = roi["diameter_mm"] / 2.0
     rin = radius - padding * lateral_resolution_mm
     rout1 = radius + padding * lateral_resolution_mm
-    rout2 = 1.2 * math.sqrt(rin ** 2 + rout1 ** 2)
+    rout2 = 1.2 * math.sqrt(rin**2 + rout1**2)
     dist2 = (x - roi["x_mm"]) ** 2 + (z - roi["z_mm"]) ** 2
-    inside = db_img[dist2 <= rin ** 2]
-    outside = db_img[(dist2 >= rout1 ** 2) & (dist2 <= rout2 ** 2)]
-    if inside.size < 8 or outside.size < 8:
+    inside = db_img[dist2 <= rin**2]
+    outside = db_img[(dist2 >= rout1**2) & (dist2 <= rout2**2)]
+    if inside.size < COMPARISON_VALUE_8 or outside.size < COMPARISON_VALUE_8:
         return np.nan
     # Match MATLAB var() in the official PICMUS evaluator (sample variance, N-1).
-    denom = math.sqrt((float(np.var(inside, ddof=1)) + float(np.var(outside, ddof=1))) / 2.0)
+    denom = math.sqrt(
+        (float(np.var(inside, ddof=1)) + float(np.var(outside, ddof=1))) / 2.0,
+    )
     if denom <= 0:
         return np.nan
-    value = 20.0 * math.log10(abs(float(np.mean(inside)) - float(np.mean(outside))) / denom)
+    value = 20.0 * math.log10(
+        abs(float(np.mean(inside)) - float(np.mean(outside))) / denom,
+    )
     return float(round(value * 10.0) / 10.0)
 
 
 def contrast_roi_metrics(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padding=1.0):
+    """Execute contrast roi metrics."""
     if not lateral_resolution_mm or not np.isfinite(lateral_resolution_mm):
         return None
     x = x_mm[None, :]
@@ -365,15 +448,15 @@ def contrast_roi_metrics(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padding
     radius = roi["diameter_mm"] / 2.0
     rin = radius - padding * lateral_resolution_mm
     rout1 = radius + padding * lateral_resolution_mm
-    rout2 = 1.2 * math.sqrt(max(rin ** 2 + rout1 ** 2, 0.0))
+    rout2 = 1.2 * math.sqrt(max(rin**2 + rout1**2, 0.0))
     if rin <= 0 or rout2 <= rout1:
         return None
     dist2 = (x - roi["x_mm"]) ** 2 + (z - roi["z_mm"]) ** 2
-    inside_db = db_img[dist2 <= rin ** 2]
-    outside_db = db_img[(dist2 >= rout1 ** 2) & (dist2 <= rout2 ** 2)]
+    inside_db = db_img[dist2 <= rin**2]
+    outside_db = db_img[(dist2 >= rout1**2) & (dist2 <= rout2**2)]
     inside_db = inside_db[np.isfinite(inside_db)]
     outside_db = outside_db[np.isfinite(outside_db)]
-    if inside_db.size < 8 or outside_db.size < 8:
+    if inside_db.size < COMPARISON_VALUE_8 or outside_db.size < COMPARISON_VALUE_8:
         return None
 
     inside_env = db_to_envelope(inside_db)
@@ -391,7 +474,12 @@ def contrast_roi_metrics(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padding
     if hi <= lo:
         gcnr = np.nan
     else:
-        hist_in, bins = np.histogram(inside_env, bins=128, range=(lo, hi), density=False)
+        hist_in, bins = np.histogram(
+            inside_env,
+            bins=128,
+            range=(lo, hi),
+            density=False,
+        )
         hist_out, _ = np.histogram(outside_env, bins=bins, density=False)
         p_in = hist_in.astype(np.float64) / max(float(hist_in.sum()), 1.0)
         p_out = hist_out.astype(np.float64) / max(float(hist_out.sum()), 1.0)
@@ -405,7 +493,15 @@ def contrast_roi_metrics(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padding
     }
 
 
-def standard_speckle_quality(env, x_mm, z_mm, roi, lateral_resolution_mm, axial_resolution_mm):
+def standard_speckle_quality(
+    env,
+    x_mm,
+    z_mm,
+    roi,
+    lateral_resolution_mm,
+    axial_resolution_mm,
+):
+    """Execute standard speckle quality."""
     if not lateral_resolution_mm or not axial_resolution_mm:
         return None
     pad_x = roi["psf_time_x"] * lateral_resolution_mm
@@ -417,13 +513,13 @@ def standard_speckle_quality(env, x_mm, z_mm, roi, lateral_resolution_mm, axial_
         return None
     sample = env_roi[::5, ::5].ravel()
     sample = sample[np.isfinite(sample)]
-    if sample.size < 8:
+    if sample.size < COMPARISON_VALUE_8:
         return None
-    rayleigh_var = float(np.sum(sample ** 2) / (2.0 * sample.size))
+    rayleigh_var = float(np.sum(sample**2) / (2.0 * sample.size))
     scale = math.sqrt(max(rayleigh_var, 1e-24))
     ks = kstest(sample, "rayleigh", args=(0.0, scale))
     return {
-        "speckle_pass": 1.0 if ks.pvalue >= 0.05 else 0.0,
+        "speckle_pass": 1.0 if ks.pvalue >= COMPARISON_VALUE_0_05 else 0.0,
         "speckle_KS_D": float(ks.statistic),
         "speckle_KS_p": float(ks.pvalue),
         "speckle_SNR": float(np.mean(sample) / (np.std(sample) + 1e-12)),
@@ -432,23 +528,35 @@ def standard_speckle_quality(env, x_mm, z_mm, roi, lateral_resolution_mm, axial_
 
 
 def compute_6db_resolution(coord, profile_db):
+    """Reproduce PICMUS ``Compute_6dB_Resolution.m`` exactly.
+
+    The reference code linearly resamples the whole profile to ``10 * N``
+    points, then measures the span from the first to the last sample whose
+    value is at least 6 dB below the interpolated maximum.
+    """
     profile = np.asarray(profile_db, dtype=np.float64)
     coord = np.asarray(coord, dtype=np.float64)
-    if profile.size < 2 or coord.size != profile.size:
+    if profile.size < COMPARISON_VALUE_2 or coord.size != profile.size or not np.all(np.isfinite(coord)) or not np.any(np.isfinite(profile)):
         return np.nan
-    nb_interp = profile.size * 10
-    coord_interp = np.linspace(coord[0], coord[-1], nb_interp)
-    profile_interp = np.interp(coord_interp, coord, profile)
-    valid = np.where(profile_interp >= (np.nanmax(profile_interp) - 6.0))[0]
-    if valid.size == 0:
+    finite = np.isfinite(profile)
+    if not np.all(finite):
+        coord = coord[finite]
+        profile = profile[finite]
+    if profile.size < COMPARISON_VALUE_2:
         return np.nan
-    return float(coord_interp[valid[-1]] - coord_interp[valid[0]])
+    interp_coord = np.linspace(coord[0], coord[-1], profile.size * 10)
+    interp_profile = np.interp(interp_coord, coord, profile)
+    above = np.flatnonzero(interp_profile >= np.max(interp_profile) - 6.0)
+    if above.size == 0:
+        return np.nan
+    return float(interp_coord[above[-1]] - interp_coord[above[0]])
 
 
 def profile_sidelobe_metrics(profile_db):
+    """Execute profile sidelobe metrics."""
     profile = np.asarray(profile_db, dtype=np.float64)
     profile = profile[np.isfinite(profile)]
-    if profile.size < 5:
+    if profile.size < COMPARISON_VALUE_5:
         return np.nan, np.nan
 
     peak_idx = int(np.argmax(profile))
@@ -462,8 +570,8 @@ def profile_sidelobe_metrics(profile_db):
     while right < profile.size - 1 and profile[right + 1] >= main_threshold:
         right += 1
 
-    main = profile[left:right + 1]
-    side = np.concatenate([profile[:left], profile[right + 1:]])
+    main = profile[left : right + 1]
+    side = np.concatenate([profile[:left], profile[right + 1 :]])
     if main.size == 0 or side.size == 0:
         return np.nan, np.nan
 
@@ -474,29 +582,64 @@ def profile_sidelobe_metrics(profile_db):
         return np.nan, np.nan
 
     pslr = 20.0 * math.log10((float(np.max(side_env)) + 1e-12) / (peak_env + 1e-12))
-    islr = 10.0 * math.log10((float(np.sum(side_env ** 2)) + 1e-24) / (float(np.sum(main_env ** 2)) + 1e-24))
+    islr = 10.0 * math.log10(
+        (float(np.sum(side_env**2)) + 1e-24) / (float(np.sum(main_env**2)) + 1e-24),
+    )
     return float(pslr), float(islr)
 
 
-def target_resolution(db_img, x_mm, z_mm, target, window_mm, target_idx=None, source="simulation"):
-    # Official PICMUS ROI uses strict bounds: center-window < coordinate < center+window.
-    x_mask = np.abs(x_mm - target["x_mm"]) < window_mm
-    z_mask = np.abs(z_mm - target["z_mm"]) < window_mm
-    patch = db_img[np.ix_(z_mask, x_mask)]
-    if patch.size == 0:
+def build_square_label_map(x_mm, z_mm, targets, half_width_mm, z_offset_mm=0.0):
+    """Build the additive, one-based target mask used by PICMUS MATLAB code."""
+    labels = np.zeros((len(z_mm), len(x_mm)), dtype=np.int32)
+    for target_idx, target in enumerate(targets, 1):
+        x_mask = np.abs(x_mm - target["x_mm"]) < half_width_mm
+        z_mask = np.abs(z_mm - (target["z_mm"] + z_offset_mm)) < half_width_mm
+        labels[np.ix_(z_mask, x_mask)] += target_idx
+    return labels
+
+
+def target_resolution(
+    db_img,
+    x_mm,
+    z_mm,
+    target,
+    window_mm,
+    target_idx=None,
+    source="simulation",
+    label_map=None,
+):
+    # The official implementation first adds all numbered ROIs into one label
+    # image. Thus overlaps are intentionally excluded from each individual ROI.
+    """Execute target resolution."""
+    if target_idx is None:
+        raise ValueError("target_idx is required for PICMUS resolution evaluation")
+    if label_map is None:
+        label_map = build_square_label_map(x_mm, z_mm, [target], window_mm)
+        target_label = 1
+    else:
+        target_label = target_idx
+    target_mask = label_map == target_label
+    z_ids, x_ids = np.where(target_mask)
+    if z_ids.size == 0:
         return None
-    pz, px = np.unravel_index(np.argmax(patch), patch.shape)
-    z_ids = np.where(z_mask)[0]
-    x_ids = np.where(x_mask)[0]
-    iz = int(z_ids[pz])
-    ix = int(x_ids[px])
-    axial = compute_6db_resolution(z_mm[z_mask], patch[:, px])
-    lateral = compute_6db_resolution(x_mm[x_mask], patch[pz, :])
-    PSLR_axial_dB, ISLR_axial_dB = profile_sidelobe_metrics(patch[:, px])
-    PSLR_lateral_dB, ISLR_lateral_dB = profile_sidelobe_metrics(patch[pz, :])
-    PSLR_dB = mean_or_nan([PSLR_axial_dB, PSLR_lateral_dB])
-    ISLR_dB = mean_or_nan([ISLR_axial_dB, ISLR_lateral_dB])
-    peak_offset = math.sqrt((x_mm[ix] - target["x_mm"]) ** 2 + (z_mm[iz] - target["z_mm"]) ** 2)
+    masked = np.full_like(db_img, np.nanmin(db_img), dtype=np.float64)
+    masked[target_mask] = db_img[target_mask]
+    if not np.any(np.isfinite(masked[target_mask])):
+        return None
+    iz, ix = np.unravel_index(np.nanargmax(masked), masked.shape)
+    z_slice = slice(int(z_ids.min()), int(z_ids.max()) + 1)
+    x_slice = slice(int(x_ids.min()), int(x_ids.max()) + 1)
+    axial_profile = masked[z_slice, ix]
+    lateral_profile = masked[iz, x_slice]
+    axial = compute_6db_resolution(z_mm[z_slice], axial_profile)
+    lateral = compute_6db_resolution(x_mm[x_slice], lateral_profile)
+    pslr_axial_db, islr_axial_db = profile_sidelobe_metrics(axial_profile)
+    pslr_lateral_db, islr_lateral_db = profile_sidelobe_metrics(lateral_profile)
+    pslr_db = mean_or_nan([pslr_axial_db, pslr_lateral_db])
+    islr_db = mean_or_nan([islr_axial_db, islr_lateral_db])
+    peak_offset = math.sqrt(
+        (x_mm[ix] - target["x_mm"]) ** 2 + (z_mm[iz] - target["z_mm"]) ** 2,
+    )
     return {
         "target_x_mm": target["x_mm"],
         "target_z_mm": target["z_mm"],
@@ -504,52 +647,54 @@ def target_resolution(db_img, x_mm, z_mm, target, window_mm, target_idx=None, so
         "peak_z_mm": float(z_mm[iz]),
         "FWHM_axial_mm": axial,
         "FWHM_lateral_mm": lateral,
-        "PSLR_axial_dB": float(PSLR_axial_dB),
-        "PSLR_lateral_dB": float(PSLR_lateral_dB),
-        "PSLR_dB": float(PSLR_dB),
-        "ISLR_axial_dB": float(ISLR_axial_dB),
-        "ISLR_lateral_dB": float(ISLR_lateral_dB),
-        "ISLR_dB": float(ISLR_dB),
+        "pslr_axial_db": float(pslr_axial_db),
+        "pslr_lateral_db": float(pslr_lateral_db),
+        "pslr_db": float(pslr_db),
+        "islr_axial_db": float(islr_axial_db),
+        "islr_lateral_db": float(islr_lateral_db),
+        "islr_db": float(islr_db),
         "distortion_mm": float(peak_offset),
         "distortion_pass": np.nan,
     }
 
 
-def picmus_distortion_pass(db_img, x_mm, z_mm, target, window_mm, target_idx, source):
+def picmus_distortion_pass(
+    db_img,
+    target_idx,
+    source,
+    roi_label_map=None,
+    inside_label_map=None,
+):
     """Reproduce the official simulated PICMUS distortion test."""
     if source != "simulation" or target_idx not in {1, 5, 8, 9, 14, 15, 20}:
         return np.nan
 
-    corrected_z = target["z_mm"] + 0.2
-    x_mask = np.abs(x_mm - target["x_mm"]) < window_mm
-    z_mask = np.abs(z_mm - corrected_z) < window_mm
-    patch = db_img[np.ix_(z_mask, x_mask)]
-    if patch.size == 0 or not np.any(np.isfinite(patch)):
+    if roi_label_map is None or inside_label_map is None:
         return np.nan
-
-    pz, px = np.unravel_index(np.nanargmax(patch), patch.shape)
-    peak_x = float(x_mm[np.where(x_mask)[0][px]])
-    peak_z = float(z_mm[np.where(z_mask)[0][pz]])
-    inside = (
-        abs(peak_x - target["x_mm"]) < 0.2957
-        and abs(peak_z - corrected_z) < 0.2957
-    )
-    return 1.0 if inside else 0.0
+    target_mask = roi_label_map == target_idx
+    if not np.any(target_mask):
+        return np.nan
+    masked = np.full_like(db_img, np.nanmin(db_img), dtype=np.float64)
+    masked[target_mask] = db_img[target_mask]
+    peak = np.unravel_index(np.nanargmax(masked), masked.shape)
+    return 1.0 if inside_label_map[peak] == target_idx else 0.0
 
 
 def mean_or_nan(values):
+    """Execute mean or nan."""
     values = [v for v in values if v is not None and np.isfinite(v)]
     return float(np.mean(values)) if values else np.nan
 
 
 def picmus_resolution_groups(source, target_count):
-    if source == "simulation" and target_count >= 20:
+    """Execute picmus resolution groups."""
+    if source == "simulation" and target_count >= COMPARISON_VALUE_20:
         return [
             ("vertical_targets", list(range(1, 9))),
             ("horizontal_targets_2cm", [9, 10, 11, 3, 12, 13, 14]),
             ("horizontal_targets_4cm", [15, 16, 17, 7, 18, 19, 20]),
         ]
-    if source == "experiments" and target_count >= 7:
+    if source == "experiments" and target_count >= COMPARISON_VALUE_7:
         return [
             ("vertical_targets", list(range(1, 6))),
             ("horizontal_targets_near_4cm", [6, 4, 7]),
@@ -558,18 +703,20 @@ def picmus_resolution_groups(source, target_count):
 
 
 def picmus_contrast_groups(source, roi_count):
-    if source == "simulation" and roi_count >= 9:
+    """Execute picmus contrast groups."""
+    if source == "simulation" and roi_count >= COMPARISON_VALUE_9:
         return [
             ("left_column", [4, 5, 6]),
             ("middle_column", [1, 2, 3]),
             ("right_column", [7, 8, 9]),
         ]
-    if source == "experiments" and roi_count >= 2:
+    if source == "experiments" and roi_count >= COMPARISON_VALUE_2:
         return [("middle_column", [1, 2])]
     return [("all_cysts", list(range(1, roi_count + 1)))] if roi_count else []
 
 
 def rows_for_method_index(rows, method, index_key):
+    """Execute rows for method index."""
     out = {}
     for row in rows:
         if row.get("method") != method or index_key not in row:
@@ -582,17 +729,15 @@ def rows_for_method_index(rows, method, index_key):
 
 
 def speckle_penalty_for_method(roi_rows, method):
-    passes = [
-        row["speckle_pass"]
-        for row in roi_rows
-        if row.get("method") == method and "speckle_pass" in row and np.isfinite(row["speckle_pass"])
-    ]
+    """Execute speckle penalty for method."""
+    passes = [row["speckle_pass"] for row in roi_rows if row.get("method") == method and "speckle_pass" in row and np.isfinite(row["speckle_pass"])]
     if not passes:
         return np.nan
-    return -40.0 if any(value < 0.5 for value in passes) else 0.0
+    return -40.0 if any(value < COMPARISON_VALUE_0_5 for value in passes) else 0.0
 
 
 def build_resolution_group_rows(target_rows, source, target_count, methods):
+    """Build resolution group rows."""
     groups = picmus_resolution_groups(source, target_count)
     rows = []
     for method in methods:
@@ -603,53 +748,76 @@ def build_resolution_group_rows(target_rows, source, target_count, methods):
                 continue
             pass_values = [row["distortion_pass"] for row in selected if np.isfinite(row.get("distortion_pass", np.nan))]
             if source == "simulation" and pass_values:
-                penalty = -40.0 if any(value < 0.5 for value in pass_values) else 0.0
+                penalty = -40.0 if any(value < COMPARISON_VALUE_0_5 for value in pass_values) else 0.0
                 pass_rate = mean_or_nan(pass_values)
             else:
                 penalty = np.nan
                 pass_rate = np.nan
-            rows.append({
-                "method": method,
-                "group": group_name,
-                "target_indices": " ".join(str(i) for i in indices),
-                "n_targets": len(selected),
-                "FWHM_axial_mm": mean_or_nan([row.get("FWHM_axial_mm") for row in selected]),
-                "FWHM_lateral_mm": mean_or_nan([row.get("FWHM_lateral_mm") for row in selected]),
-                "PSLR_dB": mean_or_nan([row.get("PSLR_dB") for row in selected]),
-                "ISLR_dB": mean_or_nan([row.get("ISLR_dB") for row in selected]),
-                "distortion_mm": mean_or_nan([row.get("distortion_mm") for row in selected]),
-                "distortion_pass_rate": pass_rate,
-                "PICMUS_distortion_penalty": penalty,
-            })
+            rows.append(
+                {
+                    "method": method,
+                    "group": group_name,
+                    "target_indices": " ".join(str(i) for i in indices),
+                    "n_targets": len(selected),
+                    "FWHM_axial_mm": mean_or_nan(
+                        [row.get("FWHM_axial_mm") for row in selected],
+                    ),
+                    "FWHM_lateral_mm": mean_or_nan(
+                        [row.get("FWHM_lateral_mm") for row in selected],
+                    ),
+                    "pslr_db": mean_or_nan([row.get("pslr_db") for row in selected]),
+                    "islr_db": mean_or_nan([row.get("islr_db") for row in selected]),
+                    "distortion_mm": mean_or_nan(
+                        [row.get("distortion_mm") for row in selected],
+                    ),
+                    "distortion_pass_rate": pass_rate,
+                    "PICMUS_distortion_penalty": penalty,
+                },
+            )
     return rows
 
 
 def build_contrast_group_rows(roi_rows, source, roi_count, methods):
+    """Build contrast group rows."""
     groups = picmus_contrast_groups(source, roi_count)
     rows = []
     for method in methods:
-        indexed = rows_for_method_index([row for row in roi_rows if "contrast_dB" in row], method, "roi_idx")
+        indexed = rows_for_method_index(
+            [row for row in roi_rows if "contrast_dB" in row],
+            method,
+            "roi_idx",
+        )
         for group_name, indices0 in groups:
             indices = [i - 1 for i in indices0]
             selected = [indexed[i] for i in indices if i in indexed]
             if not selected:
                 continue
-            rows.append({
-                "method": method,
-                "group": group_name,
-                "roi_indices": " ".join(str(i) for i in indices0),
-                "n_rois": len(selected),
-                "contrast_dB": mean_or_nan([row.get("contrast_dB") for row in selected]),
-                "CR_dB": mean_or_nan([row.get("CR_dB") for row in selected]),
-                "CNR": mean_or_nan([row.get("CNR") for row in selected]),
-                "gCNR": mean_or_nan([row.get("gCNR") for row in selected]),
-                "cyst_residual_dB": mean_or_nan([row.get("cyst_residual_dB") for row in selected]),
-                "PICMUS_speckle_penalty": speckle_penalty_for_method(roi_rows, method),
-            })
+            rows.append(
+                {
+                    "method": method,
+                    "group": group_name,
+                    "roi_indices": " ".join(str(i) for i in indices0),
+                    "n_rois": len(selected),
+                    "contrast_dB": mean_or_nan(
+                        [row.get("contrast_dB") for row in selected],
+                    ),
+                    "CR_dB": mean_or_nan([row.get("CR_dB") for row in selected]),
+                    "CNR": mean_or_nan([row.get("CNR") for row in selected]),
+                    "gCNR": mean_or_nan([row.get("gCNR") for row in selected]),
+                    "cyst_residual_dB": mean_or_nan(
+                        [row.get("cyst_residual_dB") for row in selected],
+                    ),
+                    "PICMUS_speckle_penalty": speckle_penalty_for_method(
+                        roi_rows,
+                        method,
+                    ),
+                },
+            )
     return rows
 
 
 def fmt_metric(value, precision=3):
+    """Execute fmt metric."""
     try:
         if value is None or not np.isfinite(value):
             return "NA"
@@ -658,7 +826,17 @@ def fmt_metric(value, precision=3):
     return f"{float(value):.{precision}f}"
 
 
-def write_picmus_report(path, mode, source, methods, summary_rows, contrast_group_rows, resolution_group_rows, roi_rows):
+def write_picmus_report(
+    path,
+    mode,
+    source,
+    methods,
+    summary_rows,
+    contrast_group_rows,
+    resolution_group_rows,
+    roi_rows,
+):
+    """Execute write picmus report."""
     summary_by_method = {row["method"]: row for row in summary_rows}
     with open(path, "w", encoding="utf-8") as file:
         file.write("PICMUS-style evaluation summary\n")
@@ -667,31 +845,43 @@ def write_picmus_report(path, mode, source, methods, summary_rows, contrast_grou
             row = summary_by_method.get(method, {})
             file.write(f"[{method}]\n")
             if mode == "contrast_speckle":
-                file.write(f"mean_contrast_dB: {fmt_metric(row.get('contrast_dB'), 1)}\n")
+                file.write(
+                    f"mean_contrast_dB: {fmt_metric(row.get('contrast_dB'), 1)}\n",
+                )
                 file.write(f"mean_CR_dB: {fmt_metric(row.get('CR_dB'), 3)}\n")
                 file.write(f"mean_CNR: {fmt_metric(row.get('CNR'), 3)}\n")
                 file.write(f"mean_gCNR: {fmt_metric(row.get('gCNR'), 3)}\n")
-                file.write(f"speckle_pass_rate: {fmt_metric(row.get('speckle_pass_rate'), 3)}\n")
-                file.write(f"PICMUS_speckle_penalty: {fmt_metric(speckle_penalty_for_method(roi_rows, method), 1)}\n")
+                file.write(
+                    f"speckle_pass_rate: {fmt_metric(row.get('speckle_pass_rate'), 3)}\n",
+                )
+                file.write(
+                    f"PICMUS_speckle_penalty: {fmt_metric(speckle_penalty_for_method(roi_rows, method), 1)}\n",
+                )
                 for group in [r for r in contrast_group_rows if r["method"] == method]:
                     file.write(
                         f"  {group['group']} ({group['roi_indices']}): "
                         f"contrast={fmt_metric(group.get('contrast_dB'), 1)}, "
                         f"CNR={fmt_metric(group.get('CNR'), 3)}, "
-                        f"gCNR={fmt_metric(group.get('gCNR'), 3)}\n"
+                        f"gCNR={fmt_metric(group.get('gCNR'), 3)}\n",
                     )
             elif mode == "resolution_distorsion":
-                file.write(f"mean_FWHM_axial_mm: {fmt_metric(row.get('FWHM_axial_mm'), 4)}\n")
-                file.write(f"mean_FWHM_lateral_mm: {fmt_metric(row.get('FWHM_lateral_mm'), 4)}\n")
-                file.write(f"mean_PSLR_dB: {fmt_metric(row.get('PSLR_dB'), 3)}\n")
-                file.write(f"mean_ISLR_dB: {fmt_metric(row.get('ISLR_dB'), 3)}\n")
-                file.write(f"distortion_pass_rate: {fmt_metric(row.get('distortion_pass_rate'), 3)}\n")
+                file.write(
+                    f"mean_FWHM_axial_mm: {fmt_metric(row.get('FWHM_axial_mm'), 4)}\n",
+                )
+                file.write(
+                    f"mean_FWHM_lateral_mm: {fmt_metric(row.get('FWHM_lateral_mm'), 4)}\n",
+                )
+                file.write(f"mean_PSLR_dB: {fmt_metric(row.get('pslr_db'), 3)}\n")
+                file.write(f"mean_ISLR_dB: {fmt_metric(row.get('islr_db'), 3)}\n")
+                file.write(
+                    f"distortion_pass_rate: {fmt_metric(row.get('distortion_pass_rate'), 3)}\n",
+                )
                 for group in [r for r in resolution_group_rows if r["method"] == method]:
                     file.write(
                         f"  {group['group']} ({group['target_indices']}): "
                         f"axial={fmt_metric(group.get('FWHM_axial_mm'), 4)}, "
                         f"lateral={fmt_metric(group.get('FWHM_lateral_mm'), 4)}, "
-                        f"penalty={fmt_metric(group.get('PICMUS_distortion_penalty'), 1)}\n"
+                        f"penalty={fmt_metric(group.get('PICMUS_distortion_penalty'), 1)}\n",
                     )
             else:
                 file.write("No PICMUS phantom score for this mode.\n")
@@ -699,6 +889,7 @@ def write_picmus_report(path, mode, source, methods, summary_rows, contrast_grou
 
 
 def write_csv(path, rows, fieldnames):
+    """Execute write csv."""
     with open(path, "w", newline="", encoding="utf-8-sig") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
@@ -706,28 +897,50 @@ def write_csv(path, rows, fieldnames):
 
 
 def main():
+    """Run the command-line workflow."""
     args = parse_args()
+    positive_args = {
+        "dr": args.dr,
+        "roi_ring_inner_mm": args.roi_ring_inner_mm,
+        "roi_ring_outer_mm": args.roi_ring_outer_mm,
+        "auto_roi_radius_mm": args.auto_roi_radius_mm,
+        "auto_target_min_distance_mm": args.auto_target_min_distance_mm,
+        "fwhm_window_mm": args.fwhm_window_mm,
+    }
+    invalid = [name for name, value in positive_args.items() if not math.isfinite(value) or value <= 0]
+    if invalid:
+        raise ValueError(f"参数必须是有限正数: {', '.join(invalid)}")
+    if args.roi_ring_outer_mm <= args.roi_ring_inner_mm:
+        raise ValueError("roi_ring_outer_mm 必须大于 roi_ring_inner_mm")
+    if args.auto_target_count < 1:
+        raise ValueError("auto_target_count 必须大于等于 1")
     comparison_path = resolve(args.comparison_npy)
     h5_path = resolve(args.h5_path)
     out_dir = resolve(args.out_dir)
     meta_from_h5 = read_sample_meta(h5_path, args.h5_sample_idx)
-    has_gt = infer_has_gt(args, h5_path, args.h5_sample_idx)
+    has_gt = read_sample_meta(h5_path, args.h5_sample_idx).get("has_gt", False)
     if (
-        not has_gt
-        and (
-            args.phantom_mode == "in_vivo"
-            or args.phantom_source == "in_vivo"
-            or meta_from_h5.get("phantom_mode") == "in_vivo"
-            or meta_from_h5.get("phantom_source") == "in_vivo"
-        )
+        args.phantom_mode == "in_vivo"
+        or args.phantom_source == "in_vivo"
+        or meta_from_h5.get("phantom_mode") == "in_vivo"
+        or meta_from_h5.get("phantom_source") == "in_vivo"
     ):
         print("In-vivo scene: skipped metric export.")
         return
 
     comparison = np.load(comparison_path).astype(np.float64)
     x_mm, z_mm = load_grids(h5_path)
+    if comparison.ndim != COMPARISON_VALUE_3 or comparison.shape[0] < 1:
+        raise ValueError(
+            f"comparison 必须是非空 [method,z,x] 三维数组,实际为 {comparison.shape}",
+        )
     if comparison.shape[1:] != (len(z_mm), len(x_mm)):
-        raise ValueError(f"Image shape {comparison.shape[1:]} does not match H5 grids {(len(z_mm), len(x_mm))}")
+        raise ValueError(
+            f"Image shape {comparison.shape[1:]} does not match H5 grids {(len(z_mm), len(x_mm))}",
+        )
+    if not np.all(np.isfinite(comparison)):
+        bad_count = int(comparison.size - np.count_nonzero(np.isfinite(comparison)))
+        raise ValueError(f"comparison 包含 {bad_count} 个 NaN/Inf,拒绝生成无效指标")
     methods = load_method_names(args, comparison_path, comparison.shape[0], has_gt)
 
     mode = infer_mode(args, comparison)
@@ -755,11 +968,37 @@ def main():
             args.auto_target_min_distance_mm,
         )
 
+    resolution_label_map = None
+    distortion_roi_label_map = None
+    distortion_inside_label_map = None
+    if targets:
+        resolution_label_map = build_square_label_map(
+            x_mm,
+            z_mm,
+            targets,
+            args.fwhm_window_mm,
+        )
+        if source == "simulation":
+            distortion_roi_label_map = build_square_label_map(
+                x_mm,
+                z_mm,
+                targets,
+                args.fwhm_window_mm,
+                z_offset_mm=0.2,
+            )
+            distortion_inside_label_map = build_square_label_map(
+                x_mm,
+                z_mm,
+                targets,
+                0.29570,
+                z_offset_mm=0.2,
+            )
+
     gt_display = db_to_display(gt_db, args.dr) if has_gt else None
     rows = []
     roi_rows = []
     target_rows = []
-    for method, db_img in zip(methods, comparison):
+    for method, db_img in zip(methods, comparison, strict=True):
         display = db_to_display(db_img, args.dr)
         env = db_to_envelope(db_img)
         row = {"method": method}
@@ -769,14 +1008,24 @@ def main():
             row["MAE_dB_vs_GT"] = 0.0
         elif has_gt:
             if structural_similarity is not None:
-                row["SSIM_vs_GT"] = float(structural_similarity(gt_display, display, data_range=1.0))
+                row["SSIM_vs_GT"] = float(
+                    structural_similarity(gt_display, display, data_range=1.0),
+                )
             else:
                 row["SSIM_vs_GT"] = local_ssim(display, gt_display, data_range=1.0)
             if peak_signal_noise_ratio is not None:
-                row["PSNR_dB_vs_GT"] = float(peak_signal_noise_ratio(gt_display, display, data_range=1.0))
+                row["PSNR_dB_vs_GT"] = float(
+                    peak_signal_noise_ratio(gt_display, display, data_range=1.0),
+                )
             else:
                 row["PSNR_dB_vs_GT"] = psnr(display, gt_display, data_range=1.0)
-            row["MAE_dB_vs_GT"] = float(np.mean(np.abs(np.clip(db_img, -args.dr, 0.0) - np.clip(gt_db, -args.dr, 0.0))))
+            row["MAE_dB_vs_GT"] = float(
+                np.mean(
+                    np.abs(
+                        np.clip(db_img, -args.dr, 0.0) - np.clip(gt_db, -args.dr, 0.0),
+                    ),
+                ),
+            )
         else:
             row["SSIM_vs_GT"] = np.nan
             row["PSNR_dB_vs_GT"] = np.nan
@@ -788,8 +1037,20 @@ def main():
         gcnr_scores = []
         residual_scores = []
         for idx, roi in enumerate(rois):
-            score = standard_contrast_score(db_img, x_mm, z_mm, roi, lateral_resolution_mm)
-            metrics = contrast_roi_metrics(db_img, x_mm, z_mm, roi, lateral_resolution_mm)
+            score = standard_contrast_score(
+                db_img,
+                x_mm,
+                z_mm,
+                roi,
+                lateral_resolution_mm,
+            )
+            metrics = contrast_roi_metrics(
+                db_img,
+                x_mm,
+                z_mm,
+                roi,
+                lateral_resolution_mm,
+            )
             if not np.isfinite(score) and metrics is None:
                 continue
             roi_row = {"method": method, "roi_idx": idx, **roi, "contrast_dB": score}
@@ -807,55 +1068,98 @@ def main():
         row["gCNR"] = mean_or_nan(gcnr_scores)
         row["cyst_residual_dB"] = mean_or_nan(residual_scores)
 
-
         speckle_stats = []
         for idx, roi in enumerate(speckle_rois):
-            stats = standard_speckle_quality(env, x_mm, z_mm, roi, lateral_resolution_mm, axial_resolution_mm)
+            stats = standard_speckle_quality(
+                env,
+                x_mm,
+                z_mm,
+                roi,
+                lateral_resolution_mm,
+                axial_resolution_mm,
+            )
             if stats is None:
                 continue
             roi_rows.append({"method": method, "roi_idx": idx, **roi, **stats})
             speckle_stats.append(stats)
-        row["speckle_pass_rate"] = mean_or_nan([s["speckle_pass"] for s in speckle_stats])
+        row["speckle_pass_rate"] = mean_or_nan(
+            [s["speckle_pass"] for s in speckle_stats],
+        )
         row["speckle_KS_D"] = mean_or_nan([s["speckle_KS_D"] for s in speckle_stats])
         row["speckle_KS_p"] = mean_or_nan([s["speckle_KS_p"] for s in speckle_stats])
         row["speckle_SNR"] = mean_or_nan([s["speckle_SNR"] for s in speckle_stats])
         row["ENL"] = mean_or_nan([s["ENL"] for s in speckle_stats])
 
-
         target_stats = []
         for idx, target in enumerate(targets):
-            stats = target_resolution(db_img, x_mm, z_mm, target, args.fwhm_window_mm, target_idx=idx + 1, source=source)
-            if stats is None:
-                continue
-            stats["distortion_pass"] = picmus_distortion_pass(
+            stats = target_resolution(
                 db_img,
                 x_mm,
                 z_mm,
                 target,
                 args.fwhm_window_mm,
+                target_idx=idx + 1,
+                source=source,
+                label_map=resolution_label_map,
+            )
+            if stats is None:
+                continue
+            stats["distortion_pass"] = picmus_distortion_pass(
+                db_img,
                 idx + 1,
                 source,
+                roi_label_map=distortion_roi_label_map,
+                inside_label_map=distortion_inside_label_map,
             )
             target_rows.append({"method": method, "target_idx": idx + 1, **stats})
             target_stats.append(stats)
         row["FWHM_axial_mm"] = mean_or_nan([s["FWHM_axial_mm"] for s in target_stats])
-        row["FWHM_lateral_mm"] = mean_or_nan([s["FWHM_lateral_mm"] for s in target_stats])
-        row["PSLR_dB"] = mean_or_nan([s["PSLR_dB"] for s in target_stats])
-        row["ISLR_dB"] = mean_or_nan([s["ISLR_dB"] for s in target_stats])
+        row["FWHM_lateral_mm"] = mean_or_nan(
+            [s["FWHM_lateral_mm"] for s in target_stats],
+        )
+        row["pslr_db"] = mean_or_nan([s["pslr_db"] for s in target_stats])
+        row["islr_db"] = mean_or_nan([s["islr_db"] for s in target_stats])
         row["distortion_mm"] = mean_or_nan([s["distortion_mm"] for s in target_stats])
-        row["distortion_pass_rate"] = mean_or_nan([s["distortion_pass"] for s in target_stats])
+        row["distortion_pass_rate"] = mean_or_nan(
+            [s["distortion_pass"] for s in target_stats],
+        )
         rows.append(row)
 
     summary_fields = [
-        "method", "SSIM_vs_GT", "PSNR_dB_vs_GT", "MAE_dB_vs_GT",
-        "contrast_dB", "CR_dB", "CNR", "gCNR", "cyst_residual_dB",
-        "speckle_pass_rate", "speckle_KS_D", "speckle_KS_p", "speckle_SNR", "ENL",
-        "FWHM_axial_mm", "FWHM_lateral_mm", "PSLR_dB", "ISLR_dB",
-        "distortion_mm", "distortion_pass_rate",
+        "method",
+        "SSIM_vs_GT",
+        "PSNR_dB_vs_GT",
+        "MAE_dB_vs_GT",
+        "contrast_dB",
+        "CR_dB",
+        "CNR",
+        "gCNR",
+        "cyst_residual_dB",
+        "speckle_pass_rate",
+        "speckle_KS_D",
+        "speckle_KS_p",
+        "speckle_SNR",
+        "ENL",
+        "FWHM_axial_mm",
+        "FWHM_lateral_mm",
+        "pslr_db",
+        "islr_db",
+        "distortion_mm",
+        "distortion_pass_rate",
     ]
     write_csv(os.path.join(out_dir, "summary_metrics.csv"), rows, summary_fields)
-    contrast_group_rows = build_contrast_group_rows(roi_rows, source, len(rois), methods)
-    resolution_group_rows = build_resolution_group_rows(target_rows, source, len(targets), methods)
+    contrast_group_rows = build_contrast_group_rows(
+        roi_rows,
+        source,
+        len(rois),
+        methods,
+    )
+    resolution_group_rows = build_resolution_group_rows(
+        target_rows,
+        source,
+        len(targets),
+        methods,
+    )
     optional_outputs = [
         ("contrast_roi_metrics.csv", roi_rows),
         ("resolution_target_metrics.csv", target_rows),
@@ -867,7 +1171,7 @@ def main():
         if data_rows:
             fieldnames = []
             for data_row in data_rows:
-                for key in data_row.keys():
+                for key in data_row:
                     if key not in fieldnames:
                         fieldnames.append(key)
             write_csv(path, data_rows, fieldnames)
@@ -902,16 +1206,28 @@ def main():
         "resolution_groups": picmus_resolution_groups(source, len(targets)),
         "note": "Standard metrics use the predefined phantom ROI and target definitions when available.",
     }
-    with open(os.path.join(out_dir, "evaluation_meta.json"), "w", encoding="utf-8") as file:
+    with open(
+        os.path.join(out_dir, "evaluation_meta.json"),
+        "w",
+        encoding="utf-8",
+    ) as file:
         json.dump(meta, file, indent=2, ensure_ascii=False)
 
     print(f"Saved summary: {os.path.join(out_dir, 'summary_metrics.csv')}")
     if contrast_group_rows:
-        print(f"Saved contrast group metrics: {os.path.join(out_dir, 'contrast_group_metrics.csv')}")
+        print(
+            f"Saved contrast group metrics: {os.path.join(out_dir, 'contrast_group_metrics.csv')}",
+        )
     if resolution_group_rows:
-        print(f"Saved resolution group metrics: {os.path.join(out_dir, 'resolution_group_metrics.csv')}")
-    print(f"Saved PICMUS-style report: {os.path.join(out_dir, 'picmus_challenge_summary.txt')}")
-    print(f"Mode={mode}, source={source}, contrast_rois={len(rois)}, resolution_targets={len(targets)}")
+        print(
+            f"Saved resolution group metrics: {os.path.join(out_dir, 'resolution_group_metrics.csv')}",
+        )
+    print(
+        f"Saved PICMUS-style report: {os.path.join(out_dir, 'picmus_challenge_summary.txt')}",
+    )
+    print(
+        f"Mode={mode}, source={source}, contrast_rois={len(rois)}, resolution_targets={len(targets)}",
+    )
 
 
 if __name__ == "__main__":

@@ -1,19 +1,48 @@
-import numpy as np
+"""Provide Python utilities for beamforming_utils."""
+
 import os
+
+import numpy as np
 import torch
 
+COMPARISON_VALUE_2 = 2
 
 WINDOW_CHOICES = ["rect", "tukey", "hann", "hamming", "blackman", "kaiser"]
 INTERP_CHOICES = ["nearest", "linear", "cubic", "quintic", "farrow", "sinc"]
 
 
+def validate_db_output(image, expected_shape, method_name="algorithm"):
+    """Reject corrupted beamforming output before it is written or evaluated."""
+    image = np.asarray(image)
+    if image.ndim != COMPARISON_VALUE_2 or image.shape != tuple(expected_shape):
+        raise ValueError(
+            f"{method_name} output shape {image.shape} does not match {tuple(expected_shape)}",
+        )
+    if not np.all(np.isfinite(image)):
+        bad_count = int(image.size - np.count_nonzero(np.isfinite(image)))
+        raise FloatingPointError(
+            f"{method_name} output contains {bad_count} NaN/Inf values",
+        )
+    peak = float(np.max(image))
+    if not np.isclose(peak, 0.0, rtol=0.0, atol=1e-3):
+        raise ValueError(
+            f"{method_name} output is not normalized to 0 dB (peak={peak:g} dB)",
+        )
+    return image.astype(np.float32, copy=False)
+
+
 def resolve_project_path(path, project_root):
+    """Execute resolve project path."""
     if os.path.isabs(path):
         return path
     return os.path.join(project_root, path)
 
 
 def parse_selected_angles(angles, select_str):
+    """Parse selected angles."""
+    angles = np.asarray(angles)
+    if angles.ndim != 1 or len(angles) == 0:
+        raise ValueError("angles must be a non-empty 1D array")
     select_str = str(select_str).strip().lower()
     if select_str == "all":
         return np.arange(len(angles)), angles
@@ -21,7 +50,11 @@ def parse_selected_angles(angles, select_str):
         center_idx = int(np.argmin(np.abs(angles)))
         return np.array([center_idx]), np.array([angles[center_idx]])
     if select_str.isdigit():
-        count = max(1, min(int(select_str), len(angles)))
+        count = int(select_str)
+        if not 1 <= count <= len(angles):
+            raise ValueError(
+                f"Angle count {count} is outside the valid range [1,{len(angles)}]",
+            )
         if count == 1:
             center_idx = int(np.argmin(np.abs(angles)))
             return np.array([center_idx]), np.array([angles[center_idx]])
@@ -29,18 +62,39 @@ def parse_selected_angles(angles, select_str):
         selected = np.linspace(0, len(angles) - 1, count, dtype=int)
         indices = sorted_indices[selected]
         return indices, angles[indices]
-    indices = [int(item) for item in select_str.split(",")]
-    indices = [idx for idx in indices if 0 <= idx < len(angles)]
-    return np.array(indices), angles[indices]
+    try:
+        indices = [int(item.strip()) for item in select_str.split(",") if item.strip()]
+    except ValueError as exc:
+        raise ValueError(f"Invalid angle selection: {select_str!r}") from exc
+    if not indices:
+        raise ValueError(
+            f"Angle selection {select_str!r} contains no valid indices in [0,{len(angles) - 1}]",
+        )
+    invalid = [idx for idx in indices if not 0 <= idx < len(angles)]
+    if invalid:
+        raise ValueError(
+            f"Angle selection {select_str!r} contains out-of-range indices {invalid}; valid range is [0,{len(angles) - 1}]",
+        )
+    if len(set(indices)) != len(indices):
+        raise ValueError(f"Angle selection {select_str!r} contains duplicate indices")
+    indices = np.asarray(indices, dtype=np.int64)
+    return indices, angles[indices]
 
 
 def aperture_half_width(depth, f_number, n_channels, pitch, dynamic_aperture):
+    """Execute aperture half width."""
     if dynamic_aperture:
         return depth / (2.0 * f_number)
     return torch.full_like(depth, (n_channels - 1) * pitch / 2.0)
 
 
-def dynamic_aperture_channel_count(depth, f_number, pitch, n_channels, dynamic_aperture):
+def dynamic_aperture_channel_count(
+    depth,
+    f_number,
+    pitch,
+    n_channels,
+    dynamic_aperture,
+):
     """Discrete fixed-F-number receive aperture with no shallow-depth floor."""
     if not dynamic_aperture:
         return n_channels
@@ -48,14 +102,17 @@ def dynamic_aperture_channel_count(depth, f_number, pitch, n_channels, dynamic_a
 
 
 def apply_tgc_image(env, z_grid, fc, tgc_alpha):
+    """Execute apply tgc image."""
     return env * tgc_gain(z_grid, fc, tgc_alpha)[:, None]
 
 
 def tgc_gain(z_grid, fc, tgc_alpha):
+    """Execute tgc gain."""
     return 10 ** (tgc_alpha * (fc / 1e6) * (z_grid * 100) * 2.0 / 20.0)
 
 
 def aperture_window_from_dx(dx, half_a, window_type, tukey_alpha=0.25, kaiser_beta=8.6):
+    """Execute aperture window from dx."""
     x_norm = dx.abs() / (half_a + 1e-9)
     in_aperture = (x_norm <= 1.0).float()
     if window_type == "rect":
@@ -84,7 +141,15 @@ def aperture_window_from_dx(dx, half_a, window_type, tukey_alpha=0.25, kaiser_be
     return win * in_aperture
 
 
-def aperture_window_1d(k, window_type, device, dtype=torch.float32, tukey_alpha=0.25, kaiser_beta=8.6):
+def aperture_window_1d(
+    k,
+    window_type,
+    device,
+    dtype=torch.float32,
+    tukey_alpha=0.25,
+    kaiser_beta=8.6,
+):
+    """Execute aperture window 1d."""
     if window_type == "rect":
         return torch.ones(k, dtype=dtype, device=device)
     x = torch.linspace(-1.0, 1.0, k, dtype=dtype, device=device)
@@ -108,16 +173,19 @@ def aperture_window_1d(k, window_type, device, dtype=torch.float32, tukey_alpha=
 
 
 def optional_aperture_window_1d(k, window_type, device, dtype=torch.float32):
+    """Execute optional aperture window 1d."""
     if window_type == "rect":
         return None
     return aperture_window_1d(k, window_type, device, dtype=dtype)
 
 
 def db_display_range(dynamic_range):
+    """Execute db display range."""
     return -float(dynamic_range), 0.0
 
 
 def _lagrange_weight(frac, offset, offsets):
+    """Execute  lagrange weight."""
     weight = torch.ones_like(frac)
     for other in offsets:
         if other != offset:
@@ -126,6 +194,7 @@ def _lagrange_weight(frac, offset, offsets):
 
 
 def _sinc_weight(frac, offset, radius):
+    """Execute  sinc weight."""
     x = frac - offset
     sinc = torch.sinc(x)
     window_arg = x / (radius + 1.0)
@@ -134,6 +203,7 @@ def _sinc_weight(frac, offset, radius):
 
 
 def interpolate_channel_samples(i_data, q_data, sample, channel_index, interp):
+    """Execute interpolate channel samples."""
     n_samples = i_data.shape[0]
     sample = sample.clamp(0.0, float(n_samples - 1))
 
@@ -156,9 +226,7 @@ def interpolate_channel_samples(i_data, q_data, sample, channel_index, interp):
         offsets = [-1, 0, 1, 2]
     elif interp == "quintic":
         offsets = [-2, -1, 0, 1, 2, 3]
-    elif interp == "farrow":
-        offsets = [-4, -3, -2, -1, 0, 1, 2, 3, 4]
-    elif interp == "sinc":
+    elif interp in {"farrow", "sinc"}:
         offsets = [-4, -3, -2, -1, 0, 1, 2, 3, 4]
     else:
         raise ValueError(f"Unsupported interpolation type: {interp}")
@@ -182,13 +250,26 @@ def interpolate_channel_samples(i_data, q_data, sample, channel_index, interp):
     return i_out, q_out
 
 
-def interpolate_multi_angle_channel_samples(i_data, q_data, sample, angle_index, channel_index, interp):
+def interpolate_multi_angle_channel_samples(
+    i_data,
+    q_data,
+    sample,
+    angle_index,
+    channel_index,
+    interp,
+):
+    """Execute interpolate multi angle channel samples."""
     n_samples = i_data.shape[1]
     sample = sample.clamp(0.0, float(n_samples - 1))
 
     def gather(idx):
+        """Execute gather."""
         idx = torch.clamp(idx, 0, n_samples - 1)
-        return i_data[angle_index, idx, channel_index], q_data[angle_index, idx, channel_index]
+        return i_data[angle_index, idx, channel_index], q_data[
+            angle_index,
+            idx,
+            channel_index,
+        ]
 
     if interp == "nearest":
         return gather(sample.round().long())
@@ -206,9 +287,7 @@ def interpolate_multi_angle_channel_samples(i_data, q_data, sample, angle_index,
         offsets = [-1, 0, 1, 2]
     elif interp == "quintic":
         offsets = [-2, -1, 0, 1, 2, 3]
-    elif interp == "farrow":
-        offsets = [-4, -3, -2, -1, 0, 1, 2, 3, 4]
-    elif interp == "sinc":
+    elif interp in {"farrow", "sinc"}:
         offsets = [-4, -3, -2, -1, 0, 1, 2, 3, 4]
     else:
         raise ValueError(f"Unsupported interpolation type: {interp}")

@@ -70,41 +70,23 @@ scenes:
   - id: simulation_contrast_speckle
     h5_path: data/simulation.h5
     sample_idx: 0
-    phantom_mode: contrast_speckle
-    phantom_source: simulation
-    has_gt: true
 
   - id: simulation_resolution_distorsion
     h5_path: data/simulation.h5
     sample_idx: 1
-    phantom_mode: resolution_distorsion
-    phantom_source: simulation
-    has_gt: true
 
   - id: experiments_contrast_speckle
     h5_path: data/experiments.h5
     sample_idx: 0
-    phantom_mode: contrast_speckle
-    phantom_source: experiments
-    has_gt: true
 
   - id: experiments_resolution_distorsion
     h5_path: data/experiments.h5
     sample_idx: 1
-    phantom_mode: resolution_distorsion
-    phantom_source: experiments
-    has_gt: true
 
   - id: carotid_cross
     h5_path: data/in_vivo.h5
     sample_idx: 0
-    phantom_mode: in_vivo
-    phantom_source: in_vivo
-    has_gt: true
 
   - id: carotid_long
     h5_path: data/in_vivo.h5
     sample_idx: 1
-    phantom_mode: in_vivo
-    phantom_source: in_vivo
-    has_gt: true

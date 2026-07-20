@@ -7,13 +7,13 @@
 ```text
 beamforming_demo/
   config.yaml
-  check_data.py
   run_one.py
   run_all.py
   run_wizard_cn.py
   run_ablation_cn.py
 
   data/
+    check_data.py
     pack_data.py
     simulation.h5
     experiments.h5
@@ -22,6 +22,7 @@ beamforming_demo/
   algorithms/
     common_params.py
     beamforming_utils.py
+    h5_loader.py
     das.py
     mv.py
     esbmv.py
@@ -70,8 +71,10 @@ python data/pack_data.py
 检查数据是否完整：
 
 ```bash
-python check_data.py
+python data/check_data.py
 ```
+
+检查脚本会逐帧验证 IQ 与 GT 中的 NaN/Inf，并核对 schema、形状、有效时间长度和补零区。
 
 打包后的数据：
 
@@ -160,6 +163,8 @@ params:
 ```
 
 - `select_angles`: 选择发射角。`"1"` 和 `center` 都表示中心单角度；`all` 表示全部角度；也可以填角度数量如 `3`、`11`，或 0 基角度索引列表如 `0,37,74`。
+- CMSAW 支持多角度：逐角度流式计算自适应权重并取平均，再作用于使用相同角度集合生成的复合 MV 基线；该实现避免一次性把全部角度的延迟通道数据放入显存。
+- `cmsaw_subarray_length.npy` 统一使用 `[角度, 深度, 横向]` 形状；单角度时角度维为 1。
 - `window`: 孔径窗函数，支持 `rect`、`tukey`、`hann`、`hamming`、`blackman`、`kaiser`。
 - `interp`: 延迟插值方式，支持 `nearest`、`linear`、`cubic`、`quintic`、`farrow`、`sinc`。
 - `dynamic_aperture`: 是否启用动态孔径；开启时 `f_number` 生效。
@@ -313,6 +318,8 @@ python evaluation/plot_metrics.py \
 
 phantom 数据会计算主指标：
 
+其中 PICMUS 官方得分严格复刻 `data/PICMUS/code/src` 的 MATLAB 语义：对比度使用官方环形 ROI 与样本方差，散斑使用 5 倍抽样后的 Rayleigh KS 检验；分辨率先将剖面线性插值到 `10N` 个点，再取全部 `>= max-6 dB` 样点的首尾跨度；仿真畸变使用官方全局累加标签掩膜、`+0.2 mm` 轴向修正和 7 个指定靶点。PSLR、ISLR、CR、CNR、gCNR、SSIM、PSNR 等为额外分析指标，不计入原始 PICMUS 挑战得分。
+
 - `contrast_dB`
 - `CR_dB`
 - `CNR`
@@ -347,7 +354,7 @@ PICMUS 分组结果会写入：
 - `contrast_group_metrics.png`
 - `resolution_group_metrics.png`
 
-in vivo 数据使用多角度 DAS 生成的 reference 作为 GT，因此会计算 `SSIM_vs_GT`、`PSNR_dB_vs_GT`、`MAE_dB_vs_GT` 等参考指标；由于没有 phantom ROI/target，contrast/resolution 分组指标为空。
+in vivo 数据即使含有多角度 DAS 生成的 reference，也一律跳过指标导出；该 reference 仅用于对比图展示，不作为定量评估基准。
 
 `plot_metrics.py` 会根据算法数量自适应图像布局。算法较多时，普通指标图会自动改为横向柱状图；指标太多时会按指标分页，例如 `standard_metrics_page2.png`。
 
@@ -561,9 +568,6 @@ scenes:
   - id: my_scene
     h5_path: data/my_data.h5
     sample_idx: 0
-    phantom_mode: auto
-    phantom_source: auto
-    has_gt: true
 ```
 
 字段含义：
@@ -571,9 +575,7 @@ scenes:
 - `id`: 场景名，也是结果子目录名。
 - `h5_path`: H5 文件路径，相对项目根目录或绝对路径都可以。
 - `sample_idx`: H5 中的样本编号。
-- `phantom_mode`: phantom 类型。常用 `contrast_speckle`、`resolution_distorsion`、`in_vivo`、`auto`。
-- `phantom_source`: 数据来源。常用 `simulation`、`experiments`、`in_vivo`、`auto`。
-- `has_gt`: 是否把 H5 中的 `all_envdb_norm` 当作参考图加入对比和评估。
+- H5 中存在 `all_envdb_norm` 时会自动加入对比和评估；GT 是否存在、phantom 类型与来源均从新版 `pack_data.py` 写入的 H5 元数据读取。
 
 加入后可以运行：
 
@@ -625,10 +627,11 @@ all_envdb_norm
 
 ### 扩展后的检查
 
-改完后建议先做语法检查：
+改完后建议先做语法和回归检查：
 
 ```bash
-python -m py_compile algorithms/*.py run_one.py run_all.py run_wizard_cn.py run_ablation_cn.py
+python -m compileall -q .
+python -m unittest discover -s tests -v
 ```
 
 再跑一个最小场景：
