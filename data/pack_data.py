@@ -348,6 +348,29 @@ def pad_and_concat(items, key):
     return np.concatenate(padded, axis=0)
 
 
+def compact_sequence_config(values):
+    """Encode a long uniform numeric sequence without repeating every value."""
+    array = np.asarray(values).reshape(-1)
+    if array.size <= 8:
+        return array.tolist()
+    differences = np.diff(array.astype(np.float64))
+    if differences.size and np.allclose(
+        differences,
+        differences[0],
+        rtol=1e-5,
+        atol=1e-9,
+    ):
+        integer_sequence = np.issubdtype(array.dtype, np.integer)
+        return {
+            "encoding": "arithmetic_sequence",
+            "start": int(array[0]) if integer_sequence else float(array[0]),
+            "step": int(round(differences[0])) if integer_sequence else float(differences[0]),
+            "count": int(array.size),
+            "dtype": str(array.dtype),
+        }
+    return array.tolist()
+
+
 def build_embedded_config(items, output_path, row_block):
     """Build embedded config."""
     has_official_gt = any(item["meta"]["gt"] and not item["meta"]["gt"].startswith("generated:") for item in items)
@@ -445,7 +468,11 @@ def build_embedded_config(items, output_path, row_block):
             "input_iq": {
                 "source": "PICMUS_baseband_iq",
                 "source_layout": ["angle", "channel", "time"],
-                "angle_selection": "all_available",
+                "input_angle_selection": "all_available",
+                "all_steering_angles_rad": compact_sequence_config(items[0]["angles"]),
+                "selected_angle_indices": compact_sequence_config(
+                    np.arange(len(items[0]["angles"]), dtype=np.int64),
+                ),
                 "normalization": {
                     "mode": "complex_rms",
                     "formula": "sqrt(mean(I^2 + Q^2) + epsilon)",
@@ -465,6 +492,16 @@ def build_embedded_config(items, output_path, row_block):
                 "scan_path": item["meta"]["scan"],
                 "phantom_path": item["meta"]["phantom"],
                 "gt_path": item["meta"]["gt"],
+                "path_roles": {
+                    "iq_path": "read_input",
+                    "scan_path": "read_input",
+                    "phantom_path": "reference_only_not_read",
+                    "gt_path": (
+                        "generated_not_read"
+                        if str(item["meta"]["gt"] or "").startswith("generated:")
+                        else "read_input"
+                    ),
+                },
             }
             for index, item in enumerate(items)
         ],

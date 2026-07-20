@@ -217,6 +217,16 @@ def scalar_float(hf: h5py.File, key: str) -> float | None:
         return None
 
 
+def decode_compact_sequence(value) -> np.ndarray:
+    """Decode list or arithmetic-sequence config into an array."""
+    if isinstance(value, list):
+        return np.asarray(value)
+    if not isinstance(value, dict) or value.get("encoding") != "arithmetic_sequence":
+        raise ValueError("必须是数组或 arithmetic_sequence")
+    count = int(value["count"])
+    return np.asarray(value["start"]) + np.arange(count) * np.asarray(value["step"])
+
+
 def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> None:
     """Validate config schema."""
     if config.get("schema_version") != 1:
@@ -278,6 +288,30 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
         problems.append(
             "input_iq.normalization.scale_reference_dataset 应指向 /all_scale_ref",
         )
+    try:
+        all_angles = decode_compact_sequence(input_iq.get("all_steering_angles_rad", [])).astype(
+            np.float64,
+        )
+        selected_indices = decode_compact_sequence(input_iq.get("selected_angle_indices", [])).astype(
+            np.int64,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        problems.append(f"config_yaml 输入角度编码非法: {exc}")
+    else:
+        if input_iq.get("input_angle_selection") != "all_available":
+            problems.append("config_yaml input_angle_selection 应为 all_available")
+        if np.any((selected_indices < 0) | (selected_indices >= len(all_angles))):
+            problems.append("config_yaml selected_angle_indices 越界")
+        elif "angles" in hf and (
+            selected_indices.shape != hf["angles"].shape
+            or not np.allclose(
+                all_angles[selected_indices],
+                hf["angles"][:],
+                rtol=1e-5,
+                atol=1e-6,
+            )
+        ):
+            problems.append("config_yaml 输入角度记录与根数据集 angles 不一致")
     gt_norm = (ground_truth.get("normalization", {}) or {}) if isinstance(ground_truth, dict) else {}
     if not isinstance(gt_norm, dict) or gt_norm.get("norm_reference_dataset") != "/all_norm_ref":
         problems.append(
@@ -408,6 +442,20 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
                                 problems.append(
                                     f"source_samples[{index}].{key} 必须是相对路径",
                                 )
+                        expected_path_roles = {
+                            "iq_path": "read_input",
+                            "scan_path": "read_input",
+                            "phantom_path": "reference_only_not_read",
+                            "gt_path": (
+                                "generated_not_read"
+                                if str(sample.get("gt_path") or "").startswith("generated:")
+                                else "read_input"
+                            ),
+                        }
+                        if sample.get("path_roles") != expected_path_roles:
+                            problems.append(
+                                f"source_samples[{index}].path_roles 未准确记录路径用途",
+                            )
                 convention = config.get("path_convention", {}) or {}
                 if convention.get("type") != "relative":
                     problems.append("config_yaml.path_convention.type 应为 relative")
