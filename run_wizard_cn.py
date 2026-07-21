@@ -278,11 +278,34 @@ def inspect_h5(path):
         raw_config = hf["config_yaml"][()]
         if isinstance(raw_config, bytes):
             raw_config = raw_config.decode("utf-8", errors="replace")
-        samples = (yaml.safe_load(raw_config) or {}).get("source_samples", [])
-        if len(samples) != n:
+        config = yaml.safe_load(raw_config) or {}
+        samples = config.get("source_samples", [])
+        if isinstance(samples, list):
+            if len(samples) != n:
+                raise ValueError("config_yaml.source_samples 数量必须与 H5 样本数一致")
+            names = [str(sample.get("id", f"sample_{idx}")) for idx, sample in enumerate(samples)]
+            in_vivo = [
+                sample.get("phantom_mode") == "in_vivo"
+                or sample.get("phantom_source") == "in_vivo"
+                for sample in samples
+            ]
+        elif (
+            isinstance(samples, dict)
+            and samples.get("encoding") == "root_labels_with_path_template"
+            and samples.get("count") == n
+        ):
+            id_dataset = str(samples.get("acquisition_id_dataset", "/acquisition_id"))
+            if id_dataset not in hf or hf[id_dataset].shape != (n,):
+                raise ValueError("EPFL 紧凑样本元数据缺少有效 acquisition_id 标签")
+            names = [
+                str(value.decode("utf-8") if isinstance(value, bytes) else value)
+                for value in hf[id_dataset][:]
+            ]
+            dataset_id = str((config.get("dataset") or {}).get("id", "")).lower()
+            is_in_vivo = "invivo" in dataset_id or "volunteer" in dataset_id
+            in_vivo = [is_in_vivo] * n
+        else:
             raise ValueError("config_yaml.source_samples 数量必须与 H5 样本数一致")
-        names = [str(sample.get("id", f"sample_{idx}")) for idx, sample in enumerate(samples)]
-        in_vivo = [sample.get("phantom_mode") == "in_vivo" or sample.get("phantom_source") == "in_vivo" for sample in samples]
     return {
         "n": n,
         "a": a,
@@ -341,10 +364,39 @@ def choose_sample(path, teaching=True):
         print(f"  fc: {info['fc'] / 1e6:.3f} MHz")
     print(f"  GT: {info['gt']}")
 
-    options = []
-    for idx, name in enumerate(info["names"]):
-        options.append((idx, f"{idx}: {name}"))
-    return int(ask_choice("请选择样本编号", options, default_index=0))
+    if info["n"] <= 20:
+        options = []
+        for idx, name in enumerate(info["names"]):
+            options.append((idx, f"{idx}: {name}"))
+        return int(ask_choice("请选择样本编号", options, default_index=0))
+
+    preview_count = 5
+    print("\n样本较多，以下仅显示首尾预览:")
+    for idx, name in list(enumerate(info["names"][:preview_count])) + list(
+        enumerate(info["names"][-preview_count:], info["n"] - preview_count),
+    ):
+        print(f"  {idx}: {name}")
+    print("输入 0 起始的样本编号，或输入样本名/名称片段（直接回车选 0）。")
+    while True:
+        raw = ask_text("请选择样本", default="0")
+        if raw.isdigit() and 0 <= int(raw) < info["n"]:
+            return int(raw)
+        matched = [
+            (idx, name) for idx, name in enumerate(info["names"])
+            if raw.lower() in name.lower()
+        ]
+        if len(matched) == 1:
+            idx, name = matched[0]
+            print(f"已匹配: {idx}: {name}")
+            return idx
+        if matched:
+            print("匹配到多个样本，请输入更精确的名称或编号:")
+            for idx, name in matched[:20]:
+                print(f"  {idx}: {name}")
+            if len(matched) > 20:
+                print(f"  …其余 {len(matched) - 20} 个结果未显示")
+        else:
+            print(f"未找到样本 {raw!r}，请重新输入。")
 
 
 def build_config(base_config, h5_path, sample_idx, algorithms, params):

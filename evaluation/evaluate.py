@@ -165,21 +165,42 @@ def read_sample_meta(h5_path, sample_idx):
     """Read sample meta."""
     with h5py.File(h5_path, "r") as hf:
         has_gt = "all_envdb_norm" in hf and 0 <= sample_idx < hf["all_envdb_norm"].shape[0]
-        source_samples = h5_embedded_config(hf).get("source_samples", [])
-        if not isinstance(source_samples, list) or not 0 <= sample_idx < len(
-            source_samples,
+        config = h5_embedded_config(hf)
+        source_samples = config.get("source_samples", [])
+        if isinstance(source_samples, list):
+            if not 0 <= sample_idx < len(source_samples):
+                raise IndexError(f"source_samples has no sample index {sample_idx}")
+            sample_config = source_samples[sample_idx]
+            if not isinstance(sample_config, dict):
+                raise ValueError(f"source_samples[{sample_idx}] must be a mapping")
+            return {
+                "has_gt": has_gt,
+                "sample_name": str(sample_config["id"]),
+                "phantom_mode": str(sample_config["phantom_mode"]),
+                "phantom_source": str(sample_config["phantom_source"]),
+                "phantom_path": str(sample_config["phantom_path"] or ""),
+            }
+        if (
+            isinstance(source_samples, dict)
+            and source_samples.get("encoding") == "root_labels_with_path_template"
+            and source_samples.get("count") == hf["all_multi_I"].shape[0]
         ):
-            raise IndexError(f"source_samples has no sample index {sample_idx}")
-        sample_config = source_samples[sample_idx]
-        if not isinstance(sample_config, dict):
-            raise ValueError(f"source_samples[{sample_idx}] must be a mapping")
-        return {
-            "has_gt": has_gt,
-            "sample_name": str(sample_config["id"]),
-            "phantom_mode": str(sample_config["phantom_mode"]),
-            "phantom_source": str(sample_config["phantom_source"]),
-            "phantom_path": str(sample_config["phantom_path"] or ""),
-        }
+            id_dataset = str(source_samples.get("acquisition_id_dataset", "/acquisition_id"))
+            if id_dataset not in hf or not 0 <= sample_idx < hf[id_dataset].shape[0]:
+                raise IndexError(f"{id_dataset} has no sample index {sample_idx}")
+            sample_name = hf[id_dataset][sample_idx]
+            if isinstance(sample_name, bytes):
+                sample_name = sample_name.decode("utf-8")
+            dataset_id = str((config.get("dataset") or {}).get("id", "")).lower()
+            is_in_vivo = "invivo" in dataset_id or "volunteer" in dataset_id
+            return {
+                "has_gt": has_gt,
+                "sample_name": str(sample_name),
+                "phantom_mode": "in_vivo" if is_in_vivo else "",
+                "phantom_source": "in_vivo" if is_in_vivo else "",
+                "phantom_path": "",
+            }
+        raise IndexError(f"source_samples has no sample index {sample_idx}")
 
 
 def load_grids(h5_path):
