@@ -23,6 +23,12 @@ if str(ALGORITHMS_DIR) not in sys.path:
 from common_params import COMMON_PARAMS  # noqa: E402
 
 COMPARISON_VALUE_3 = 3
+EVALUATION_SCENE_IDS = frozenset({
+    "simulation_contrast_speckle",
+    "simulation_resolution_distorsion",
+    "experiments_contrast_speckle",
+    "experiments_resolution_distorsion",
+})
 
 try:
     import yaml
@@ -200,18 +206,8 @@ def scene_has_gt(scene):
 
 
 def scene_is_in_vivo(scene):
-    """Execute scene is in vivo."""
-    h5_path = resolve_path(scene["h5_path"])
-    sample_idx = int(scene["sample_idx"])
-    with h5py.File(h5_path, "r") as hf:
-        raw = hf["config_yaml"][()]
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", errors="replace")
-    samples = (yaml.safe_load(raw) or {}).get("source_samples", [])
-    if not 0 <= sample_idx < len(samples):
-        raise ValueError(f"config_yaml.source_samples 缺少样本 {sample_idx}")
-    meta = samples[sample_idx] or {}
-    return meta.get("phantom_mode") == "in_vivo" or meta.get("phantom_source") == "in_vivo"
+    """Treat every non-standard PICMUS phantom scene as in-vivo."""
+    return str(scene.get("id", "")) not in EVALUATION_SCENE_IDS
 
 
 def gt_norm_to_db(gt, dr):
