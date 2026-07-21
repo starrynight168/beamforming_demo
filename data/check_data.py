@@ -283,11 +283,30 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
         problems.append(
             "config_yaml.generation.ground_truth.dataset 应指向 /all_envdb_norm",
         )
+    reference_fs = ground_truth.get("reference_sampling_frequency_hz") if isinstance(ground_truth, dict) else None
+    if not isinstance(reference_fs, (int, float)) or not np.isfinite(reference_fs) or reference_fs <= 0:
+        problems.append("ground_truth.reference_sampling_frequency_hz 必须是有限正数")
     input_norm = (input_iq.get("normalization", {}) or {}) if isinstance(input_iq, dict) else {}
     if not isinstance(input_norm, dict) or input_norm.get("scale_reference_dataset") != "/all_scale_ref":
         problems.append(
             "input_iq.normalization.scale_reference_dataset 应指向 /all_scale_ref",
         )
+    decimation = input_iq.get("decimation_factor")
+    source_fs = input_iq.get("source_sampling_frequency_hz")
+    packed_fs = input_iq.get("packed_sampling_frequency_hz")
+    root_fs = scalar_float(hf, "fs")
+    if not isinstance(decimation, int) or decimation < 1:
+        problems.append(f"input_iq.decimation_factor 非法: {decimation}")
+    elif source_fs is None or packed_fs is None or not np.isclose(
+        float(source_fs) / decimation, float(packed_fs), rtol=1e-5, atol=1.0
+    ):
+        problems.append("input_iq source_sampling_frequency_hz/decimation_factor 与 packed fs 不一致")
+    elif root_fs is None or not np.isclose(float(packed_fs), root_fs, rtol=1e-5, atol=1.0):
+        problems.append("input_iq.packed_sampling_frequency_hz 与根数据集 fs 不一致")
+    elif isinstance(reference_fs, (int, float)) and not np.isclose(
+        float(reference_fs), float(source_fs), rtol=1e-5, atol=1.0
+    ):
+        problems.append("ground_truth.reference_sampling_frequency_hz 应与 input_iq.source_sampling_frequency_hz 一致")
     try:
         all_angles = decode_compact_sequence(input_iq.get("all_steering_angles_rad", [])).astype(
             np.float64,
@@ -334,6 +353,15 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
 
     if "all_multi_I" in hf and "all_multi_Q" in hf and hf["all_multi_I"].shape != hf["all_multi_Q"].shape:
         problems.append("all_multi_I / all_multi_Q 形状不一致")
+
+    for key in ("all_multi_I", "all_multi_Q", "all_envdb_norm"):
+        if key in hf and hf[key].dtype != np.float16:
+            problems.append(f"{key} 类型应为 float16，实际为 {hf[key].dtype}")
+    for key in ("fs", "c", "fc", "pitch"):
+        if key in hf and hf[key].dtype != np.float32:
+            problems.append(f"{key} 类型应为 float32，实际为 {hf[key].dtype}")
+    if "num_channels" in hf and hf["num_channels"].dtype != np.int32:
+        problems.append(f"num_channels 类型应为 int32，实际为 {hf['num_channels'].dtype}")
 
     if {"all_multi_I", "all_envdb_norm"} <= set(hf.keys()) and hf["all_multi_I"].shape[0] != hf["all_envdb_norm"].shape[0]:
         problems.append("输入 IQ 与 GT 帧数不一致")

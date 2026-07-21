@@ -377,6 +377,7 @@ def build_embedded_config(items, output_path, row_block):
     has_generated_gt = any(item["meta"]["gt"] == "generated:multi_angle_das" for item in items)
     ground_truth = {
         "dataset": "/all_envdb_norm",
+        "reference_sampling_frequency_hz": float(items[0]["fs"]),
         "output_domain": "envelope_db_mapped_to_unit_interval",
         "dynamic_range_db": DYNAMIC_RANGE,
         "normalization": {
@@ -473,12 +474,18 @@ def build_embedded_config(items, output_path, row_block):
                 "selected_angle_indices": compact_sequence_config(
                     np.arange(len(items[0]["angles"]), dtype=np.int64),
                 ),
-                "normalization": {
-                    "mode": "complex_rms",
-                    "formula": "sqrt(mean(I^2 + Q^2) + epsilon)",
-                    "epsilon": 1.0e-12,
-                    "scale_reference_dataset": "/all_scale_ref",
-                },
+            "normalization": {
+                "mode": "complex_rms",
+                "formula": "sqrt(mean(I^2 + Q^2) + epsilon)",
+                "epsilon": 1.0e-12,
+                "scale_reference_dataset": "/all_scale_ref",
+            },
+            # PICMUS 的输入本身就是基带 IQ；没有在打包阶段执行抽取。
+            # 采样率相关元数据统一放在 config_yaml，避免遗留 gt_fs 等
+            # 根字段造成“GT 采样率/输入采样率”语义混淆。
+            "decimation_factor": 1,
+            "source_sampling_frequency_hz": float(items[0]["fs"]),
+            "packed_sampling_frequency_hz": float(items[0]["fs"]),
             },
             "ground_truth": ground_truth,
         },
@@ -627,13 +634,13 @@ def pack_dataset(
     with h5py.File(output_path, "w") as hf:
         hf.create_dataset(
             "all_multi_I",
-            data=pad_and_concat(items, "I"),
+            data=pad_and_concat(items, "I").astype(np.float16, copy=False),
             compression="gzip",
             compression_opts=4,
         )
         hf.create_dataset(
             "all_multi_Q",
-            data=pad_and_concat(items, "Q"),
+            data=pad_and_concat(items, "Q").astype(np.float16, copy=False),
             compression="gzip",
             compression_opts=4,
         )
@@ -641,7 +648,9 @@ def pack_dataset(
         if all(item["gt"] is not None for item in items):
             hf.create_dataset(
                 "all_envdb_norm",
-                data=np.concatenate([item["gt"] for item in items], axis=0),
+                data=np.concatenate([item["gt"] for item in items], axis=0).astype(
+                    np.float16, copy=False
+                ),
                 compression="gzip",
                 compression_opts=4,
             )
@@ -670,22 +679,22 @@ def pack_dataset(
         ]
         hf.create_dataset(
             "time_start_vector",
-            data=np.concatenate(t0_padded, axis=0),
+            data=np.concatenate(t0_padded, axis=0).astype(np.float32, copy=False),
             compression="gzip",
             compression_opts=4,
         )
 
-        for meta_key in [
-            "fs",
-            "c",
-            "fc",
-            "pitch",
-            "num_channels",
-            "z_grid",
-            "x_grid",
-            "angles",
-        ]:
-            hf.create_dataset(meta_key, data=base[meta_key])
+        scalar_dtypes = {
+            "fs": np.float32,
+            "c": np.float32,
+            "fc": np.float32,
+            "pitch": np.float32,
+            "num_channels": np.int32,
+        }
+        for meta_key, dtype in scalar_dtypes.items():
+            hf.create_dataset(meta_key, data=dtype(base[meta_key]))
+        for meta_key in ("z_grid", "x_grid", "angles"):
+            hf.create_dataset(meta_key, data=np.asarray(base[meta_key], dtype=np.float32))
 
         string_dtype = h5py.string_dtype(encoding="utf-8")
         config_yaml = yaml.safe_dump(
