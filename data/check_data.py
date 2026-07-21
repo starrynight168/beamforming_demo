@@ -520,16 +520,28 @@ def inspect_file(path: Path) -> bool:
             input_shape = format_shape(hf["all_multi_I"].shape) if "all_multi_I" in hf else "缺失"
             gt_shape = format_shape(hf["all_envdb_norm"].shape) if "all_envdb_norm" in hf else "无"
             fs = scalar_float(hf, "fs")
-            fc = scalar_float(hf, "fc")
+            gt_reference_fs = None
+            decimation = None
+            if "config_yaml" in hf:
+                try:
+                    config = yaml.safe_load(decode_value(hf["config_yaml"][()])) or {}
+                    generation = config.get("generation", {}) or {}
+                    gt_reference_fs = (generation.get("ground_truth", {}) or {}).get(
+                        "reference_sampling_frequency_hz"
+                    )
+                    decimation = (generation.get("input_iq", {}) or {}).get("decimation_factor")
+                except yaml.YAMLError:
+                    pass
 
             summary_rows = [
                 ("检查状态", status),
                 ("文件大小", f"{file_size:.3f} MiB"),
                 ("样本帧数", n_frames),
                 ("输入 IQ", input_shape),
-                ("GT 图像", gt_shape),
-                ("采样率 fs", f"{fs / 1e6:.6g} MHz" if fs else "缺失"),
-                ("中心频率 fc", f"{fc / 1e6:.6g} MHz" if fc else "缺失"),
+                ("主 GT", gt_shape),
+                ("输入采样率", f"{fs / 1e6:.6g} MHz" if fs else "缺失"),
+                ("GT 参考采样率", f"{float(gt_reference_fs) / 1e6:.6g} MHz" if gt_reference_fs else "缺失"),
+                ("降采样倍数", int(decimation) if decimation else "缺失"),
                 ("全部字段数", len(hf.keys())),
             ]
             print_table(summary_rows, ("项目", "值"))
