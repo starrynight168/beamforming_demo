@@ -46,17 +46,19 @@ KEY_FIELDS = [
     "all_scale_ref",
     "all_norm_ref",
     "fs",
+    "time_start_vector",
+    "valid_time_samples",
+    "angles",
+    "z_grid",
+    "x_grid",
     "c",
     "fc",
     "pitch",
     "num_channels",
-    "z_grid",
-    "x_grid",
-    "angles",
-    "time_start_vector",
-    "valid_time_samples",
     "config_yaml",
 ]
+
+PREFERRED_FIELD_ORDER = {name: idx for idx, name in enumerate(KEY_FIELDS)}
 
 MOVED_TO_CONFIG_FIELDS = {
     "sample_names",
@@ -547,8 +549,10 @@ def inspect_file(path: Path) -> bool:
             print_table(summary_rows, ("项目", "值"))
 
             field_rows = []
-            keys = [key for key in KEY_FIELDS if key in hf]
-            keys.extend(sorted(key for key in hf if key not in keys))
+            keys = sorted(
+                hf.keys(),
+                key=lambda key: (PREFERRED_FIELD_ORDER.get(key, 10_000), key),
+            )
             for key in keys:
                 ds = hf[key]
                 if not isinstance(ds, h5py.Dataset):
@@ -562,7 +566,13 @@ def inspect_file(path: Path) -> bool:
                     dataset_preview(ds),
                 )
                 field_rows.append((storage_bytes, row))
-            field_rows.sort(key=lambda item: item[0], reverse=True)
+            field_rows.sort(
+                key=lambda item: (
+                    PREFERRED_FIELD_ORDER.get(item[1][0], 10_000),
+                    -item[0],
+                    item[1][0],
+                ),
+            )
 
             print()
             print("[字段占用]")
