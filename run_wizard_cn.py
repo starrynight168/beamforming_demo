@@ -36,6 +36,24 @@ ALGORITHMS = {
     "fdmas": "F-DMAS:非线性延迟乘加方法",
 }
 
+ALGORITHM_PARAM_HELP = {
+    "aperture_mode": "接收孔径模式",
+    "mv_dl": "MV 对角加载系数(非负)",
+    "fbss": "是否启用前后向空间平滑",
+    "subarray_ratio": "子阵长度比例,范围 (0, 1]",
+    "temporal_win": "时间平滑窗口,必须为正奇数",
+    "num_eig": "ESBMV 保留特征数,0 表示按阈值自动选择",
+    "eig_threshold": "ESBMV 特征阈值,范围 [0, 1]",
+    "gcf_low_bins": "GCF 低频 bin 数,必须为非负整数",
+    "gcf_power": "GCF 权重幂次(非负)",
+    "lmax_ratio": "CMSAW 最大子阵比例,范围 (0, 0.5]",
+    "min_subarray_len": "CMSAW 最小子阵长度,至少为 2",
+    "delta_max": "CMSAW 权重变化上限,范围 [0, 1]",
+    "gamma": "CMSAW 权重曲线强度,范围 (0, 1]",
+    "clip_percentile": "CMSAW 裁剪百分位,范围 (0, 100]",
+    "depth_smooth_rows": "CMSAW 深度平滑行数,必须为正整数",
+}
+
 HELP_TEXT = {
     "h5": "H5 是已经整理好的成像数据包,里面通常包含输入 IQ、角度、探头参数、成像网格,有些还包含 GT 参考图。",
     "sample": "一个 H5 里可以有多个样本。样本编号就是选择第几帧/第几个场景来成像。",
@@ -139,6 +157,67 @@ def ask_float(prompt, default, minimum=None, strictly_greater=False):
                 print(f"数值必须{relation} {minimum}。")
                 continue
         return value
+
+
+def validate_algorithm_param(name, value):
+    """Validate one method-specific parameter and return its normalized value."""
+    if name in {"num_eig", "gcf_low_bins"} and value < 0:
+        raise ValueError("必须是非负整数。")
+    if name == "min_subarray_len" and value < 2:
+        raise ValueError("必须是大于等于 2 的整数。")
+    if name == "depth_smooth_rows" and value < 1:
+        raise ValueError("必须是正整数。")
+    if name == "temporal_win" and (value < 1 or value % 2 != 1):
+        raise ValueError("必须是正奇数。")
+    if name in {"mv_dl", "gcf_power"} and value < 0:
+        raise ValueError("必须大于等于 0。")
+    if name == "subarray_ratio" and not 0 < value <= 1:
+        raise ValueError("必须位于 (0, 1]。")
+    if name in {"eig_threshold", "delta_max"} and not 0 <= value <= 1:
+        raise ValueError("必须位于 [0, 1]。")
+    if name == "gamma" and not 0 < value <= 1:
+        raise ValueError("必须位于 (0, 1]。")
+    if name == "lmax_ratio" and not 0 < value <= 0.5:
+        raise ValueError("必须位于 (0, 0.5]。")
+    if name == "clip_percentile" and not 0 < value <= 100:
+        raise ValueError("必须位于 (0, 100]。")
+    return value
+
+
+def ask_algorithm_param(algorithm, name, default):
+    """Ask for one method-specific parameter using the type from config.yaml."""
+    label = ALGORITHM_PARAM_HELP.get(name, name)
+    prompt = f"[{algorithm}] {name} - {label}"
+    if name == "aperture_mode":
+        options = [
+            ("discrete", "discrete:离散通道孔径,适合公平对照"),
+            ("geometry", "geometry:连续几何孔径,适合 DAS 单独研究"),
+        ]
+        default_index = next(
+            (idx for idx, (key, _) in enumerate(options) if key == default),
+            0,
+        )
+        return ask_choice(prompt, options, default_index=default_index)
+    if isinstance(default, bool):
+        return ask_yes_no(prompt, default=default)
+
+    while True:
+        raw = ask_text(prompt, default=default)
+        try:
+            if isinstance(default, int):
+                value = int(raw)
+                if str(value) != raw.strip() and raw.strip() not in {f"+{value}"}:
+                    raise ValueError
+            elif isinstance(default, float):
+                value = float(raw)
+                if not math.isfinite(value):
+                    raise ValueError
+            else:
+                return raw
+            return validate_algorithm_param(name, value)
+        except (TypeError, ValueError) as exc:
+            detail = str(exc) or ("请输入整数。" if isinstance(default, int) else "请输入合法数字。")
+            print(detail)
 
 
 def ask_choice(prompt, options, default_index=0):
@@ -506,25 +585,25 @@ def main():
             ),
         )
 
-    def step_das_aperture_mode():
-        """Execute step das aperture mode."""
-        if "das" not in state["algorithms"]:
-            return
-        default = ((state["base_config"].get("algorithm_params", {}) or {}).get("das", {}) or {}).get(
-            "aperture_mode",
-            "discrete",
-        )
-        state["das_aperture_mode"] = ask_choice(
-            "请选择 DAS 接收孔径模式",
-            [
-                (
-                    "discrete",
-                    "discrete:与 MV 等算法一致的离散通道孔径(默认,适合公平对照)",
-                ),
-                ("geometry", "geometry:DAS 专用连续几何孔径(适合单独研究)"),
-            ],
-            default_index=0 if default == "discrete" else 1,
-        )
+    def step_algorithm_params():
+        """Ask for every parameter owned by each selected algorithm."""
+        base_params = state["base_config"].get("algorithm_params", {}) or {}
+        previous_params = state.get("algorithm_params", {})
+        selected_params = {}
+        for algorithm in state["algorithms"]:
+            defaults = deepcopy(base_params.get(algorithm, {}) or {})
+            editable = [name for name in defaults if name != "baseline_mv"]
+            if not editable:
+                print(f"\n[{algorithm}] 没有独有的可调参数。")
+                selected_params[algorithm] = defaults
+                continue
+            print(f"\n请设置 {algorithm} 的方法专属参数:")
+            current = previous_params.get(algorithm, {})
+            for name in editable:
+                default = current.get(name, defaults[name])
+                defaults[name] = ask_algorithm_param(algorithm, name, default)
+            selected_params[algorithm] = defaults
+        state["algorithm_params"] = selected_params
 
     def step_angles():
         """Execute step angles."""
@@ -728,8 +807,8 @@ def main():
             params,
         )
         config["scenes"][0]["id"] = run_id
-        if "das" in state["algorithms"]:
-            config.setdefault("algorithm_params", {}).setdefault("das", {})["aperture_mode"] = state["das_aperture_mode"]
+        for algorithm, method_params in state["algorithm_params"].items():
+            config.setdefault("algorithm_params", {})[algorithm] = deepcopy(method_params)
         config_path = make_temp_config_path(state["output_root"], run_id)
         cmd = [
             sys.executable,
@@ -756,8 +835,11 @@ def main():
         print(f"H5 文件: {relative_to_root(state['h5_path'])}")
         print(f"样本编号: {state['sample_idx']}")
         print(f"算法: {', '.join(state['algorithms'])}")
-        if "das" in state["algorithms"]:
-            print(f"DAS 孔径模式: {state['das_aperture_mode']}")
+        print("方法专属参数:")
+        for algorithm in state["algorithms"]:
+            method_params = state["algorithm_params"].get(algorithm, {})
+            visible = {key: value for key, value in method_params.items() if key != "baseline_mv"}
+            print(f"  {algorithm}: {visible or '无'}")
         print(f"角度选择: {state['select_angles']}")
         print(f"F-Number: {state['f_number']}")
         print(f"动态范围: {state['dr']} dB")
@@ -780,7 +862,7 @@ def main():
                 step_h5,
                 step_sample,
                 step_algorithms,
-                step_das_aperture_mode,
+                step_algorithm_params,
                 step_angles,
                 step_dr,
                 step_aperture,
@@ -825,6 +907,10 @@ def main():
             "h5_path": h5_rel,
             "sample_idx": int(state["sample_idx"]),
             "algorithms": state["algorithms"],
+            "algorithm_params": {
+                algorithm: state["algorithm_params"].get(algorithm, {})
+                for algorithm in state["algorithms"]
+            },
             "params": {
                 "select_angles": state["select_angles"],
                 "f_number": state["f_number"],
