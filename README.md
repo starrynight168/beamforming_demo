@@ -1,649 +1,202 @@
 # Beamforming Demo
 
-一个简洁的超声波束合成对比工程。算法脚本可以单独运行，也可以通过 `run_one.py` / `run_all.py` 统一生成对比图和评估结果。
+`beamforming_demo` 是一个基于 Python/PyTorch 实现的高效超声波束合成（Beamforming）对比与评估工程。本工程实现了多种主流的波束合成算法，支持利用 GPU 加速计算，并提供了一整套与 PICMUS (Platform for Interdisciplinary Research in Medical Ultrasound) 挑战赛标准对齐的成像质量评估系统。
 
-## 目录
+---
+
+## 核心算法列表
+
+本工程目前支持并实现了以下波束合成算法：
+- **DAS (Delay and Sum)**: 延迟相加法，最基础、高效的经典波束合成方法。支持离散通道孔径与连续几何孔径模式。
+- **MV (Minimum Variance)**: 最小方差自适应波束合成，基于数据自适应计算空间加权矢量，显著提升图像分辨率与对比度。
+- **ESBMV (Eigenspace-Based Minimum Variance)**: 特征空间最小方差法，通过对协方差矩阵进行特征分解并投影到信号子空间，增强 MV 的稳健性。
+- **GCF-MV (Generalized Coherence Factor - Minimum Variance)**: 广义相干因子自适应波束合成，利用 GCF 压制旁瓣和噪声。
+- **F-DMAS (Filtered Delay Multiply and Sum)**: 滤波延迟相乘相加法，通过孔径内对信号进行两两相乘处理，有效降低主瓣宽度并抑制旁瓣。
+- **CMSAW (Coherence-based MV variant)**: 基于自适应相干权重的最小方差流式优化方法，在大角度复合 CPI 下兼顾画质与显存占用。
+
+---
+
+## 项目目录结构
 
 ```text
 beamforming_demo/
-  config.yaml
-  run_one.py
-  run_all.py
-  run_wizard_cn.py
-  run_ablation_cn.py
-
-  data/
-    check_data.py
-    pack_data.py
-    simulation.h5
-    experiments.h5
-    in_vivo.h5
-
-  algorithms/
-    common_params.py
-    beamforming_utils.py
-    h5_loader.py
-    das.py
-    mv.py
-    esbmv.py
-    gcfmv.py
-    cmsaw.py
-    fdmas.py
-    template_algorithm.py
-
-  evaluation/
-    evaluate.py
-    plot_metrics.py
-
-  results/
+  ├── config.yaml               # 统一全局实验与算法默认超参数配置文件
+  ├── run_one.py                # 单场景多算法批量重建、对比拼接与指标评估入口
+  ├── run_all.py                # 一键运行配置中所有场景的批处理脚本
+  ├── run_wizard_cn.py          # 面向交互式超声成像配置的中文引导向导
+  ├── run_ablation_cn.py        # 用于算法超参数调优与指标自动分析的消融实验工具
+  │
+  ├── data/                     # 数据管理目录
+  │    ├── pack_data.py         # 原始 PICMUS 格式数据打包为工程自描述 H5 的脚本
+  │    ├── check_data.py        # 针对 H5 数据集类型、形状、完整性、NaN/Inf 的体检工具
+  │    ├── simulation.h5        # 打包后的仿真数据（暗斑/散斑与分辨率/畸变靶点）
+  │    ├── experiments.h5       # 打包后的水槽实验数据（暗斑/散斑与分辨率/畸变靶点）
+  │    └── in_vivo.h5           # 打包后的在体颈动脉数据（横切面与纵切面）
+  │
+  ├── algorithms/               # 核心重建算法及公共工具模块
+  │    ├── common_params.py     # 公共命令行参数定义
+  │    ├── beamforming_utils.py # 延迟计算、插值方法、窗函数、图像保存等基础工具
+  │    ├── h5_loader.py         # 统一的数据读取与数据 contract 硬校验模块
+  │    ├── das.py               # DAS 重建脚本
+  │    ├── mv.py                # MV 重建脚本
+  │    ├── esbmv.py             # ESBMV 重建脚本
+  │    ├── gcfmv.py             # GCF-MV 重建脚本
+  │    ├── cmsaw.py             # CMSAW 重建脚本
+  │    ├── fdmas.py             # F-DMAS 重建脚本
+  │    └── template_algorithm.py# 添加新算法时的标准脚手架模版
+  │
+  ├── evaluation/               # 成像指标计算与绘图模块
+  │    ├── evaluate.py          # 定量指标计算核心（全量对齐 PICMUS 挑战赛规则）
+  │    └── plot_metrics.py      # 指标对比柱状图、横向波束剖面图（Profile）自动绘制工具
+  │
+  └── results/                  # 重建图像与评估报告输出目录（自动创建）
 ```
 
-## 环境
+---
 
-推荐使用 Conda：
+## 环境安装与配置
+
+推荐使用 Conda 建立独立的 Python 环境：
 
 ```bash
+# 创建并激活 Conda 环境
 conda env create -f environment.yml
 conda activate beamforming-demo
 ```
 
-也可以在已有 Python 环境中安装依赖：
+也可以直接通过 pip 安装依赖项：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-默认配置使用 CUDA 12.8 版 PyTorch。若机器没有 NVIDIA GPU，请按 PyTorch 官网说明安装 CPU 版 `torch`。
+> [!NOTE]
+> 本项目核心计算完全基于 PyTorch 张量运算。默认配置为 CUDA GPU 加速；若无 NVIDIA GPU，程序将自动回退到 CPU 执行计算。
 
-## 准备数据
+---
 
-**重要**：原始数据 `PICMUS` 文件夹因大小限制未包含在代码仓库中，请从以下链接下载压缩包：
-- `PICMUS` 数据压缩包：https://drive.google.com/file/d/1CQxjvpwGHDyzwHSJQux-mkXLl97mul-f/view?usp=drive_link
+## 数据集准备与体检
 
-下载后，将压缩包解压，并把其中的 `PICMUS` 文件夹放到项目的 `data/PICMUS/` 下。确保解压后的路径结构类似 `data/PICMUS/database/...`，与 `data/pack_data.py` 脚本中的预期路径一致。
+为了进行完整的算法比对，需要将 PICMUS 挑战赛数据导入本工程：
 
-如果 `data/*.h5` 已存在，可以直接运行。需要重新从 `data/PICMUS/` 打包算法输入数据时：
+1. **下载原始数据**：
+   从以下链接下载预整理好的 `PICMUS` 原始数据压缩包：
+   - 链接：[PICMUS 数据压缩包](https://drive.google.com/file/d/1CQxjvpwGHDyzwHSJQux-mkXLl97mul-f/view?usp=drive_link)
+   
+2. **放置路径**：
+   在项目根目录下创建并解压到 `data/` 目录，确保其目录布局为：
+   `data/PICMUS/database/` 等。
 
-```bash
-python data/pack_data.py
-```
+3. **打包生成 H5 数据集**：
+   运行打包工具，该脚本会将原始格式数据标准化，包含 complex RMS 归一化、自描述元数据 `config_yaml` 嵌入及 `float16` 压缩存储以节省空间：
+   ```bash
+   python data/pack_data.py
+   ```
 
-检查数据是否完整：
+4. **进行数据完整性体检**：
+   验证打包文件是否无损、无 NaN/Inf，且数据结构满足 contract 规范：
+   ```bash
+   python data/check_data.py
+   ```
 
-```bash
-python data/check_data.py
-```
+---
 
-检查脚本会逐帧验证 IQ 与 GT 中的 NaN/Inf，并核对 schema、形状、有效时间长度和补零区。
+## 运行指南
 
-打包后的数据：
-
-- `data/simulation.h5`: simulation contrast/speckle 和 resolution/distortion
-- `data/experiments.h5`: experiments contrast/speckle 和 resolution/distortion
-- `data/in_vivo.h5`: carotid cross 和 carotid long
-
-**备用下载**：如果上述链接访问不便，也可以从以下项目文件夹链接获取完整工程（包含数据）：
-https://drive.google.com/drive/folders/1HeaowzynJdmK188EPwCqfgtj5zPGieH8?usp=drive_link
-
-## 单独运行一个算法
-
+### 1. 单独运行指定算法进行成像
+可以直接调用算法脚本对特定 H5 里的某个样本进行重建：
 ```bash
 python algorithms/das.py --h5_path data/simulation.h5 --h5_sample_idx 0 --output_dir results/simulation_contrast_speckle
 ```
+此操作将在 `results/simulation_contrast_speckle/das/` 下生成重建的矩阵 `das.npy` 和 B-Mode 图像 `das.png`。
 
-输出：
-
-```text
-results/simulation_contrast_speckle/
-  das/
-    das.npy
-    das.png
-    params.json
-```
-
-单独运行算法只生成该算法自己的图和 `.npy`，不做多算法对比和评估。
-
-## 运行一个场景
-
+### 2. 单个场景的一键批量比对与评估 (`run_one.py`)
+使用 `run_one.py` 可以自动调度 `config.yaml` 中配置的所有成像方法进行同一场景的波束合成，并在场景根目录下生成包含 Ground Truth 的拼接对比图 `comparison.png`，同时导出高分辨率独立的个人 B-Mode 图像目录 `individual_images/`：
 ```bash
-python run_one.py
+python run_one.py --scene simulation_contrast_speckle
 ```
+重建完成后，脚本会自动启动评估系统，在 `metrics/` 目录下生成：
+- **`summary_metrics.csv`**: 所有算法在当前场景的全面对比指标表。
+- **`standard_metrics.png` / `auxiliary_metrics.png`**: 主要和辅助评估指标的柱状对比图。
+- **`point_profile.png` / `roi_targets.png`**: 与官方标准对齐的横向分辨率波束剖面图及 ROI 划分示意图。
+- **`picmus_challenge_summary.txt`**: 与官方 PICMUS 分组得分完全一致的文本总结。
 
-输出：
-
-```text
-results/simulation_contrast_speckle/
-  das/
-  mv/
-  esbmv/
-  gcfmv/
-  cmsaw/
-  fdmas/
-  comparison.npy
-  comparison.png
-  individual_images/             # GT 与各算法的独立图片，便于逐张比较
-    ground_truth.png
-    das.png
-    mv.png
-  run_params.json
-  metrics/
-```
-
-`metrics/` 中包含：
-
-- `summary_metrics.csv`
-- `standard_metrics.png`
-- `auxiliary_metrics.png`
-- `roi_targets.png`（phantom 数据）
-- `contrast_roi_metrics.csv`
-- `resolution_target_metrics.csv`
-- `contrast_group_metrics.csv`
-- `resolution_group_metrics.csv`
-- `contrast_group_metrics.png`
-- `resolution_group_metrics.png`
-- `picmus_challenge_summary.txt`
-- `evaluation_meta.json`
-
-`run_one.py` 会先调用 `evaluation/evaluate.py` 计算指标并写出 CSV / JSON / TXT，再调用 `evaluation/plot_metrics.py` 从这些表格生成图片。`run_all.py` 通过逐个调用 `run_one.py` 复用同一流程。
-
-## 常用运行参数
-
-通用参数写在 `config.yaml` 的 `params` 中，也可以在命令行临时覆盖：
-
-```yaml
-params:
-  select_angles: "1"
-  f_number: 1.5
-  dr: 60
-  dynamic_aperture: true
-  tgc: true
-  tgc_alpha: 0.5
-  window: rect
-  interp: linear
-```
-
-- `select_angles`: 选择发射角。`"1"` 和 `center` 都表示中心单角度；`all` 表示全部角度；也可以填角度数量如 `3`、`11`，或 0 基角度索引列表如 `0,37,74`。
-- CMSAW 支持多角度：逐角度流式计算自适应权重并取平均，再作用于使用相同角度集合生成的复合 MV 基线；该实现避免一次性把全部角度的延迟通道数据放入显存。
-- `cmsaw_subarray_length.npy` 统一使用 `[角度, 深度, 横向]` 形状；单角度时角度维为 1。
-- `window`: 孔径窗函数，支持 `rect`、`tukey`、`hann`、`hamming`、`blackman`、`kaiser`。
-- `interp`: 延迟插值方式，支持 `nearest`、`linear`、`cubic`、`quintic`、`farrow`、`sinc`。
-- `dynamic_aperture`: 是否启用动态孔径；开启时 `f_number` 生效。
-- `tgc`: 是否启用深度增益补偿；开启时 `tgc_alpha` 生效。
-- `dr`: 显示和评估使用的动态范围，单位 dB。
-
-### 动态孔径的统一对照与 DAS 专用模式
-
-默认实验使用按通道数扩张的离散动态孔径（`discrete`）：DAS、MV、ESBMV、GCF-MV 等算法在每个深度使用一致的离散有效通道数。这使算法间的分辨率、旁瓣和散斑差异主要来自波束形成方法本身，而不是不同的孔径筛选规则；同时避免 MV 在逐像素协方差估计与求解之外，再承担连续几何孔径计算，便于保持运行效率。
-
-因此，主配置不把几何孔径作为公共模式。DAS 保留两种可选接收孔径模式，供单独实验或消融使用：
-
-- `discrete`：默认值；按离散通道数选择孔径，与 MV 的对照设置一致。
-- `geometry`：DAS 专用；按连续几何半宽和窗函数选择孔径，适合研究几何孔径本身的影响，不建议与默认 MV 结果直接作为严格公平对照。
-
-在 `config.yaml` 中设置 DAS 的模式：
-
-```yaml
-algorithm_params:
-  das:
-    aperture_mode: discrete  # 或 geometry
-```
-
-也可以临时覆盖：
-
-```bash
-python run_one.py --scene simulation_contrast_speckle --algorithms das --aperture_mode geometry
-```
-
-命令行示例：
-
-```bash
-python run_one.py --scene simulation_contrast_speckle --algorithms das,mv --interp nearest
-```
-
-复用已有算法输出：
-
-```bash
-python run_one.py --scene simulation_contrast_speckle --algorithms das,mv --keep_existing
-```
-
-`--keep_existing` 会读取场景目录中的 `run_params.json`。只有场景、通用参数、算法专属参数和额外命令行参数都一致时，才复用已有 `.npy`；参数不一致时会重新运行对应算法。
-
-## 一键运行全部场景
-
+### 3. 一键重建并评估全部场景 (`run_all.py`)
+一次性运行并评估项目内的全部仿真、实验和在体（In-vivo）场景：
 ```bash
 python run_all.py
 ```
-
-只运行部分场景：
-
+若只想执行部分场景，可使用命令行过滤：
 ```bash
 python run_all.py --only simulation_contrast_speckle,carotid_cross
 ```
 
-只运行部分算法：
+---
 
-```bash
-python run_one.py --scene carotid_cross --algorithms das,mv
-```
+## 交互向导与参数实验工具
 
-## 中文交互向导
+为了更方便地进行研究，本工程提供了两个功能强大的中文交互式脚本：
 
-项目提供了两个面向中文用户的交互式脚本，用于辅助参数配置和单参数消融实验。
+### 1. 成像引导向导 (`run_wizard_cn.py`)
+为初学者或临时调参设计的图形化命令行向导。支持一步步中文提问：
+- 交互式选择数据集、样本帧、波束合成方法及参数；
+- 提供详细的小白背景说明，解释诸如 F-Number、TGC、窗函数和插值法对画质的实质影响；
+- 支持自适应参数提示，根据所选算法动态询问其特有超参数（例如调节 ESBMV 的特征门限、F-DMAS 的时间平滑窗等），输入非法时实时拦截并报错。
 
-### 1. 成像向导：`run_wizard_cn.py`
-
-适合对命令行参数不熟悉的“小白”用户。该脚本会以全中文一步步引导您配置超声成像的各项参数：
-
-- **引导式输入**：按顺序选择 H5 数据集、样本索引、波束合成算法、发射偏角、显示参数（如动态范围 `dr`）、TGC（时间增益补偿）、窗函数、插值方式、是否保存 GT 及进行指标评估等。
-- **人性化操作**：在任何步骤输入 `b` 可返回上一步重新选择，输入 `q` 可直接退出。
-- **小白说明模式**：每一步提供详细的背景知识说明，解释该参数对最终成像画质的具体影响。
-- **智能分支逻辑**：例如关闭“动态孔径”后自动跳过 `F-Number` 的提问；关闭 “TGC” 后跳过 `TGC_ALPHA` 提问。
-- **参数容错与校验**：输入的参数格式不正确时会给出中文报错并提示重新输入，不会直接崩溃。例如自定义角度必须为 `center`、`all`、正整数或整数索引列表。
-- **输出路径**：
-  - 默认结果输出在 `results/wizard/` 目录下。
-  - 临时取消执行不会写入配置，执行时会将当前的配置文件保存到 `results/wizard/configs/`。
-
-使用方法：
-
+运行命令：
 ```bash
 python run_wizard_cn.py
 ```
 
----
+### 2. 参数消融实验工具 (`run_ablation_cn.py`)
+针对学术研究设计的“控制单变量超参数消融”工具。可以快速获取特定超参数变化对重建质量的演变曲线：
+- 自由选择要消融的方法专属超参数（如 MV 的对角加载因子、GCF 的低频 bins 数量、发射角度数等）；
+- 支持指定具体的离散取值列表（如 `1, 3, 11, 75`），或使用等差生成器（如 `1.2:0.1:2.0`）；
+- 自动完成批量消融重建后，在消融根目录统一调度评估，把每个参数值视作“不同算法”绘制直观的横向演变柱状图、点目标波束剖面对比曲线等，并集中输出高品质高清成像对比单图 `individual_images/`。
 
-### 2. 单参数消融向导：`run_ablation_cn.py`
-
-用于对某一个特定参数进行“消融实验”（Ablation Study），观察其取值变化对算法成像质量的影响。
-
-- **多参数列表展示**：固定一个算法后，自动从 `config.yaml` 读取所有可消融的超参数，并以中文表格列出。
-- **单变量控制**：一次只允许对一个选定参数进行消融实验。
-- **灵活输入取值**：支持手动列举多个取值（逗号分隔），或通过范围生成（如 `1.2:0.1:2.0` 表示从 1.2 到 2.0，步长 0.1）。
-- **参数强类型校验**：例如 `select_angles` 参数不接受小数或布尔值，数值参数只能输入数字，开关参数只接受 true/false，`window` 和 `interp` 只接受合法选项。
-- **输出结构设计**：
-  默认输出到 `results/ablation/ablation_<算法名>_<参数名>/`，如 `ablation_das_f_number/`。结构如下：
-  ```text
-  results/ablation/ablation_das_f_number/
-    configs/                      # 每次运行生成的临时配置文件
-    fnumber1.2/                   # 对应参数值的扁平算法输出
-      das.npy
-      das.png
-      params.json
-    fnumber1.5/
-    ...
-    ablation_summary.csv          # 指标消融汇总 CSV
-    ablation_comparison.png       # 自动生成的对比拼接总览图
-    ablation_comparison.npy       # 对比图像数据
-    individual_images/            # 各参数取值的独立图片
-      01_f_number_1.2_das.png
-      02_f_number_1.5_das.png
-    metrics/                      # 将各参数取值视作独立算法的统一评估
-      standard_metrics.png
-      roi_targets.png
-      point_profile.png
-  ```
-- **智能对比总览图**：消融结束后，脚本会自动读取扁平子目录中的 `.npy` 图像数据，将 Ground Truth（若有）作为第一张，随后拼接各个参数取值的成像图，生成 `ablation_comparison.png`。子图布局支持自动折行（每行最多 4 张），并优先读取自身配置的 `dr` 动态范围进行显示。
-- **单图与统一评估**：消融会把每个参数取值的单图集中到根目录 `individual_images/`，并将它们作为独立算法统一写入根目录 `metrics/`，生成标准指标、ROI 和点剖面图。
-
-使用方法：
-
+运行命令：
 ```bash
 python run_ablation_cn.py
 ```
 
-## 评估说明
-
-评估和绘图已经拆分：
-
-```text
-evaluation/evaluate.py      # 只计算指标，写 CSV / JSON / TXT
-evaluation/plot_metrics.py  # 只读取评估输出并画 PNG
-```
-
-单独重新计算指标：
-
-```bash
-python evaluation/evaluate.py \
-  --comparison_npy results/simulation_contrast_speckle/comparison.npy \
-  --h5_path data/simulation.h5 \
-  --h5_sample_idx 0 \
-  --out_dir results/simulation_contrast_speckle/metrics
-```
-
-单独重新画图：
-
-```bash
-python evaluation/plot_metrics.py \
-  --metrics_dir results/simulation_contrast_speckle/metrics
-```
-
-phantom 数据会计算主指标：
-
-其中 PICMUS 官方得分严格复刻 `data/PICMUS/code/src` 的 MATLAB 语义：对比度使用官方环形 ROI 与样本方差，散斑使用 5 倍抽样后的 Rayleigh KS 检验；分辨率先将剖面线性插值到 `10N` 个点，再取全部 `>= max-6 dB` 样点的首尾跨度；仿真畸变使用官方全局累加标签掩膜、`+0.2 mm` 轴向修正和 7 个指定靶点。PSLR、ISLR、CR、CNR、gCNR、SSIM、PSNR 等为额外分析指标，不计入原始 PICMUS 挑战得分。
-
-- `contrast_dB`
-- `CR_dB`
-- `CNR`
-- `gCNR`
-- `cyst_residual_dB`
-- `speckle_pass_rate`
-- `speckle_KS_D`
-- `speckle_KS_p`
-- `speckle_SNR`
-- `ENL`
-- `FWHM_axial_mm`
-- `FWHM_lateral_mm`
-- `PSLR_dB`
-- `ISLR_dB`
-- `distortion_mm`
-- `distortion_pass_rate`
-
-有 GT 的数据还会计算：
-
-- `SSIM_vs_GT`
-- `PSNR_dB_vs_GT`
-- `MAE_dB_vs_GT`
-
-PICMUS 分组结果会写入：
-
-- `contrast_group_metrics.csv`
-- `resolution_group_metrics.csv`
-- `picmus_challenge_summary.txt`
-
-对应分组图由 `plot_metrics.py` 生成：
-
-- `contrast_group_metrics.png`
-- `resolution_group_metrics.png`
-
-in vivo 数据即使含有多角度 DAS 生成的 reference，也一律跳过指标导出；该 reference 仅用于对比图展示，不作为定量评估基准。
-
-`plot_metrics.py` 会根据算法数量自适应图像布局。算法较多时，普通指标图会自动改为横向柱状图；指标太多时会按指标分页，例如 `standard_metrics_page2.png`。
-
-## 扩展工程
-
-工程按“算法脚本 + 配置文件 + 可选交互入口”的方式组织。大多数扩展只需要改 `algorithms/` 和 `config.yaml`；只有希望中文向导、消融向导也展示新选项时，才需要改对应的交互脚本。
-
-### 添加新算法
-
-推荐从模板复制一个新脚本：
-
-```bash
-cp algorithms/template_algorithm.py algorithms/new_method.py
-```
-
-然后在 `algorithms/new_method.py` 中修改算法名：
-
-```python
-METHOD_NAME = "new_method"
-```
-
-注意三者必须一致：
-
-```text
-脚本名:      algorithms/new_method.py
-METHOD_NAME: new_method
-输出文件:    output_dir/new_method/new_method.npy
-```
-
-实现模板中的 `beamform()`：
-
-```python
-def beamform(data, args):
-    ...
-    return image_db
-```
-
-`beamform()` 输入里的主要字段：
-
-```python
-data["I"]              # [angles, time, channels]
-data["Q"]              # [angles, time, channels]
-data["t0"]
-data["fs"]
-data["c"]
-data["fc"]
-data["pitch"]
-data["num_channels"]
-data["z_grid"]
-data["x_grid"]
-data["angles"]
-data["selected_angles"]
-data["selected_angle_indices"]
-```
-
-返回值必须是二维 dB 图像：
-
-```text
-shape = [len(z_grid), len(x_grid)]
-最大值通常归一化到 0 dB
-```
-
-模板已经通过 `common_params.py` 和 `beamforming_utils.py` 接好了公共命令行参数、路径解析、角度选择和图像保存逻辑。新算法即使用不到某些参数，也建议保留这些入口，方便 `run_one.py` / `run_all.py` 统一调用：
-
-```text
---h5_path
---h5_sample_idx
---output_dir
---select_angles
---f_number
---dr
---dynamic_aperture / --no_dynamic_aperture
---tgc / --no_tgc
---tgc_alpha
---window
---interp
---save_gt
-```
-
-单独测试算法脚本：
-
-```bash
-python algorithms/new_method.py \
-  --h5_path data/simulation.h5 \
-  --h5_sample_idx 0 \
-  --output_dir results/test \
-  --dr 60
-```
-
-输出目录必须使用算法名作为子文件夹：
-
-```text
-output_dir/new_method/new_method.npy
-output_dir/new_method/new_method.png
-output_dir/new_method/params.json
-```
-
-让 `run_one.py` / `run_all.py` 默认运行这个算法时，在 `config.yaml` 中加入算法名、显示名和算法专属参数：
-
-```yaml
-algorithms:
-  - das
-  - mv
-  - esbmv
-  - gcfmv
-  - cmsaw
-  - fdmas
-  - new_method
-
-algorithm_labels:
-  new_method: New Method
-
-algorithm_params:
-  new_method:
-    alpha: 0.5
-    num_iter: 10
-    use_filter: true
-```
-
-之后直接运行场景即可：
-
-```bash
-python run_one.py --scene simulation_contrast_speckle
-```
-
-或运行全部场景：
-
-```bash
-python run_all.py
-```
-
-临时测试时也可以不改配置：
-
-```bash
-python run_one.py --scene simulation_contrast_speckle --algorithms das,mv,new_method
-```
-
-算法专属参数要在脚本里先定义 argparse 参数：
-
-```python
-parser.add_argument("--alpha", type=float, default=0.5)
-parser.add_argument("--num_iter", type=int, default=10)
-```
-
-再把统一实验使用的默认值写入 `config.yaml`：
-
-```yaml
-algorithm_params:
-  new_method:
-    alpha: 0.8
-    num_iter: 20
-```
-
-`run_one.py` / `run_all.py` 会自动把它转换成：
-
-```text
---alpha 0.8 --num_iter 20
-```
-
-布尔参数会自动转换。`true` 会变成 `--use_filter`，`false` 会变成 `--no_use_filter`。如果希望从配置里开关某个布尔参数，算法脚本里要同时提供正反两个参数：
-
-```python
-parser.add_argument("--use_filter", action="store_true", default=True)
-parser.add_argument("--no_use_filter", dest="use_filter", action="store_false")
-```
-
-普通新算法不需要修改 `run_one.py`。只要脚本名、`METHOD_NAME`、输出目录名、`config.yaml` 中的算法名一致，入口脚本就能自动调用。只有特别复杂的调度规则，例如某个参数要根据场景自动变化、或者一个配置值需要转换成多个命令行参数时，才需要改 `run_one.py`。
-
-### 让中文向导显示新算法
-
-`run_wizard_cn.py` 的算法列表来自文件顶部的 `ALGORITHMS` 字典。希望交互式向导里出现新算法时，加入一行：
-
-```python
-ALGORITHMS = {
-    "das": "DAS：最基础、最快，适合入门观察",
-    "new_method": "New Method：这里写一句中文说明",
-}
-```
-
-向导运行时会把用户选择的算法写入临时配置，并继续调用 `run_one.py`。如果不改 `run_wizard_cn.py`，新算法仍然可以通过命令行或 `config.yaml` 使用，只是不出现在中文菜单里。
-
-### 让消融向导识别新参数
-
-`run_ablation_cn.py` 会从 `config.yaml` 自动读取可消融参数：
-
-- `params` 中的通用参数会作为全局参数出现。
-- `algorithm_params.<算法名>` 中的参数会作为算法专属参数出现。
-
-如果希望消融菜单里有更清楚的中文解释，可以在 `run_ablation_cn.py` 顶部补充：
-
-```python
-ALGORITHM_PARAM_DESCRIPTIONS = {
-    "alpha": "控制 new_method 的加权强度。",
-    "num_iter": "迭代次数。",
-}
-
-PARAM_VALUE_LABELS = {
-    "alpha": "alpha",
-    "num_iter": "iter",
-}
-```
-
-`PARAM_VALUE_LABELS` 只影响输出目录命名，不影响算法运行。对于字符串参数，如果需要限制合法取值，可以在 `validate_values()` 里补充校验规则。
-
-### 添加新场景或新数据
-
-如果已经有符合工程格式的 H5 文件，只需要在 `config.yaml` 的 `scenes` 中增加场景：
-
-```yaml
-scenes:
-  - id: my_scene
-    h5_path: data/my_data.h5
-    sample_idx: 0
-```
-
-字段含义：
-
-- `id`: 场景名，也是结果子目录名。
-- `h5_path`: H5 文件路径，相对项目根目录或绝对路径都可以。
-- `sample_idx`: H5 中的样本编号。
-- H5 中存在 `all_envdb_norm` 时会自动加入对比和评估；GT 是否存在、phantom 类型与来源均从新版 `pack_data.py` 写入的 H5 元数据读取。
-
-加入后可以运行：
-
-```bash
-python run_one.py --scene my_scene
-```
-
-如果要把原始数据打包成工程使用的 H5，需要按 `data/pack_data.py` 里的字段格式生成：
-
-```text
-all_multi_I, all_multi_Q, time_start_vector, fs, c, fc, pitch,
-num_channels, z_grid, x_grid, angles
-```
-
-有参考图时，再写入：
-
-```text
-all_envdb_norm
-```
-
-### 添加或修改通用参数
-
-通用参数是所有算法共享的参数，例如角度选择、F-Number、窗函数、插值和 TGC。它们集中在：
-
-- `algorithms/common_params.py`: 默认值和 argparse 参数。
-- `algorithms/beamforming_utils.py`: 角度选择、窗函数、插值等公共实现。
-- `config.yaml` 的 `params`: 项目默认值。
-- `run_one.py`: 把通用参数传给算法脚本。
-
-如果只是改变默认值，通常只改 `config.yaml`。如果要增加全新的通用参数，需要同时检查以上几个位置；如果中文向导或消融向导也要支持这个参数，还要更新 `run_wizard_cn.py` 和 `run_ablation_cn.py`。
-
-### 添加插值方式或窗函数
-
-插值方式和窗函数属于公共能力。
-
-添加插值方式时，修改 `algorithms/beamforming_utils.py`：
-
-- 在 `INTERP_CHOICES` 中加入名称。
-- 在 `interpolate_channel_samples()` 中实现单角度数据取样。
-- 在 `interpolate_multi_angle_channel_samples()` 中实现多角度数据取样。
-
-添加窗函数时，同样修改 `algorithms/beamforming_utils.py`：
-
-- 在 `WINDOW_CHOICES` 中加入名称。
-- 在 `aperture_window_from_dx()` 中实现按孔径位置生成权重。
-- 在 `aperture_window_1d()` 中实现一维子孔径窗。
-
-如果希望用户在中文向导里选择新选项，更新 `run_wizard_cn.py` 中的选项列表；如果希望消融向导允许新取值，更新 `run_ablation_cn.py` 中 `validate_values()` 的合法值。
-
-### 扩展后的检查
-
-改完后建议先做语法和回归检查：
-
-```bash
-python -m compileall -q .
-python -m unittest discover -s tests -v
-```
-
-再跑一个最小场景：
-
-```bash
-python run_one.py --scene simulation_contrast_speckle --algorithms das --no_evaluate
-```
-
-如果是新算法，单独跑：
-
-```bash
-python run_one.py --scene simulation_contrast_speckle --algorithms new_method --no_evaluate
-```
-
-只要遵守输入输出约定，`run_one.py` / `run_all.py` 会自动调用算法、拼接对比图，并复用 `evaluation/evaluate.py` 生成指标、`evaluation/plot_metrics.py` 生成评估图。算法数量变多时，对比图和评估图会自动调整布局。
+---
+
+## 评估指标体系说明
+
+本工程内置的评估计算核心（`evaluation/evaluate.py`）严格对齐了 PICMUS 挑战赛官方 MATLAB 算法语义：
+- **对比度 (Contrast)**: 基于官方同心环形 ROI 划定，并且方差计算使用样本方差（$N-1$ 自由度），保障与 MATLAB 的 `var()` 结果完全一致；
+- **散斑拟合度 (Speckle Quality)**: 提取散斑区进行 5 倍下采样并执行 Kolmogorov-Smirnov 检验以拟合 Rayleigh 分布，评估 KS 统计量 $D$ 和 $p$ 值；
+- **分辨率 (Resolution)**: 提取点目标 lateral 剖面并线性插值至 $10\times$ 密度，计算 $-6\text{ dB}$ 的半高全宽（FWHM）；
+- **几何畸变 (Distortion)**: 基于官方给定的累加标签掩膜、轴向修正因子和 7 个指定靶点位置自动判定畸变是否达标。
+- **辅助学术指标**: 额外提供广义对比度噪声比（gCNR）、对比度噪声比（CNR）、峰值旁瓣电平（PSLR）、积分旁瓣电平（ISLR）以及基于 GT 的图像结构相似度（SSIM）、峰值信噪比（PSNR）与平均绝对误差（MAE）等分析。
+
+*(注：在体 (in-vivo) 颈动脉图像因无物理靶点参考，会自动跳过定量指标的计算，仅做图像重建与对比拼接。)*
+
+---
+
+## 新增算法扩展指南
+
+本工程设计有高度的可扩展性。只需遵循以下步骤即可快速接入并测试自己的超声波束形成新算法：
+
+1. **复制模版**：
+   ```bash
+   cp algorithms/template_algorithm.py algorithms/my_method.py
+   ```
+2. **设定唯一算法 ID**：
+   打开新创建的脚本，确保顶部的 `METHOD_NAME = "my_method"`，保证脚本名、METHOD_NAME、以及后续在 `config.yaml` 中配置的键值三者完全一致。
+3. **实现核心重建逻辑**：
+   在 `my_method.py` 中实现 `beamform(data, args)` 函数。该函数的输入 `data` 已经通过公共 H5 载入器（`h5_loader.py`）完成了网格映射与通道延迟的映射。您只需要读取 `data["I"]` / `data["Q"]`，按需要计算加权值（如自适应权重矩阵），并返回最终二维的 B-Mode 对数包络图像矩阵（对齐 `[z_grid, x_grid]`，峰值归一化至 `0 dB`）。
+4. **配置默认参数**：
+   若新算法有专属的控制超参数，首先在 `my_method.py` 内部定义 argparse 参数（例如 `--my_param`），然后在 `config.yaml` 根目录的 `algorithm_params` 中加入默认值：
+   ```yaml
+   algorithm_params:
+     my_method:
+       my_param: 0.5
+   ```
+   并在 `config.yaml` 顶部的 `algorithms` 列表中追加 `"my_method"`。
+5. **一键测试与多维评估**：
+   参数配置完成后，新算法将被全局识别并可以与 DAS、MV 等算法同时跑对比：
+   ```bash
+   python run_one.py --scene simulation_contrast_speckle --algorithms das,mv,my_method
+   ```
+   重建系统和评估系统将完全自动生成对应的对比子图，并将其横向指标绘制到对比表和 Profile 曲线中，无需修改任何绘图或控制流代码。
