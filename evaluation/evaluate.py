@@ -13,7 +13,7 @@ import os
 import h5py
 import numpy as np
 import yaml
-from scipy.ndimage import convolve, uniform_filter
+from scipy.ndimage import convolve, gaussian_filter
 from scipy.stats import kstest
 
 COMPARISON_VALUE_0_05 = 0.05
@@ -229,21 +229,25 @@ def psnr(image, reference, data_range=1.0):
     return 20.0 * math.log10(data_range) - 10.0 * math.log10(mse)
 
 
-def local_ssim(image, reference, data_range=1.0, win_size=11):
-    """Execute local ssim."""
+def local_ssim(image, reference, data_range=1.0, sigma=1.5):
+    """Gaussian-window SSIM with the standard sigma=1.5 population covariance."""
     image = image.astype(np.float64)
     reference = reference.astype(np.float64)
     c1 = (0.01 * data_range) ** 2
     c2 = (0.03 * data_range) ** 2
-    ux = uniform_filter(image, win_size)
-    uy = uniform_filter(reference, win_size)
-    uxx = uniform_filter(image * image, win_size)
-    uyy = uniform_filter(reference * reference, win_size)
-    uxy = uniform_filter(image * reference, win_size)
+    truncate = 3.5
+    ux = gaussian_filter(image, sigma=sigma, truncate=truncate, mode="reflect")
+    uy = gaussian_filter(reference, sigma=sigma, truncate=truncate, mode="reflect")
+    uxx = gaussian_filter(image * image, sigma=sigma, truncate=truncate, mode="reflect")
+    uyy = gaussian_filter(reference * reference, sigma=sigma, truncate=truncate, mode="reflect")
+    uxy = gaussian_filter(image * reference, sigma=sigma, truncate=truncate, mode="reflect")
     vx = uxx - ux * ux
     vy = uyy - uy * uy
     vxy = uxy - ux * uy
     score = ((2.0 * ux * uy + c1) * (2.0 * vxy + c2)) / ((ux * ux + uy * uy + c1) * (vx + vy + c2))
+    pad = int(truncate * sigma + 0.5)
+    if min(score.shape) > 2 * pad:
+        score = score[pad:-pad, pad:-pad]
     return float(np.mean(score))
 
 
@@ -1016,6 +1020,7 @@ def main():
             )
 
     gt_display = db_to_display(gt_db, args.dr) if has_gt else None
+    gt_linear_envelope = db_to_envelope(gt_db) if has_gt else None
     rows = []
     roi_rows = []
     target_rows = []
@@ -1024,16 +1029,15 @@ def main():
         env = db_to_envelope(db_img)
         row = {"method": method}
         if has_gt and method == "GT":
-            row["SSIM_vs_GT"] = 1.0
+            row["SSIM_dB_vs_GT"] = 1.0
+            row["SSIM_envelope_vs_GT"] = 1.0
             row["PSNR_dB_vs_GT"] = float("inf")
             row["MAE_dB_vs_GT"] = 0.0
         elif has_gt:
-            if structural_similarity is not None:
-                row["SSIM_vs_GT"] = float(
-                    structural_similarity(gt_display, display, data_range=1.0),
-                )
-            else:
-                row["SSIM_vs_GT"] = local_ssim(display, gt_display, data_range=1.0)
+            row["SSIM_dB_vs_GT"] = local_ssim(display, gt_display, data_range=1.0)
+            row["SSIM_envelope_vs_GT"] = local_ssim(
+                env, gt_linear_envelope, data_range=1.0,
+            )
             if peak_signal_noise_ratio is not None:
                 row["PSNR_dB_vs_GT"] = float(
                     peak_signal_noise_ratio(gt_display, display, data_range=1.0),
@@ -1048,7 +1052,8 @@ def main():
                 ),
             )
         else:
-            row["SSIM_vs_GT"] = np.nan
+            row["SSIM_dB_vs_GT"] = np.nan
+            row["SSIM_envelope_vs_GT"] = np.nan
             row["PSNR_dB_vs_GT"] = np.nan
             row["MAE_dB_vs_GT"] = np.nan
 
@@ -1148,7 +1153,8 @@ def main():
 
     summary_fields = [
         "method",
-        "SSIM_vs_GT",
+        "SSIM_dB_vs_GT",
+        "SSIM_envelope_vs_GT",
         "PSNR_dB_vs_GT",
         "MAE_dB_vs_GT",
         "contrast_dB",

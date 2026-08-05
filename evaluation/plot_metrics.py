@@ -6,6 +6,7 @@ Default input:
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 
@@ -23,9 +24,13 @@ COMPARISON_VALUE_6 = 6
 COMPARISON_VALUE_8 = 8
 
 
+METHOD_PALETTE = [
+    "#4C72B0", "#55A868", "#C44E52", "#8172B3", "#CCB974", "#64B5CD",
+    "#E17C05", "#937860", "#DA8BC3", "#8C8C8C", "#2A9D8F", "#E76F51",
+]
+
+
 def get_color(method_name):
-    # 标准化名字为大写,并过滤连字符和空格以实现鲁棒的配色匹配
-    """Execute get color."""
     name = method_name.upper().replace("-", "").replace(" ", "")
     mapping = {
         "GT": "#333333",  # 深灰
@@ -36,7 +41,27 @@ def get_color(method_name):
         "CMSAW": "#FF7F0E",  # 橙色
         "FDMAS": "#C44E52",  # 红色
     }
-    return mapping.get(name, "#4C72B0")  # 默认返回蓝色
+    if name in mapping:
+        return mapping[name]
+    index = int(hashlib.sha256(name.encode("utf-8")).hexdigest()[:8], 16) % len(METHOD_PALETTE)
+    return METHOD_PALETTE[index]
+
+
+def build_method_colors(methods):
+    result = {}
+    used = set()
+    for method in methods:
+        color = get_color(method)
+        if color not in used:
+            result[method] = color
+            used.add(color)
+    available = [color for color in METHOD_PALETTE if color not in used]
+    for method in methods:
+        if method not in result:
+            if not available:
+                available = METHOD_PALETTE.copy()
+            result[method] = available.pop(0)
+    return result
 
 
 def parse_args():
@@ -157,7 +182,8 @@ def save_bar_plot(path, metrics_to_plot):
 
     for i, (title, key, vals, methods) in enumerate(metrics_to_plot):
         ax = axes[i]
-        colors = [get_color(m) for m in methods]
+        color_map = build_method_colors(methods)
+        colors = [color_map[m] for m in methods]
         use_horizontal = len(methods) > COMPARISON_VALUE_6
         positions = np.arange(len(methods))
         if use_horizontal:
@@ -236,15 +262,7 @@ def save_group_metric_plot(path, group_rows, metric_keys, title_prefix):
     if not available_metrics:
         return
 
-    color_map = {
-        "GT": "#333333",
-        "DAS": "#4C72B0",
-        "MV": "#55A868",
-        "ESBMV": "#8172B3",
-        "GCF-MV": "#64B5CD",
-        "CMSAW": "#FF7F0E",
-        "F-DMAS": "#C44E52",
-    }
+    color_map = build_method_colors(methods)
     n_plots = len(available_metrics)
     cols = min(n_plots, 2)
     rows_grid = (n_plots + cols - 1) // cols
@@ -280,7 +298,7 @@ def save_group_metric_plot(path, group_rows, metric_keys, title_prefix):
                 values,
                 width=bar_width,
                 label=method,
-                color=color_map.get(method, "#4C72B0"),
+                color=color_map[method],
                 edgecolor="black",
                 linewidth=0.5,
             )
@@ -357,7 +375,8 @@ def build_metric_plots(rows):
     auxiliary = []
     aux_methods = [r["method"] for r in non_gt]
     for title, key in [
-        ("SSIM vs GT", "SSIM_vs_GT"),
+        ("Gaussian SSIM vs GT (dB)", "SSIM_dB_vs_GT"),
+        ("Gaussian SSIM vs GT (linear envelope)", "SSIM_envelope_vs_GT"),
         ("PSNR vs GT (dB)", "PSNR_dB_vs_GT"),
         ("MAE vs GT (dB)", "MAE_dB_vs_GT"),
     ]:
@@ -468,6 +487,7 @@ def save_lateral_profile_plot(
     display_window_mm=5.0,
 ):
     """Save lateral profile plot."""
+    color_map = build_method_colors(methods)
     if rois:
         target_cyst = min(
             rois,
@@ -483,7 +503,7 @@ def save_lateral_profile_plot(
                 x_mm[display_x_mask],
                 comparison[i, iz, display_x_mask],
                 label=method,
-                color=get_color(method),
+                color=color_map[method],
                 linestyle="--" if method.upper() == "GT" else "-",
                 linewidth=1.5 if method.upper() != "GT" else 1.2,
             )
@@ -537,7 +557,7 @@ def save_lateral_profile_plot(
                 x_mm[display_x_mask],
                 profile,
                 label=method,
-                color=get_color(method),
+                color=color_map[method],
                 linestyle="--" if method.upper() == "GT" else "-",
                 linewidth=1.5 if method.upper() != "GT" else 1.2,
             )
