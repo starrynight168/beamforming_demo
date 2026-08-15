@@ -35,6 +35,12 @@ except Exception:
 
 
 DEFAULT_METHODS = ["DAS", "MV", "ESBMV", "F-DMAS"]
+CONTROLLED_SCENES = frozenset({
+    "simulation_contrast_speckle",
+    "simulation_resolution_distorsion",
+    "experiments_contrast_speckle",
+    "experiments_resolution_distorsion",
+})
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, os.pardir))
 SOURCE_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, os.pardir))
@@ -71,12 +77,12 @@ def parse_args():
     )
     parser.add_argument(
         "--phantom_mode",
-        choices=["auto", "contrast_speckle", "resolution_distorsion", "in_vivo"],
+        choices=["auto", "contrast_speckle", "resolution_distorsion"],
         default="auto",
     )
     parser.add_argument(
         "--phantom_source",
-        choices=["auto", "simulation", "experiments", "in_vivo"],
+        choices=["auto", "simulation", "experiments"],
         default="auto",
         help="Phantom source; auto uses experiments for validation H5 files and simulation otherwise.",
     )
@@ -191,13 +197,20 @@ def read_sample_meta(h5_path, sample_idx):
             sample_name = hf[id_dataset][sample_idx]
             if isinstance(sample_name, bytes):
                 sample_name = sample_name.decode("utf-8")
-            dataset_id = str((config.get("dataset") or {}).get("id", "")).lower()
-            is_in_vivo = "invivo" in dataset_id or "volunteer" in dataset_id
+            dataset_meta = config.get("dataset") or {}
+            phantom_mode = str(
+                source_samples.get("phantom_mode")
+                or dataset_meta.get("phantom_mode", "")
+            )
+            phantom_source = str(
+                source_samples.get("phantom_source")
+                or dataset_meta.get("phantom_source", "")
+            )
             return {
                 "has_gt": has_gt,
                 "sample_name": str(sample_name),
-                "phantom_mode": "in_vivo" if is_in_vivo else "",
-                "phantom_source": "in_vivo" if is_in_vivo else "",
+                "phantom_mode": phantom_mode,
+                "phantom_source": phantom_source,
                 "phantom_path": "",
             }
         raise IndexError(f"source_samples has no sample index {sample_idx}")
@@ -943,14 +956,13 @@ def main():
     h5_path = resolve(args.h5_path)
     out_dir = resolve(args.out_dir)
     meta_from_h5 = read_sample_meta(h5_path, args.h5_sample_idx)
-    has_gt = read_sample_meta(h5_path, args.h5_sample_idx).get("has_gt", False)
-    if (
-        args.phantom_mode == "in_vivo"
-        or args.phantom_source == "in_vivo"
-        or meta_from_h5.get("phantom_mode") == "in_vivo"
-        or meta_from_h5.get("phantom_source") == "in_vivo"
-    ):
-        print("In-vivo scene: skipped metric export.")
+    has_gt = bool(meta_from_h5.get("has_gt", False))
+    sample_name = str(meta_from_h5.get("sample_name", ""))
+    if sample_name not in CONTROLLED_SCENES:
+        print(
+            f"Non-controlled scene {sample_name or '<unknown>'}: "
+            "skipped full phantom metric export."
+        )
         return
 
     comparison = np.load(comparison_path).astype(np.float64)
