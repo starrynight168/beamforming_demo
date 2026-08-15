@@ -205,8 +205,8 @@ def scene_has_gt(scene):
     return available
 
 
-def scene_is_in_vivo(scene):
-    """Treat every non-standard PICMUS phantom scene as in-vivo."""
+def scene_is_non_controlled(scene):
+    """Return whether a scene is outside the four controlled metric scenes."""
     return str(scene.get("id", "")) not in EVALUATION_SCENE_IDS
 
 
@@ -462,10 +462,11 @@ def main():
     with open(scene_dir / "run_params.json", "w", encoding="utf-8") as f:
         json.dump(run_params, f, ensure_ascii=False, indent=2)
 
-    if not args.no_evaluate and has_gt and not scene_is_in_vivo(scene):
+    non_controlled = scene_is_non_controlled(scene)
+    if not args.no_evaluate and has_gt and not non_controlled:
         run_evaluation(args, config, scene, scene_dir, comparison_path, methods)
-    elif not args.no_evaluate and scene_is_in_vivo(scene):
-        print("Skip evaluation: in-vivo H5 samples are not evaluated.")
+    elif not args.no_evaluate and non_controlled:
+        print("Skip evaluation: non-controlled scenes only generate images.")
     elif not args.no_evaluate:
         print("Skip evaluation: H5 没有 all_envdb_norm ground truth.")
 

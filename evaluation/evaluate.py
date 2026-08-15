@@ -393,11 +393,12 @@ def read_phantom(phantom_path):
     return out
 
 
-def infer_source(args):
+def infer_source(args, meta=None):
     """Execute infer source."""
     if args.phantom_source != "auto":
         return args.phantom_source
-    meta = read_sample_meta(resolve(args.h5_path), args.h5_sample_idx)
+    if meta is None:
+        meta = read_sample_meta(resolve(args.h5_path), args.h5_sample_idx)
     if meta.get("phantom_source"):
         return meta["phantom_source"]
     h5_name = os.path.basename(resolve(args.h5_path)).lower()
@@ -429,11 +430,12 @@ def default_phantom(mode, source):
     return resolve_existing(rel)
 
 
-def infer_mode(args, comparison):
+def infer_mode(args, comparison, meta=None):
     """Execute infer mode."""
     if args.phantom_mode != "auto":
         return args.phantom_mode
-    meta = read_sample_meta(resolve(args.h5_path), args.h5_sample_idx)
+    if meta is None:
+        meta = read_sample_meta(resolve(args.h5_path), args.h5_sample_idx)
     if meta.get("phantom_mode"):
         return meta["phantom_mode"]
     if "resolution" in os.path.basename(args.comparison_npy).lower():
@@ -980,8 +982,8 @@ def main():
         raise ValueError(f"comparison 包含 {bad_count} 个 NaN/Inf,拒绝生成无效指标")
     methods = load_method_names(args, comparison_path, comparison.shape[0], has_gt)
 
-    mode = infer_mode(args, comparison)
-    source = infer_source(args)
+    mode = infer_mode(args, comparison, meta_from_h5)
+    source = infer_source(args, meta_from_h5)
     os.makedirs(out_dir, exist_ok=True)
     if args.phantom_path == "auto" and meta_from_h5.get("phantom_path"):
         phantom_path = resolve_existing(meta_from_h5["phantom_path"])
