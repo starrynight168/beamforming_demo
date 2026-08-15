@@ -72,6 +72,14 @@ def nonnegative_int(value):
     return value
 
 
+def positive_int(value):
+    """Parse a positive integer command-line value."""
+    value = int(value)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return value
+
+
 def positive_odd_int(value):
     """Execute positive odd int."""
     value = int(value)

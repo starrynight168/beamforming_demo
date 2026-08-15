@@ -584,6 +584,8 @@ def save_lateral_profile_plot(
 def main():
     """Run the command-line workflow."""
     args = parse_args()
+    if not np.isfinite(args.dr) or args.dr <= 0:
+        raise ValueError("dr 必须是有限正数")
     metrics_dir = resolve(args.metrics_dir)
     meta_path = os.path.join(metrics_dir, "evaluation_meta.json")
     meta = {}

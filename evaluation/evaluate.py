@@ -179,12 +179,13 @@ def read_sample_meta(h5_path, sample_idx):
             sample_config = source_samples[sample_idx]
             if not isinstance(sample_config, dict):
                 raise ValueError(f"source_samples[{sample_idx}] must be a mapping")
+            dataset_meta = config.get("dataset") or {}
             return {
                 "has_gt": has_gt,
-                "sample_name": str(sample_config["id"]),
-                "phantom_mode": str(sample_config["phantom_mode"]),
-                "phantom_source": str(sample_config["phantom_source"]),
-                "phantom_path": str(sample_config["phantom_path"] or ""),
+                "sample_name": str(sample_config.get("id") or sample_config.get("acquisition_id") or ""),
+                "phantom_mode": str(sample_config.get("phantom_mode") or dataset_meta.get("phantom_mode") or ""),
+                "phantom_source": str(sample_config.get("phantom_source") or dataset_meta.get("phantom_source") or ""),
+                "phantom_path": str(sample_config.get("phantom_path") or ""),
             }
         if (
             isinstance(source_samples, dict)

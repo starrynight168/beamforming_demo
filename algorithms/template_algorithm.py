@@ -63,7 +63,7 @@ def load_from_h5(h5_path, sample_idx):
         "x_grid": x_grid,
         "angles": angles,
     }
-    if gt is not None:
+    if gt is not None and gt.ndim == 3:
         gt = gt[0]
     return data, gt
 
