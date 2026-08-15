@@ -44,15 +44,29 @@ def load_config(path):
             "PyYAML is required to read config.yaml. Install with: pip install pyyaml",
         )
     with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+    if not isinstance(config, dict):
+        raise ValueError(f"Config must be a mapping: {path}")
+    return config
 
 
 def main():
     """Run the command-line workflow."""
     args = parse_args()
     config = load_config(ROOT / args.config)
-    all_scenes = [scene["id"] for scene in config.get("scenes", [])]
+    scene_configs = config.get("scenes")
+    if not isinstance(scene_configs, list) or not all(isinstance(scene, dict) for scene in scene_configs):
+        raise ValueError("config.scenes 必须是场景字典列表")
+    all_scenes = [scene.get("id") for scene in scene_configs]
+    if (
+        not all_scenes
+        or any(not isinstance(scene_id, str) or not scene_id.strip() for scene_id in all_scenes)
+        or len(all_scenes) != len(set(all_scenes))
+    ):
+        raise ValueError("config.scenes 必须包含非空且不重复的 id")
     scenes = all_scenes if args.only == "all" else [item.strip() for item in args.only.split(",") if item.strip()]
+    if not scenes or len(scenes) != len(set(scenes)):
+        raise ValueError("--only 必须包含非空且不重复的场景 id")
     unknown = [scene for scene in scenes if scene not in all_scenes]
     if unknown:
         raise ValueError(f"Unknown scene ids: {unknown}")

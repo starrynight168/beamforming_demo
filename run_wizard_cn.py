@@ -341,7 +341,12 @@ def inspect_h5(path):
         if hf["all_multi_I"].shape != hf["all_multi_Q"].shape or hf["all_multi_I"].ndim != COMPARISON_VALUE_4:
             raise ValueError("all_multi_I/all_multi_Q 必须是形状一致的 [N,A,T,C] 数组")
         n, a, t, c = hf["all_multi_I"].shape
-        valid_time = [int(value) for value in hf["valid_time_samples"][:]]
+        if min(n, a, c) < 1 or t < 2:
+            raise ValueError("all_multi_I/all_multi_Q 的样本、角度、通道必须非空，时间维至少为 2")
+        valid_time_dataset = hf["valid_time_samples"]
+        if valid_time_dataset.ndim != 1 or valid_time_dataset.dtype.kind not in "iu":
+            raise ValueError("valid_time_samples 必须是一维整数数组")
+        valid_time = [int(value) for value in valid_time_dataset[:]]
         if len(valid_time) != n or any(value < COMPARISON_VALUE_2 or value > t for value in valid_time):
             raise ValueError(
                 "valid_time_samples 必须为每个样本提供至少 2 个有效时间采样点",
@@ -354,6 +359,8 @@ def inspect_h5(path):
         angles = hf["angles"].shape[0]
         fs = float(hf["fs"][()])
         fc = float(hf["fc"][()])
+        if not math.isfinite(fs) or fs <= 0 or not math.isfinite(fc) or fc <= 0:
+            raise ValueError("fs/fc 必须是有限正数")
         raw_config = hf["config_yaml"][()]
         if isinstance(raw_config, bytes):
             raw_config = raw_config.decode("utf-8", errors="replace")

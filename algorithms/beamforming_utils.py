@@ -28,6 +28,8 @@ def validate_db_output(image, expected_shape, method_name="algorithm"):
         raise ValueError(
             f"{method_name} output is not normalized to 0 dB (peak={peak:g} dB)",
         )
+    if not np.any(image < -1e-3):
+        raise ValueError(f"{method_name} output has no measurable dynamic range")
     return image.astype(np.float32, copy=False)
 
 
@@ -150,7 +152,9 @@ def aperture_window_1d(
     kaiser_beta=8.6,
 ):
     """Execute aperture window 1d."""
-    if window_type == "rect":
+    if k < 1:
+        raise ValueError("aperture size must be positive")
+    if window_type == "rect" or k == 1:
         return torch.ones(k, dtype=dtype, device=device)
     x = torch.linspace(-1.0, 1.0, k, dtype=dtype, device=device)
     ax = x.abs()

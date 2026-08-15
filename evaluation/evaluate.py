@@ -123,6 +123,8 @@ def load_method_names(args, comparison_path, n_panels, has_gt):
         raise ValueError(
             f"Method count {len(names)} does not match stacked image count {n_panels}",
         )
+    if len(names) != len(set(names)):
+        raise ValueError(f"Method labels must be unique: {names}")
     return names
 
 
@@ -170,6 +172,9 @@ def h5_embedded_config(hf):
 def read_sample_meta(h5_path, sample_idx):
     """Read sample meta."""
     with h5py.File(h5_path, "r") as hf:
+        n_samples = int(hf["all_multi_I"].shape[0])
+        if not 0 <= sample_idx < n_samples:
+            raise IndexError(f"sample index {sample_idx} is outside [0, {n_samples - 1}]")
         has_gt = "all_envdb_norm" in hf and 0 <= sample_idx < hf["all_envdb_norm"].shape[0]
         config = h5_embedded_config(hf)
         source_samples = config.get("source_samples", [])
@@ -222,6 +227,9 @@ def load_grids(h5_path):
     with h5py.File(h5_path, "r") as hf:
         x_mm = hf["x_grid"][:].astype(float) * 1000.0
         z_mm = hf["z_grid"][:].astype(float) * 1000.0
+    for name, grid in (("x_grid", x_mm), ("z_grid", z_mm)):
+        if grid.ndim != 1 or grid.size < 2 or not np.all(np.isfinite(grid)) or not np.all(np.diff(grid) > 0):
+            raise ValueError(f"{name} must be a finite, strictly increasing 1D grid with at least two points")
     return x_mm, z_mm
 
 
@@ -455,7 +463,7 @@ def standard_contrast_score(
     padding=1.0,
 ):
     """Execute standard contrast score."""
-    if not lateral_resolution_mm or not np.isfinite(lateral_resolution_mm):
+    if lateral_resolution_mm is None or not np.isfinite(lateral_resolution_mm) or lateral_resolution_mm <= 0:
         return np.nan
     x = x_mm[None, :]
     z = z_mm[:, None]
@@ -463,6 +471,8 @@ def standard_contrast_score(
     rin = radius - padding * lateral_resolution_mm
     rout1 = radius + padding * lateral_resolution_mm
     rout2 = 1.2 * math.sqrt(rin**2 + rout1**2)
+    if rin <= 0 or rout2 <= rout1:
+        return np.nan
     dist2 = (x - roi["x_mm"]) ** 2 + (z - roi["z_mm"]) ** 2
     inside = db_img[dist2 <= rin**2]
     outside = db_img[(dist2 >= rout1**2) & (dist2 <= rout2**2)]
@@ -474,15 +484,16 @@ def standard_contrast_score(
     )
     if denom <= 0:
         return np.nan
-    value = 20.0 * math.log10(
-        abs(float(np.mean(inside)) - float(np.mean(outside))) / denom,
-    )
+    ratio = abs(float(np.mean(inside)) - float(np.mean(outside))) / denom
+    if ratio <= 0:
+        return np.nan
+    value = 20.0 * math.log10(ratio)
     return float(round(value * 10.0) / 10.0)
 
 
 def contrast_roi_metrics(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padding=1.0):
     """Execute contrast roi metrics."""
-    if not lateral_resolution_mm or not np.isfinite(lateral_resolution_mm):
+    if lateral_resolution_mm is None or not np.isfinite(lateral_resolution_mm) or lateral_resolution_mm <= 0:
         return None
     x = x_mm[None, :]
     z = z_mm[:, None]
@@ -543,7 +554,14 @@ def standard_speckle_quality(
     axial_resolution_mm,
 ):
     """Execute standard speckle quality."""
-    if not lateral_resolution_mm or not axial_resolution_mm:
+    if (
+        lateral_resolution_mm is None
+        or axial_resolution_mm is None
+        or not np.isfinite(lateral_resolution_mm)
+        or not np.isfinite(axial_resolution_mm)
+        or lateral_resolution_mm <= 0
+        or axial_resolution_mm <= 0
+    ):
         return None
     pad_x = roi["psf_time_x"] * lateral_resolution_mm
     pad_z = roi["psf_time_z"] * axial_resolution_mm
@@ -1246,6 +1264,9 @@ def main():
         "fwhm_window_mm": args.fwhm_window_mm,
         "contrast_groups": picmus_contrast_groups(source, len(rois)),
         "resolution_groups": picmus_resolution_groups(source, len(targets)),
+        "contrast_rois": rois,
+        "resolution_targets": targets,
+        "dr": args.dr,
         "note": "Standard metrics use the predefined phantom ROI and target definitions when available.",
     }
     with open(

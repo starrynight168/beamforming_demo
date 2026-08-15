@@ -18,6 +18,8 @@ def load_from_h5(h5_path, sample_idx=0):
         q_all = hf["all_multi_Q"]
         if i_all.shape != q_all.shape or i_all.ndim != COMPARISON_VALUE_4:
             raise ValueError("all_multi_I/all_multi_Q 必须是形状一致的 [N,A,T,C] 数组")
+        if min(i_all.shape[0], i_all.shape[1], i_all.shape[3]) < 1 or i_all.shape[2] < 2:
+            raise ValueError("IQ 的样本、角度、通道维必须非空，时间维至少为 2")
         if not 0 <= sample_idx < i_all.shape[0]:
             raise IndexError(
                 f"h5_sample_idx={sample_idx} 超出 [0,{i_all.shape[0] - 1}]",
@@ -32,15 +34,14 @@ def load_from_h5(h5_path, sample_idx=0):
         if t0_vec.ndim != 1 or len(t0_vec) != i_data.shape[0]:
             raise ValueError("time_start_vector 必须与 IQ 的角度维度一致")
 
-        valid_time = int(hf["valid_time_samples"][sample_idx])
-        if not 1 <= valid_time <= i_data.shape[1]:
+        valid_raw = hf["valid_time_samples"][sample_idx]
+        valid_time = int(valid_raw)
+        if float(valid_raw) != valid_time or not 2 <= valid_time <= i_data.shape[1]:
             raise ValueError(
-                f"valid_time_samples[{sample_idx}]={valid_time} 超出 [1,{i_data.shape[1]}]",
+                f"valid_time_samples[{sample_idx}]={valid_raw} 不是 [2,{i_data.shape[1]}] 内的整数",
             )
         i_data = i_data[:, :valid_time, :]
         q_data = q_data[:, :valid_time, :]
-        if valid_time < COMPARISON_VALUE_2:
-            raise ValueError("valid_time_samples 至少为 2,插值需要相邻采样点")
         if not np.all(np.isfinite(i_data)) or not np.all(np.isfinite(q_data)):
             raise ValueError("所选样本的 IQ 数据包含 NaN/Inf")
 
@@ -70,6 +71,8 @@ def load_from_h5(h5_path, sample_idx=0):
         gt_data = None
         has_gt = "all_envdb_norm" in hf
         if has_gt:
+            if hf["all_envdb_norm"].shape[0] <= sample_idx:
+                raise ValueError("GT 样本数少于 IQ 样本数")
             gt_data = hf["all_envdb_norm"][sample_idx].astype(np.float32)
             expected_gt_shape = (1, z_grid.size, x_grid.size)
             if gt_data.shape not in (expected_gt_shape, expected_gt_shape[1:]):

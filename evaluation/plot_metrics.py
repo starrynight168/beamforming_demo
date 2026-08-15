@@ -68,7 +68,7 @@ def parse_args():
     """Parse args."""
     parser = argparse.ArgumentParser(description="Plot evaluation CSV outputs.")
     parser.add_argument("--metrics_dir", default=os.path.join("results", "metrics"))
-    parser.add_argument("--dr", type=float, default=60.0)
+    parser.add_argument("--dr", type=float)
     return parser.parse_args()
 
 
@@ -483,6 +483,7 @@ def save_lateral_profile_plot(
     rois,
     targets,
     methods,
+    dr=60.0,
     fwhm_window_mm=1.8,
     display_window_mm=5.0,
 ):
@@ -523,7 +524,7 @@ def save_lateral_profile_plot(
         ax.set_title("Lateral Cyst Profile", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("Lateral coordinate (mm)")
         ax.set_ylabel("Amplitude (dB)")
-        ax.set_ylim(-60, 0)
+        ax.set_ylim(-dr, 0)
         ax.grid(True, linestyle="--", alpha=0.5)
         ax.legend(loc="lower right", fontsize=9)
         fig.tight_layout()
@@ -569,7 +570,7 @@ def save_lateral_profile_plot(
         )
         ax.set_xlabel("Lateral coordinate (mm)")
         ax.set_ylabel("Amplitude relative to local target peak (dB)")
-        ax.set_ylim(-60, 2)
+        ax.set_ylim(-dr, 2)
         ax.grid(True, linestyle="--", alpha=0.5)
         ax.legend(loc="lower right", fontsize=9)
         fig.tight_layout()
@@ -584,14 +585,15 @@ def save_lateral_profile_plot(
 def main():
     """Run the command-line workflow."""
     args = parse_args()
-    if not np.isfinite(args.dr) or args.dr <= 0:
-        raise ValueError("dr 必须是有限正数")
     metrics_dir = resolve(args.metrics_dir)
     meta_path = os.path.join(metrics_dir, "evaluation_meta.json")
     meta = {}
     if os.path.exists(meta_path):
         with open(meta_path, encoding="utf-8") as file:
             meta = json.load(file)
+    dr = float(meta.get("dr", 60.0) if args.dr is None else args.dr)
+    if not np.isfinite(dr) or dr <= 0:
+        raise ValueError("dr 必须是有限正数")
 
     summary_rows = read_rows(os.path.join(metrics_dir, "summary_metrics.csv"))
     contrast_group_rows = read_rows(
@@ -635,6 +637,16 @@ def main():
         comparison = np.load(comparison_path).astype(np.float64)
         x_mm, z_mm = load_grids(h5_path)
         methods = meta.get("methods") or [row["method"] for row in summary_rows]
+        if (
+            comparison.ndim != 3
+            or not np.isfinite(comparison).all()
+            or len(methods) != comparison.shape[0]
+            or any(not isinstance(method, str) or not method for method in methods)
+            or len(methods) != len(set(methods))
+        ):
+            raise ValueError(
+                f"comparison 数值/形状或 methods 非法: shape={comparison.shape}, methods={methods}"
+            )
         phantom = (
             read_phantom(phantom_path)
             if phantom_path and phantom_path != "none"
@@ -643,10 +655,12 @@ def main():
                 "resolution_targets": [],
             }
         )
-        rois = phantom.get("contrast_rois", [])
-        targets = phantom.get("resolution_targets", []) if meta.get("mode") == "resolution_distorsion" else []
+        rois = phantom.get("contrast_rois", []) or meta.get("contrast_rois", [])
+        targets = (
+            phantom.get("resolution_targets", []) or meta.get("resolution_targets", [])
+        ) if meta.get("mode") == "resolution_distorsion" else []
         if meta.get("has_gt") and comparison.size:
-            display = db_to_display(comparison[0], args.dr)
+            display = db_to_display(comparison[0], dr)
             peak_method = next(
                 (method for method in methods if method != "GT"),
                 methods[0] if methods else None,
@@ -669,6 +683,7 @@ def main():
             rois,
             targets,
             methods,
+            dr,
             float(meta.get("fwhm_window_mm", 1.8)),
         )
 

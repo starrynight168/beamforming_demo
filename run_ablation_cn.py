@@ -540,6 +540,8 @@ def save_ablation_overview(rows, out_dir, algorithm, param_name):
 
 def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt):
     """Execute run ablation evaluation."""
+    if not has_gt:
+        return None
     comparison_path = out_dir / "ablation_comparison.npy"
     if not comparison_path.exists():
         return None

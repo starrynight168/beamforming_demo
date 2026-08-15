@@ -79,12 +79,25 @@ def load_config(path):
             "PyYAML is required to read config.yaml. Install with: pip install pyyaml",
         )
     with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+    if not isinstance(config, dict):
+        raise ValueError(f"Config must be a mapping: {path}")
+    return config
 
 
 def find_scene(config, scene_id):
     """Execute find scene."""
-    for scene in config.get("scenes", []):
+    scenes = config.get("scenes")
+    if not isinstance(scenes, list) or not all(isinstance(scene, dict) for scene in scenes):
+        raise ValueError("config.scenes 必须是场景字典列表")
+    scene_ids = [scene.get("id") for scene in scenes]
+    if (
+        not scene_ids
+        or any(not isinstance(value, str) or not value.strip() for value in scene_ids)
+        or len(scene_ids) != len(set(scene_ids))
+    ):
+        raise ValueError("config.scenes 必须包含非空且不重复的 id")
+    for scene in scenes:
         if scene.get("id") == scene_id:
             return scene
     raise ValueError(f"Scene not found: {scene_id}")
@@ -185,8 +198,15 @@ def load_grid_and_gt(h5_path, sample_idx, has_gt):
         gt = None
         if has_gt and "all_envdb_norm" in hf:
             gt = hf["all_envdb_norm"][sample_idx].astype(np.float32)
+    for name, grid in (("x_grid", x_grid), ("z_grid", z_grid)):
+        if grid.ndim != 1 or grid.size < 2 or not np.isfinite(grid).all() or not np.all(np.diff(grid) > 0):
+            raise ValueError(f"{name} 必须是至少含两个点的有限严格递增一维网格")
     if gt is not None and gt.ndim == COMPARISON_VALUE_3:
-        gt = gt[0] if gt.shape[0] == 1 else gt[:, :, 0]
+        if gt.shape[0] != 1:
+            raise ValueError(f"GT 三维形状必须为 [1,H,W]，实际 {gt.shape}")
+        gt = gt[0]
+    if gt is not None and (gt.shape != (z_grid.size, x_grid.size) or not np.isfinite(gt).all()):
+        raise ValueError(f"GT 形状或数值非法: {gt.shape}")
     extent_mm = [
         x_grid[0] * 1000,
         x_grid[-1] * 1000,
@@ -419,6 +439,8 @@ def main():
         int(scene["sample_idx"]),
         has_gt,
     )
+    with h5py.File(resolve_path(scene["h5_path"]), "r") as hf:
+        expected_shape = (int(hf["z_grid"].size), int(hf["x_grid"].size))
 
     images = []
     titles = []
@@ -429,7 +451,14 @@ def main():
         image_names.append("ground_truth")
     for method in methods:
         path = scene_dir / method / f"{method}.npy"
-        images.append(np.load(path).astype(np.float32))
+        image = np.load(path).astype(np.float32)
+        if image.shape != expected_shape or not np.all(np.isfinite(image)):
+            raise ValueError(f"算法 {method} 输出必须是有限二维数组: {image.shape}")
+        if not np.isclose(float(np.max(image)), 0.0, rtol=0.0, atol=1.0e-3):
+            raise ValueError(f"算法 {method} 输出未归一化到 0 dB")
+        if not np.any(image < -1.0e-3):
+            raise ValueError(f"算法 {method} 输出没有可测动态范围")
+        images.append(image)
         titles.append(algorithm_label(config, method))
         image_names.append(method)
 
