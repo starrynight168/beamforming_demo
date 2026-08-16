@@ -9,13 +9,19 @@ import csv
 import hashlib
 import json
 import os
+import sys
+from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from evaluate import db_to_display, load_grids, read_phantom
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from evaluation.evaluate import db_to_display, load_grids, read_phantom
 
 COMPARISON_VALUE_12 = 12
 COMPARISON_VALUE_4 = 4
