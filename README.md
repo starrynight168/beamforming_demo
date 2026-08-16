@@ -88,15 +88,17 @@ pip install -r requirements.txt
    `data/PICMUS/database/` 等。
 
 3. **打包生成 H5 数据集**：
-   运行打包工具，该脚本会将原始格式数据标准化，包含 complex RMS 归一化、自描述元数据 `config_yaml` 嵌入及 `float16` 压缩存储以节省空间：
+   运行打包工具，该脚本会执行 complex RMS 归一化，嵌入自描述元数据 `config_yaml`，并以 `float16` 存储 IQ。源数据必须提供有限正数的采样频率、声速、载频（`fc`/`modulation_frequency`）以及阵元间距（`pitch`/均匀 `probe_geometry`）；缺失时直接报错，不使用推测默认值。`initial_time` 可以是标量或与发射角数量一致的向量：
    ```bash
    python data/pack_data.py
+   python data/pack_data.py --only simulation
    ```
 
 4. **进行数据完整性体检**：
-   验证打包文件是否无损、无 NaN/Inf，且数据结构满足 contract 规范：
+   验证必需字段、数据类型、形状、有限性、归一化尺度、路径元数据和 contract 一致性。`valid_time_samples` 必须是有效整数，其后的 IQ 必须保持零填充；`all_envdb_norm` 必须为有限的 `[N,1,H,W]` 且位于 `[0,1]`：
    ```bash
    python data/check_data.py
+   python data/check_data.py data/simulation.h5
    ```
 
 ---
