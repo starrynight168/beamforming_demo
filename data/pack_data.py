@@ -101,7 +101,9 @@ def complex_rms_normalization(i_data, q_data):
     i_data = np.asarray(i_data, dtype=np.float32)
     q_data = np.asarray(q_data, dtype=np.float32)
     if i_data.shape != q_data.shape or i_data.ndim != 3 or min(i_data.shape) < 1:
-        raise ValueError(f"输入 IQ 必须是形状一致的非空 [angle,channel,time]，实际 {i_data.shape}/{q_data.shape}")
+        raise ValueError(
+            f"输入 IQ 必须是形状一致的非空 [angle,channel,time]，实际 {i_data.shape}/{q_data.shape}"
+        )
     if not np.isfinite(i_data).all() or not np.isfinite(q_data).all():
         raise ValueError("输入 IQ 包含 NaN/Inf")
     signal_power = float(np.mean(i_data**2 + q_data**2))
@@ -117,7 +119,9 @@ def read_gt(gt_path):
         real = f[f"{BASE}/data/real"][:][-1].T
         imag = f[f"{BASE}/data/imag"][:][-1].T
     if real.shape != imag.shape or real.ndim != 2 or min(real.shape) < 1:
-        raise ValueError(f"GT real/imag 必须是形状一致的非空二维数组: {real.shape}/{imag.shape}")
+        raise ValueError(
+            f"GT real/imag 必须是形状一致的非空二维数组: {real.shape}/{imag.shape}"
+        )
     if not np.isfinite(real).all() or not np.isfinite(imag).all():
         raise ValueError("GT real/imag 包含 NaN/Inf")
     env_sq = real**2 + imag**2
@@ -157,12 +161,18 @@ def das_reference_from_iq(
         raise ValueError("DAS 输入的角度/通道不能为空，时间维至少为 2")
     if not np.isfinite(i_data).all() or not np.isfinite(q_data).all():
         raise ValueError("DAS 输入 IQ 包含 NaN/Inf")
-    if not all(np.isfinite(value) and value > 0 for value in (fs, c, fc, pitch, F_NUMBER)):
+    if not all(
+        np.isfinite(value) and value > 0 for value in (fs, c, fc, pitch, F_NUMBER)
+    ):
         raise ValueError("DAS 的 fs/c/fc/pitch/F_NUMBER 必须是有限正数")
     if angles.size != n_angles or not np.isfinite(angles).all():
         raise ValueError("DAS angles 必须匹配 IQ 角度维且全部有限")
     for name, grid in (("x_grid", x_grid), ("z_grid", z_grid)):
-        if grid.size < 2 or not np.isfinite(grid).all() or not np.all(np.diff(grid) > 0):
+        if (
+            grid.size < 2
+            or not np.isfinite(grid).all()
+            or not np.all(np.diff(grid) > 0)
+        ):
             raise ValueError(f"DAS {name} 必须是至少含两个点的有限严格递增数组")
     if interp not in {"nearest", "linear", "cubic"}:
         raise ValueError(f"不支持的 DAS 插值方式: {interp}")
@@ -210,7 +220,9 @@ def das_reference_from_iq(
             tx_z = transmit_z[z0:z1]
             tx_x = transmit_x[z0:z1]
 
-            receive_samples = torch.sqrt((x_b[..., None] - elements) ** 2 + z_b[..., None] ** 2) * sc
+            receive_samples = (
+                torch.sqrt((x_b[..., None] - elements) ** 2 + z_b[..., None] ** 2) * sc
+            )
             dx = x_b[..., None] - elements
             half_aperture = z_b[..., None] / (2.0 * F_NUMBER)
             aperture = (dx.abs() <= half_aperture).float()
@@ -251,13 +263,27 @@ def das_reference_from_iq(
                     idx_0 = torch.clamp(idx0, 0, n_times - 1)
                     idx_1 = torch.clamp(idx0 + 1, 0, n_times - 1)
                     idx_2 = torch.clamp(idx0 + 2, 0, n_times - 1)
-                    i_center = i_angle[idx_m1, ch] * c_m1 + i_angle[idx_0, ch] * c_0 + i_angle[idx_1, ch] * c_1 + i_angle[idx_2, ch] * c_2
-                    q_center = q_angle[idx_m1, ch] * c_m1 + q_angle[idx_0, ch] * c_0 + q_angle[idx_1, ch] * c_1 + q_angle[idx_2, ch] * c_2
+                    i_center = (
+                        i_angle[idx_m1, ch] * c_m1
+                        + i_angle[idx_0, ch] * c_0
+                        + i_angle[idx_1, ch] * c_1
+                        + i_angle[idx_2, ch] * c_2
+                    )
+                    q_center = (
+                        q_angle[idx_m1, ch] * c_m1
+                        + q_angle[idx_0, ch] * c_0
+                        + q_angle[idx_1, ch] * c_1
+                        + q_angle[idx_2, ch] * c_2
+                    )
                 else:
                     idx0 = sample.floor().long()
                     frac = sample - idx0.float()
-                    i_center = i_angle[idx0, ch] * (1.0 - frac) + i_angle[idx0 + 1, ch] * frac
-                    q_center = q_angle[idx0, ch] * (1.0 - frac) + q_angle[idx0 + 1, ch] * frac
+                    i_center = (
+                        i_angle[idx0, ch] * (1.0 - frac) + i_angle[idx0 + 1, ch] * frac
+                    )
+                    q_center = (
+                        q_angle[idx0, ch] * (1.0 - frac) + q_angle[idx0 + 1, ch] * frac
+                    )
 
                 valid_w = valid.float() * weights
                 valid_w = valid_w / (valid_w.sum(dim=-1, keepdim=True) + 1e-9)
@@ -293,7 +319,9 @@ def process_scene(scene, source_root, row_block=24):
     required_scene_keys = {"name", "mode", "source", "iq", "scan", "phantom", "gt"}
     present_scene_keys = set(scene) if isinstance(scene, dict) else set()
     if not required_scene_keys <= present_scene_keys:
-        raise ValueError(f"场景配置缺少字段: {sorted(required_scene_keys - present_scene_keys)}")
+        raise ValueError(
+            f"场景配置缺少字段: {sorted(required_scene_keys - present_scene_keys)}"
+        )
     for key in ("name", "mode", "source", "iq", "scan", "gt"):
         if not isinstance(scene[key], str) or not scene[key].strip():
             raise ValueError(f"场景字段 {key} 必须是非空字符串")
@@ -301,7 +329,11 @@ def process_scene(scene, source_root, row_block=24):
     source_root = Path(source_root)
     iq_path = source_root / scene["iq"]
     scan_path = source_root / scene["scan"]
-    gt_path = source_root / scene["gt"] if scene["gt"] and not scene["gt"].startswith("generated:") else None
+    gt_path = (
+        source_root / scene["gt"]
+        if scene["gt"] and not scene["gt"].startswith("generated:")
+        else None
+    )
 
     with h5py.File(iq_path, "r") as f:
         i_data = f[f"{BASE}/data/real"][:]
@@ -331,7 +363,9 @@ def process_scene(scene, source_root, row_block=24):
                 spacing.size == 0
                 or not np.isfinite(spacing).all()
                 or np.any(spacing == 0)
-                or not np.allclose(np.abs(spacing), np.median(np.abs(spacing)), rtol=1e-4, atol=1e-9)
+                or not np.allclose(
+                    np.abs(spacing), np.median(np.abs(spacing)), rtol=1e-4, atol=1e-9
+                )
             ):
                 raise ValueError("probe_geometry 不是均匀线阵，无法推导 pitch")
             pitch = float(np.median(np.abs(spacing)))
@@ -359,7 +393,11 @@ def process_scene(scene, source_root, row_block=24):
         x_grid = np.array(f[f"{BASE}/x_axis"]).flatten().astype(np.float32)
         z_grid = np.array(f[f"{BASE}/z_axis"]).flatten().astype(np.float32)
     for name, grid in (("x_grid", x_grid), ("z_grid", z_grid)):
-        if grid.size < 2 or not np.isfinite(grid).all() or not np.all(np.diff(grid) > 0):
+        if (
+            grid.size < 2
+            or not np.isfinite(grid).all()
+            or not np.all(np.diff(grid) > 0)
+        ):
             raise ValueError(f"{name} 必须是至少含两个点的有限严格递增数组")
 
     if scene["gt"] == "generated:multi_angle_das":
@@ -383,7 +421,11 @@ def process_scene(scene, source_root, row_block=24):
         raise ValueError(
             f"GT 形状必须为 [1,1,{z_grid.size},{x_grid.size}]，实际 {None if gt is None else gt.shape}",
         )
-    if not np.isfinite(gt).all() or float(np.min(gt)) < -1e-6 or float(np.max(gt)) > 1.0 + 1e-6:
+    if (
+        not np.isfinite(gt).all()
+        or float(np.min(gt)) < -1e-6
+        or float(np.max(gt)) > 1.0 + 1e-6
+    ):
         raise ValueError("GT 必须是位于 [0,1] 的有限数组")
 
     norm_ref = safe_max / (float(scale_ref) + 1e-12)
@@ -443,7 +485,9 @@ def compact_sequence_config(values):
         return {
             "encoding": "arithmetic_sequence",
             "start": int(array[0]) if integer_sequence else float(array[0]),
-            "step": int(round(differences[0])) if integer_sequence else float(differences[0]),
+            "step": int(round(differences[0]))
+            if integer_sequence
+            else float(differences[0]),
             "count": int(array.size),
             "dtype": str(array.dtype),
         }
@@ -452,8 +496,13 @@ def compact_sequence_config(values):
 
 def build_embedded_config(items, output_path, row_block):
     """Build embedded config."""
-    has_official_gt = any(item["meta"]["gt"] and not item["meta"]["gt"].startswith("generated:") for item in items)
-    has_generated_gt = any(item["meta"]["gt"] == "generated:multi_angle_das" for item in items)
+    has_official_gt = any(
+        item["meta"]["gt"] and not item["meta"]["gt"].startswith("generated:")
+        for item in items
+    )
+    has_generated_gt = any(
+        item["meta"]["gt"] == "generated:multi_angle_das" for item in items
+    )
     ground_truth = {
         "dataset": "/all_envdb_norm",
         "reference_sampling_frequency_hz": float(items[0]["fs"]),
@@ -553,18 +602,18 @@ def build_embedded_config(items, output_path, row_block):
                 "selected_angle_indices": compact_sequence_config(
                     np.arange(len(items[0]["angles"]), dtype=np.int64),
                 ),
-            "normalization": {
-                "mode": "complex_rms",
-                "formula": "sqrt(mean(I^2 + Q^2) + epsilon)",
-                "epsilon": 1.0e-12,
-                "scale_reference_dataset": "/all_scale_ref",
-            },
-            # PICMUS 的输入本身就是基带 IQ；没有在打包阶段执行抽取。
-            # 采样率相关元数据统一放在 config_yaml，避免遗留 gt_fs 等
-            # 根字段造成“GT 采样率/输入采样率”语义混淆。
-            "decimation_factor": 1,
-            "source_sampling_frequency_hz": float(items[0]["fs"]),
-            "packed_sampling_frequency_hz": float(items[0]["fs"]),
+                "normalization": {
+                    "mode": "complex_rms",
+                    "formula": "sqrt(mean(I^2 + Q^2) + epsilon)",
+                    "epsilon": 1.0e-12,
+                    "scale_reference_dataset": "/all_scale_ref",
+                },
+                # PICMUS 的输入本身就是基带 IQ；没有在打包阶段执行抽取。
+                # 采样率相关元数据统一放在 config_yaml，避免遗留 gt_fs 等
+                # 根字段造成“GT 采样率/输入采样率”语义混淆。
+                "decimation_factor": 1,
+                "source_sampling_frequency_hz": float(items[0]["fs"]),
+                "packed_sampling_frequency_hz": float(items[0]["fs"]),
             },
             "ground_truth": ground_truth,
         },
@@ -672,8 +721,21 @@ def validate_shared_metadata(items):
         raise ValueError("至少需要一个待打包样本")
     base = items[0]
     required_keys = {
-        "I", "Q", "gt", "t0", "fs", "c", "fc", "pitch", "num_channels",
-        "z_grid", "x_grid", "angles", "scale_ref", "norm_ref", "meta",
+        "I",
+        "Q",
+        "gt",
+        "t0",
+        "fs",
+        "c",
+        "fc",
+        "pitch",
+        "num_channels",
+        "z_grid",
+        "x_grid",
+        "angles",
+        "scale_ref",
+        "norm_ref",
+        "meta",
     }
     for index, item in enumerate(items):
         missing = required_keys - set(item)
@@ -691,17 +753,30 @@ def validate_shared_metadata(items):
             or not np.isfinite(q_data).all()
         ):
             raise ValueError(f"样本 {index} 的 IQ 必须是有限非空 [1,A,T,C] 且 T>=2")
-        if np.asarray(item["t0"]).shape != i_data.shape[:2] or not np.isfinite(item["t0"]).all():
+        if (
+            np.asarray(item["t0"]).shape != i_data.shape[:2]
+            or not np.isfinite(item["t0"]).all()
+        ):
             raise ValueError(f"样本 {index} 的 t0 必须是匹配 IQ 的有限 [1,A]")
         angles = np.asarray(item["angles"])
         if angles.shape != (i_data.shape[1],) or not np.isfinite(angles).all():
             raise ValueError(f"样本 {index} 的 angles 数量与 IQ 不一致")
-        if int(item["num_channels"]) != item["num_channels"] or int(item["num_channels"]) != i_data.shape[3]:
+        if (
+            int(item["num_channels"]) != item["num_channels"]
+            or int(item["num_channels"]) != i_data.shape[3]
+        ):
             raise ValueError(f"样本 {index} 的 num_channels 与 IQ 不一致")
         for grid_name in ("z_grid", "x_grid"):
             grid = np.asarray(item[grid_name])
-            if grid.ndim != 1 or grid.size < 2 or not np.isfinite(grid).all() or not np.all(np.diff(grid) > 0):
-                raise ValueError(f"样本 {index} 的 {grid_name} 必须是有限严格递增一维数组")
+            if (
+                grid.ndim != 1
+                or grid.size < 2
+                or not np.isfinite(grid).all()
+                or not np.all(np.diff(grid) > 0)
+            ):
+                raise ValueError(
+                    f"样本 {index} 的 {grid_name} 必须是有限严格递增一维数组"
+                )
         gt = np.asarray(item["gt"])
         expected_gt_shape = (1, 1, len(item["z_grid"]), len(item["x_grid"]))
         if gt.shape != expected_gt_shape or not np.isfinite(gt).all():
@@ -713,8 +788,12 @@ def validate_shared_metadata(items):
         if not all(
             np.isfinite(value) and value > 0
             for value in (
-                item["fs"], item["c"], item["fc"], item["pitch"],
-                item["scale_ref"], item["norm_ref"],
+                item["fs"],
+                item["c"],
+                item["fc"],
+                item["pitch"],
+                item["scale_ref"],
+                item["norm_ref"],
             )
         ):
             raise ValueError(f"样本 {index} 的物理参数或归一化参考必须是有限正数")
@@ -755,6 +834,8 @@ def pack_dataset(
 ):
     """Execute pack dataset."""
     output_path = Path(output_path)
+    if output_path.exists():
+        raise FileExistsError(f"输出文件已存在，请先移除或更换路径: {output_path}")
     items = [process_scene(scene, source_root, row_block=row_block) for scene in scenes]
     validate_shared_metadata(items)
     base = items[0]
@@ -770,7 +851,14 @@ def pack_dataset(
     if not np.isfinite(packed_gt).all():
         raise OverflowError("GT 转换为 float16 后产生 NaN/Inf")
 
-    with h5py.File(output_path, "w") as hf:
+    try:
+        output_file = h5py.File(output_path, "x")
+    except FileExistsError as exc:
+        raise FileExistsError(
+            f"输出文件已存在，请先移除或更换路径: {output_path}"
+        ) from exc
+
+    with output_file as hf:
         hf.create_dataset(
             "all_multi_I",
             data=packed_i,
@@ -830,7 +918,9 @@ def pack_dataset(
         for meta_key, dtype in scalar_dtypes.items():
             hf.create_dataset(meta_key, data=dtype(base[meta_key]))
         for meta_key in ("z_grid", "x_grid", "angles"):
-            hf.create_dataset(meta_key, data=np.asarray(base[meta_key], dtype=np.float32))
+            hf.create_dataset(
+                meta_key, data=np.asarray(base[meta_key], dtype=np.float32)
+            )
 
         string_dtype = h5py.string_dtype(encoding="utf-8")
         config_yaml = yaml.safe_dump(
@@ -876,7 +966,9 @@ def main():
     args = parse_args()
     source_root = Path(args.source_root)
     out_dir = Path(args.out_dir)
-    choices = ["simulation", "experiments", "in_vivo"] if args.only == "all" else [args.only]
+    choices = (
+        ["simulation", "experiments", "in_vivo"] if args.only == "all" else [args.only]
+    )
     scene_map = {
         "simulation": (SIMULATION_SCENES, out_dir / "simulation.h5"),
         "experiments": (EXPERIMENT_SCENES, out_dir / "experiments.h5"),

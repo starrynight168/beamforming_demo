@@ -28,10 +28,9 @@ COMPARISON_VALUE_8 = 8
 COMPARISON_VALUE_9 = 9
 
 try:
-    from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+    from skimage.metrics import peak_signal_noise_ratio
 except Exception:
     peak_signal_noise_ratio = None
-    structural_similarity = None
 
 
 DEFAULT_METHODS = ["DAS", "MV", "ESBMV", "F-DMAS"]
@@ -86,8 +85,6 @@ def parse_args():
         default="auto",
         help="Phantom source; auto uses experiments for validation H5 files and simulation otherwise.",
     )
-    parser.add_argument("--roi_ring_inner_mm", type=float, default=3.5)
-    parser.add_argument("--roi_ring_outer_mm", type=float, default=5.5)
     parser.add_argument("--auto_roi_radius_mm", type=float, default=2.0)
     parser.add_argument("--auto_target_count", type=int, default=20)
     parser.add_argument("--auto_target_min_distance_mm", type=float, default=3.0)
@@ -960,8 +957,6 @@ def main():
     args = parse_args()
     positive_args = {
         "dr": args.dr,
-        "roi_ring_inner_mm": args.roi_ring_inner_mm,
-        "roi_ring_outer_mm": args.roi_ring_outer_mm,
         "auto_roi_radius_mm": args.auto_roi_radius_mm,
         "auto_target_min_distance_mm": args.auto_target_min_distance_mm,
         "fwhm_window_mm": args.fwhm_window_mm,
@@ -969,8 +964,6 @@ def main():
     invalid = [name for name, value in positive_args.items() if not math.isfinite(value) or value <= 0]
     if invalid:
         raise ValueError(f"参数必须是有限正数: {', '.join(invalid)}")
-    if args.roi_ring_outer_mm <= args.roi_ring_inner_mm:
-        raise ValueError("roi_ring_outer_mm 必须大于 roi_ring_inner_mm")
     if args.auto_target_count < 1:
         raise ValueError("auto_target_count 必须大于等于 1")
     comparison_path = resolve(args.comparison_npy)
@@ -999,6 +992,7 @@ def main():
     if not np.all(np.isfinite(comparison)):
         bad_count = int(comparison.size - np.count_nonzero(np.isfinite(comparison)))
         raise ValueError(f"comparison 包含 {bad_count} 个 NaN/Inf,拒绝生成无效指标")
+    comparison = np.clip(comparison, -args.dr, 0.0)
     methods = load_method_names(args, comparison_path, comparison.shape[0], has_gt)
 
     mode = infer_mode(args, comparison, meta_from_h5)
@@ -1077,13 +1071,7 @@ def main():
                 )
             else:
                 row["PSNR_dB_vs_GT"] = psnr(display, gt_display, data_range=1.0)
-            row["MAE_dB_vs_GT"] = float(
-                np.mean(
-                    np.abs(
-                        np.clip(db_img, -args.dr, 0.0) - np.clip(gt_db, -args.dr, 0.0),
-                    ),
-                ),
-            )
+            row["MAE_dB_vs_GT"] = float(np.mean(np.abs(db_img - gt_db)))
         else:
             row["SSIM_dB_vs_GT"] = np.nan
             row["SSIM_envelope_vs_GT"] = np.nan

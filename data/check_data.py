@@ -166,7 +166,7 @@ def dataset_storage_bytes(ds: h5py.Dataset) -> int:
     """Execute dataset storage bytes."""
     try:
         return int(ds.id.get_storage_size())
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return 0
 
 
@@ -201,12 +201,14 @@ def print_table(rows, headers) -> None:
         for idx, cell in enumerate(row):
             widths[idx] = max(widths[idx], display_width(cell))
     print(
-        "  " + "  ".join(pad_display(cell, widths[idx]) for idx, cell in enumerate(headers)),
+        "  "
+        + "  ".join(pad_display(cell, widths[idx]) for idx, cell in enumerate(headers)),
     )
     print("  " + "  ".join("-" * width for width in widths))
     for row in rows:
         print(
-            "  " + "  ".join(pad_display(cell, widths[idx]) for idx, cell in enumerate(row)),
+            "  "
+            + "  ".join(pad_display(cell, widths[idx]) for idx, cell in enumerate(row)),
         )
 
 
@@ -216,7 +218,7 @@ def scalar_float(hf: h5py.File, key: str) -> float | None:
         return None
     try:
         return float(decode_value(hf[key][()]))
-    except Exception:
+    except (OverflowError, TypeError, ValueError):
         return None
 
 
@@ -232,7 +234,12 @@ def decode_compact_sequence(value) -> np.ndarray:
         raise ValueError("count 必须是正整数")
     start = np.asarray(value["start"])
     step = np.asarray(value["step"])
-    if start.shape != () or step.shape != () or not np.isfinite(start) or not np.isfinite(step):
+    if (
+        start.shape != ()
+        or step.shape != ()
+        or not np.isfinite(start)
+        or not np.isfinite(step)
+    ):
         raise ValueError("start/step 必须是有限标量")
     return start + np.arange(count) * step
 
@@ -306,15 +313,31 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
     if not isinstance(ground_truth, dict) or not ground_truth:
         problems.append("config_yaml.generation.ground_truth 必须是非空字典")
         ground_truth = {}
-    if isinstance(ground_truth, dict) and ground_truth.get("dataset") != "/all_envdb_norm":
+    if (
+        isinstance(ground_truth, dict)
+        and ground_truth.get("dataset") != "/all_envdb_norm"
+    ):
         problems.append(
             "config_yaml.generation.ground_truth.dataset 应指向 /all_envdb_norm",
         )
-    reference_fs = ground_truth.get("reference_sampling_frequency_hz") if isinstance(ground_truth, dict) else None
-    if not isinstance(reference_fs, (int, float)) or not np.isfinite(reference_fs) or reference_fs <= 0:
+    reference_fs = (
+        ground_truth.get("reference_sampling_frequency_hz")
+        if isinstance(ground_truth, dict)
+        else None
+    )
+    if (
+        not isinstance(reference_fs, (int, float))
+        or not np.isfinite(reference_fs)
+        or reference_fs <= 0
+    ):
         problems.append("ground_truth.reference_sampling_frequency_hz 必须是有限正数")
-    input_norm = (input_iq.get("normalization", {}) or {}) if isinstance(input_iq, dict) else {}
-    if not isinstance(input_norm, dict) or input_norm.get("scale_reference_dataset") != "/all_scale_ref":
+    input_norm = (
+        (input_iq.get("normalization", {}) or {}) if isinstance(input_iq, dict) else {}
+    )
+    if (
+        not isinstance(input_norm, dict)
+        or input_norm.get("scale_reference_dataset") != "/all_scale_ref"
+    ):
         problems.append(
             "input_iq.normalization.scale_reference_dataset 应指向 /all_scale_ref",
         )
@@ -331,25 +354,50 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
         except (TypeError, ValueError):
             problems.append("input_iq 的 source/packed sampling frequency 必须是数值")
         else:
-            if not all(np.isfinite(value) and value > 0 for value in (source_fs_value, packed_fs_value)):
-                problems.append("input_iq 的 source/packed sampling frequency 必须是有限正数")
-            elif not np.isclose(source_fs_value / decimation, packed_fs_value, rtol=1e-5, atol=1.0):
-                problems.append("input_iq source_sampling_frequency_hz/decimation_factor 与 packed fs 不一致")
-            elif root_fs is None or not np.isclose(packed_fs_value, root_fs, rtol=1e-5, atol=1.0):
-                problems.append("input_iq.packed_sampling_frequency_hz 与根数据集 fs 不一致")
+            if not all(
+                np.isfinite(value) and value > 0
+                for value in (source_fs_value, packed_fs_value)
+            ):
+                problems.append(
+                    "input_iq 的 source/packed sampling frequency 必须是有限正数"
+                )
+            elif not np.isclose(
+                source_fs_value / decimation, packed_fs_value, rtol=1e-5, atol=1.0
+            ):
+                problems.append(
+                    "input_iq source_sampling_frequency_hz/decimation_factor 与 packed fs 不一致"
+                )
+            elif root_fs is None or not np.isclose(
+                packed_fs_value, root_fs, rtol=1e-5, atol=1.0
+            ):
+                problems.append(
+                    "input_iq.packed_sampling_frequency_hz 与根数据集 fs 不一致"
+                )
             elif isinstance(reference_fs, (int, float)) and not np.isclose(
                 float(reference_fs), source_fs_value, rtol=1e-5, atol=1.0
             ):
-                problems.append("ground_truth.reference_sampling_frequency_hz 应与 input_iq.source_sampling_frequency_hz 一致")
+                problems.append(
+                    "ground_truth.reference_sampling_frequency_hz 应与 input_iq.source_sampling_frequency_hz 一致"
+                )
     try:
-        all_angles = decode_compact_sequence(input_iq.get("all_steering_angles_rad", [])).astype(np.float64)
-        selected_raw = decode_compact_sequence(input_iq.get("selected_angle_indices", [])).astype(np.float64)
+        all_angles = decode_compact_sequence(
+            input_iq.get("all_steering_angles_rad", [])
+        ).astype(np.float64)
+        selected_raw = decode_compact_sequence(
+            input_iq.get("selected_angle_indices", [])
+        ).astype(np.float64)
     except (KeyError, TypeError, ValueError) as exc:
         problems.append(f"config_yaml 输入角度编码非法: {exc}")
     else:
-        angles_valid = all_angles.ndim == 1 and all_angles.size > 0 and np.isfinite(all_angles).all()
+        angles_valid = (
+            all_angles.ndim == 1
+            and all_angles.size > 0
+            and np.isfinite(all_angles).all()
+        )
         if not angles_valid:
-            problems.append("config_yaml all_steering_angles_rad 必须是非空有限一维数组")
+            problems.append(
+                "config_yaml all_steering_angles_rad 必须是非空有限一维数组"
+            )
         indices_valid = not (
             selected_raw.ndim != 1
             or selected_raw.size == 0
@@ -365,22 +413,38 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
                 problems.append("config_yaml selected_angle_indices 不能重复")
         if input_iq.get("input_angle_selection") != "all_available":
             problems.append("config_yaml input_angle_selection 应为 all_available")
-        if angles_valid and indices_valid and np.any(
-            (selected_indices < 0) | (selected_indices >= len(all_angles)),
+        if (
+            angles_valid
+            and indices_valid
+            and np.any(
+                (selected_indices < 0) | (selected_indices >= len(all_angles)),
+            )
         ):
             problems.append("config_yaml selected_angle_indices 越界")
-        elif angles_valid and indices_valid and "angles" in hf and (
-            selected_indices.shape != hf["angles"].shape
-            or not np.allclose(
-                all_angles[selected_indices],
-                hf["angles"][:],
-                rtol=1e-5,
-                atol=1e-6,
+        elif (
+            angles_valid
+            and indices_valid
+            and "angles" in hf
+            and (
+                selected_indices.shape != hf["angles"].shape
+                or not np.allclose(
+                    all_angles[selected_indices],
+                    hf["angles"][:],
+                    rtol=1e-5,
+                    atol=1e-6,
+                )
             )
         ):
             problems.append("config_yaml 输入角度记录与根数据集 angles 不一致")
-    gt_norm = (ground_truth.get("normalization", {}) or {}) if isinstance(ground_truth, dict) else {}
-    if not isinstance(gt_norm, dict) or gt_norm.get("norm_reference_dataset") != "/all_norm_ref":
+    gt_norm = (
+        (ground_truth.get("normalization", {}) or {})
+        if isinstance(ground_truth, dict)
+        else {}
+    )
+    if (
+        not isinstance(gt_norm, dict)
+        or gt_norm.get("norm_reference_dataset") != "/all_norm_ref"
+    ):
         problems.append(
             "ground_truth.normalization.norm_reference_dataset 应指向 /all_norm_ref",
         )
@@ -400,7 +464,8 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
         )
 
     invalid_datasets = [
-        key for key in REQUIRED_FIELDS
+        key
+        for key in REQUIRED_FIELDS
         if key in hf and not isinstance(hf[key], h5py.Dataset)
     ]
     problems.extend(f"{key} 必须是 dataset" for key in invalid_datasets)
@@ -410,11 +475,19 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
     iq_shape = None
     if "all_multi_I" in hf and isinstance(hf["all_multi_I"], h5py.Dataset):
         iq_shape = hf["all_multi_I"].shape
-        if len(iq_shape) != 4 or min(iq_shape[0], iq_shape[1], iq_shape[3]) < 1 or iq_shape[2] < 2:
+        if (
+            len(iq_shape) != 4
+            or min(iq_shape[0], iq_shape[1], iq_shape[3]) < 1
+            or iq_shape[2] < 2
+        ):
             problems.append(f"all_multi_I 应为非空 [N,A,T,C] 且 T>=2，实际 {iq_shape}")
             iq_shape = None
 
-    if "all_multi_I" in hf and "all_multi_Q" in hf and hf["all_multi_I"].shape != hf["all_multi_Q"].shape:
+    if (
+        "all_multi_I" in hf
+        and "all_multi_Q" in hf
+        and hf["all_multi_I"].shape != hf["all_multi_Q"].shape
+    ):
         problems.append("all_multi_I / all_multi_Q 形状不一致")
 
     for key in ("all_multi_I", "all_multi_Q", "all_envdb_norm"):
@@ -427,7 +500,9 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
             if hf[key].dtype != np.float32:
                 problems.append(f"{key} 类型应为 float32，实际为 {hf[key].dtype}")
     if "num_channels" in hf and hf["num_channels"].dtype != np.int32:
-        problems.append(f"num_channels 类型应为 int32，实际为 {hf['num_channels'].dtype}")
+        problems.append(
+            f"num_channels 类型应为 int32，实际为 {hf['num_channels'].dtype}"
+        )
     if "num_channels" in hf and hf["num_channels"].shape != ():
         problems.append("num_channels 必须是标量 dataset")
     for key in ("all_scale_ref", "all_norm_ref"):
@@ -447,7 +522,11 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
             problems.append(f"all_envdb_norm 应为 [N,1,H,W]，实际 {gt_shape}")
         elif iq_shape is not None and gt_shape[0] != iq_shape[0]:
             problems.append("输入 IQ 与 GT 帧数不一致")
-        elif "z_grid" in hf and "x_grid" in hf and gt_shape[2:] != (hf["z_grid"].size, hf["x_grid"].size):
+        elif (
+            "z_grid" in hf
+            and "x_grid" in hf
+            and gt_shape[2:] != (hf["z_grid"].size, hf["x_grid"].size)
+        ):
             problems.append("GT 空间形状必须匹配 z_grid/x_grid")
 
     if iq_shape is not None and "time_start_vector" in hf:
@@ -457,7 +536,11 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
 
     if iq_shape is not None and "angles" in hf:
         angles = np.asarray(hf["angles"][:])
-        if angles.ndim != 1 or angles.size != iq_shape[1] or not np.isfinite(angles).all():
+        if (
+            angles.ndim != 1
+            or angles.size != iq_shape[1]
+            or not np.isfinite(angles).all()
+        ):
             problems.append("angles 必须是匹配输入角度维的有限一维数组")
 
     if iq_shape is not None and "num_channels" in hf:
@@ -471,7 +554,11 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
         valid_ds = hf["valid_time_samples"]
         valid = np.asarray(valid_ds[:], dtype=np.int64).reshape(-1)
         n_samples, _, n_time, _ = iq_shape
-        if valid_ds.ndim != 1 or valid_ds.dtype.kind not in "iu" or len(valid) != n_samples:
+        if (
+            valid_ds.ndim != 1
+            or valid_ds.dtype.kind not in "iu"
+            or len(valid) != n_samples
+        ):
             problems.append(
                 f"valid_time_samples 必须是长度 {n_samples} 的一维整数数组",
             )
@@ -517,8 +604,15 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
     if "all_envdb_norm" in hf and hf["all_envdb_norm"].shape:
         gt_min = float(np.min(hf["all_envdb_norm"][:]))
         gt_max = float(np.max(hf["all_envdb_norm"][:]))
-        if not np.isfinite(gt_min) or not np.isfinite(gt_max) or gt_min < -1e-3 or gt_max > 1.0 + 1e-3:
-            problems.append(f"all_envdb_norm 必须位于 [0,1]，实际范围 [{gt_min:g},{gt_max:g}]")
+        if (
+            not np.isfinite(gt_min)
+            or not np.isfinite(gt_max)
+            or gt_min < -1e-3
+            or gt_max > 1.0 + 1e-3
+        ):
+            problems.append(
+                f"all_envdb_norm 必须位于 [0,1]，实际范围 [{gt_min:g},{gt_max:g}]"
+            )
 
     if "config_yaml" in hf:
         value = decode_value(hf["config_yaml"][()])
@@ -574,8 +668,14 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
                                 continue
                             path = str(sample[key] or "")
                             if key in {"iq_path", "scan_path", "gt_path"} and not path:
-                                problems.append(f"source_samples[{index}].{key} 不能为空")
-                            if key.endswith("_path") and path and Path(path).is_absolute():
+                                problems.append(
+                                    f"source_samples[{index}].{key} 不能为空"
+                                )
+                            if (
+                                key.endswith("_path")
+                                and path
+                                and Path(path).is_absolute()
+                            ):
                                 problems.append(
                                     f"source_samples[{index}].{key} 必须是相对路径",
                                 )
@@ -585,7 +685,9 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
                             "phantom_path": "reference_only_not_read",
                             "gt_path": (
                                 "generated_not_read"
-                                if str(sample.get("gt_path") or "").startswith("generated:")
+                                if str(sample.get("gt_path") or "").startswith(
+                                    "generated:"
+                                )
                                 else "read_input"
                             ),
                         }
@@ -629,8 +731,14 @@ def inspect_file(path: Path) -> bool:
             status, problems = run_checks(hf)
             file_size = path.stat().st_size / 1024**2
             n_frames = hf["all_multi_I"].shape[0] if "all_multi_I" in hf else "?"
-            input_shape = format_shape(hf["all_multi_I"].shape) if "all_multi_I" in hf else "缺失"
-            gt_shape = format_shape(hf["all_envdb_norm"].shape) if "all_envdb_norm" in hf else "无"
+            input_shape = (
+                format_shape(hf["all_multi_I"].shape) if "all_multi_I" in hf else "缺失"
+            )
+            gt_shape = (
+                format_shape(hf["all_envdb_norm"].shape)
+                if "all_envdb_norm" in hf
+                else "无"
+            )
             fs = scalar_float(hf, "fs")
             gt_reference_fs = None
             decimation = None
@@ -641,8 +749,10 @@ def inspect_file(path: Path) -> bool:
                     gt_reference_fs = (generation.get("ground_truth", {}) or {}).get(
                         "reference_sampling_frequency_hz"
                     )
-                    decimation = (generation.get("input_iq", {}) or {}).get("decimation_factor")
-                except yaml.YAMLError:
+                    decimation = (generation.get("input_iq", {}) or {}).get(
+                        "decimation_factor"
+                    )
+                except (AttributeError, TypeError, yaml.YAMLError):
                     pass
 
             summary_rows = [
@@ -652,7 +762,12 @@ def inspect_file(path: Path) -> bool:
                 ("输入 IQ", input_shape),
                 ("主 GT", gt_shape),
                 ("输入采样率", f"{fs / 1e6:.6g} MHz" if fs else "缺失"),
-                ("GT 参考采样率", f"{float(gt_reference_fs) / 1e6:.6g} MHz" if gt_reference_fs else "缺失"),
+                (
+                    "GT 参考采样率",
+                    f"{float(gt_reference_fs) / 1e6:.6g} MHz"
+                    if gt_reference_fs
+                    else "缺失",
+                ),
                 ("降采样倍数", int(decimation) if decimation else "缺失"),
                 ("全部字段数", len(hf.keys())),
             ]

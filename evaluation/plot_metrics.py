@@ -100,8 +100,8 @@ def read_rows(path):
     for row in rows:
         converted = {}
         for key, value in row.items():
-            if value is None:
-                converted[key] = value
+            if value is None or value.strip() == "":
+                converted[key] = np.nan
                 continue
             try:
                 converted[key] = float(value)
@@ -109,6 +109,15 @@ def read_rows(path):
                 converted[key] = value
         out.append(converted)
     return out
+
+
+def finite_value(value):
+    """Return a finite metric value or NaN."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return np.nan
+    return value if np.isfinite(value) else np.nan
 
 
 def metric_precision(title, key):
@@ -128,7 +137,8 @@ def metric_precision(title, key):
 
 def padded_axis_limits(values, include_zero=True, pad_fraction=0.20):
     """Execute padded axis limits."""
-    finite = np.asarray([v for v in values if np.isfinite(v)], dtype=np.float64)
+    finite = np.asarray([finite_value(v) for v in values], dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
     if finite.size == 0:
         return None
     vmin = float(np.min(finite))
@@ -220,7 +230,7 @@ def save_bar_plot(path, metrics_to_plot):
         apply_value_padding(ax, vals, horizontal=use_horizontal)
 
         for bar in bars:
-            value = bar.get_width() if use_horizontal else bar.get_height()
+            value = finite_value(bar.get_width() if use_horizontal else bar.get_height())
             if np.isfinite(value):
                 label = f"{value:.{metric_precision(title, key)}f}"
                 if use_horizontal:
@@ -264,7 +274,11 @@ def save_group_metric_plot(path, group_rows, metric_keys, title_prefix):
             groups.append(row["group"])
         if row["method"] not in methods:
             methods.append(row["method"])
-    available_metrics = [(key, title) for key, title in metric_keys if any(np.isfinite(row.get(key, np.nan)) for row in group_rows)]
+    available_metrics = [
+        (key, title)
+        for key, title in metric_keys
+        if any(np.isfinite(finite_value(row.get(key, np.nan))) for row in group_rows)
+    ]
     if not available_metrics:
         return
 
@@ -297,7 +311,7 @@ def save_group_metric_plot(path, group_rows, metric_keys, title_prefix):
                     (r for r in group_rows if r["method"] == method and r["group"] == group),
                     None,
                 )
-                values.append(row.get(key, np.nan) if row else np.nan)
+                values.append(finite_value(row.get(key, np.nan)) if row else np.nan)
             all_values.extend(values)
             bars = ax.bar(
                 x + offsets[method_idx],
@@ -309,7 +323,7 @@ def save_group_metric_plot(path, group_rows, metric_keys, title_prefix):
                 linewidth=0.5,
             )
             for bar, value in zip(bars, values, strict=True):
-                if show_value_labels and np.isfinite(value):
+                if show_value_labels and np.isfinite(finite_value(value)):
                     ax.annotate(
                         f"{value:.{metric_precision(title, key)}f}",
                         xy=(bar.get_x() + bar.get_width() / 2.0, value),
@@ -373,9 +387,9 @@ def build_metric_plots(rows):
         ("ISLR (dB)", "islr_db"),
         ("Distortion Pass Rate", "distortion_pass_rate"),
     ]:
-        if any(np.isfinite(r.get(key, np.nan)) for r in rows):
+        if any(np.isfinite(finite_value(r.get(key, np.nan))) for r in rows):
             standard.append(
-                (title, key, [r.get(key, np.nan) for r in rows], methods_all),
+                (title, key, [finite_value(r.get(key, np.nan)) for r in rows], methods_all),
             )
 
     auxiliary = []
@@ -386,9 +400,9 @@ def build_metric_plots(rows):
         ("PSNR vs GT (dB)", "PSNR_dB_vs_GT"),
         ("MAE vs GT (dB)", "MAE_dB_vs_GT"),
     ]:
-        if any(np.isfinite(r.get(key, np.nan)) for r in non_gt):
+        if any(np.isfinite(finite_value(r.get(key, np.nan))) for r in non_gt):
             auxiliary.append(
-                (title, key, [r.get(key, np.nan) for r in non_gt], aux_methods),
+                (title, key, [finite_value(r.get(key, np.nan)) for r in non_gt], aux_methods),
             )
     return standard, auxiliary
 
@@ -576,7 +590,7 @@ def save_lateral_profile_plot(
         )
         ax.set_xlabel("Lateral coordinate (mm)")
         ax.set_ylabel("Amplitude relative to local target peak (dB)")
-        ax.set_ylim(-dr, 2)
+        ax.set_ylim(-dr, 0)
         ax.grid(True, linestyle="--", alpha=0.5)
         ax.legend(loc="lower right", fontsize=9)
         fig.tight_layout()
@@ -646,6 +660,7 @@ def main():
         if (
             comparison.ndim != 3
             or not np.isfinite(comparison).all()
+            or comparison.shape[1:] != (len(z_mm), len(x_mm))
             or len(methods) != comparison.shape[0]
             or any(not isinstance(method, str) or not method for method in methods)
             or len(methods) != len(set(methods))
@@ -653,6 +668,7 @@ def main():
             raise ValueError(
                 f"comparison 数值/形状或 methods 非法: shape={comparison.shape}, methods={methods}"
             )
+        comparison = np.clip(comparison, -dr, 0.0)
         phantom = (
             read_phantom(phantom_path)
             if phantom_path and phantom_path != "none"

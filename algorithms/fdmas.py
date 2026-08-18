@@ -40,15 +40,15 @@ parser.add_argument(
     default=24,
     help="GPU按深度方向分块行数;<=0 表示整幅一次计算",
 )
-args = parser.parse_args()
+args = None
 
 METHOD_NAME = "fdmas"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
 
-H5_PATH = resolve_project_path(args.h5_path, PROJECT_ROOT)
-OUTPUT_DIR = os.path.join(args.output_dir, METHOD_NAME)
+H5_PATH = None
+OUTPUT_DIR = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -360,6 +360,10 @@ def save_figure(db_img, extent_mm, out_path, title_str, dr=60.0):
 # ================= 主程序 =================
 def main():
     """Run the command-line workflow."""
+    global args, H5_PATH, OUTPUT_DIR
+    args = parser.parse_args()
+    H5_PATH = resolve_project_path(args.h5_path, PROJECT_ROOT)
+    OUTPUT_DIR = os.path.join(args.output_dir, METHOD_NAME)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     (

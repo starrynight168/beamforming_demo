@@ -68,14 +68,6 @@ def load_from_h5(h5_path, sample_idx):
     return data, gt
 
 
-def normalize_to_db(envelope, eps=1e-24):
-    """Execute normalize to db."""
-    envelope = np.asarray(envelope, dtype=np.float64)
-    power = envelope**2
-    power /= np.max(power) + eps
-    return (10.0 * np.log10(power + eps)).astype(np.float32)
-
-
 def beamform(data, args):
     """Implement your algorithm here.
 

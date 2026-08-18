@@ -1,7 +1,6 @@
 """Provide Python utilities for cmsaw."""
 
 import argparse
-import importlib
 import json
 import os
 import subprocess
@@ -102,7 +101,7 @@ parser.add_argument(
 )
 
 add_io_arguments(parser, save_gt_help="保存GT对比图")
-args = parser.parse_args()
+args = None
 
 METHOD_NAME = "cmsaw"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -110,9 +109,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
 
-H5_PATH = resolve_project_path(args.h5_path, PROJECT_ROOT)
-BASE_OUTPUT_DIR = args.output_dir
-OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, METHOD_NAME)
+H5_PATH = None
+BASE_OUTPUT_DIR = None
+OUTPUT_DIR = None
 
 
 def print_physical_summary(
@@ -534,12 +533,9 @@ class CMSAWBeamformerIQ:
         self.clip_percentile = float(clip_percentile)
         self.depth_smooth_rows = int(depth_smooth_rows)
 
-        old_argv = sys.argv[:]
-        try:
-            sys.argv = ["mv.py"]
-            self.mv_module = importlib.import_module("mv")
-        finally:
-            sys.argv = old_argv
+        import mv as mv_module
+
+        self.mv_module = mv_module
         self.mv_module.args = args
         self.mv_bf = self.mv_module.RowDynamicMVBeamformerIQ(
             self.z_grid,
@@ -716,8 +712,14 @@ def save_figure(db_img, extent_mm, out_path, title_str, dr=60.0):
 
 # ================= 主程序 =================
 def main():
-    # 参数验证
     """Run the command-line workflow."""
+    global args, H5_PATH, BASE_OUTPUT_DIR, OUTPUT_DIR
+    args = parser.parse_args()
+    H5_PATH = resolve_project_path(args.h5_path, PROJECT_ROOT)
+    BASE_OUTPUT_DIR = args.output_dir
+    OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, METHOD_NAME)
+
+    # 参数验证
     if not 0 < args.lmax_ratio <= COMPARISON_VALUE_0_5 or args.min_subarray_len < COMPARISON_VALUE_2:
         raise ValueError("Require lmax_ratio in (0, 0.5] and min_subarray_len >= 2")
     if not 0 <= args.delta_max <= 1 or not 0 < args.gamma <= 1 or not 0 < args.clip_percentile <= COMPARISON_VALUE_100:

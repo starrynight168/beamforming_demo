@@ -103,11 +103,6 @@ def dynamic_aperture_channel_count(
     return min(max(int(depth / (f_number * pitch)) + 1, 1), n_channels)
 
 
-def apply_tgc_image(env, z_grid, fc, tgc_alpha):
-    """Execute apply tgc image."""
-    return env * tgc_gain(z_grid, fc, tgc_alpha)[:, None]
-
-
 def tgc_gain(z_grid, fc, tgc_alpha):
     """Execute tgc gain."""
     return 10 ** (tgc_alpha * (fc / 1e6) * (z_grid * 100) * 2.0 / 20.0)
