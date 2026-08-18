@@ -188,7 +188,11 @@ def ensure_mv_baseline(baseline_path):
     managed_baseline = not os.path.isabs(baseline_path) and baseline_path == "mv.npy"
     baseline_output_dir = os.path.join(OUTPUT_DIR, "_mv_baseline") if managed_baseline else BASE_OUTPUT_DIR
     if not os.path.isabs(baseline_path):
-        full_path = os.path.join(baseline_output_dir, "mv", "mv.npy") if managed_baseline else os.path.join(BASE_OUTPUT_DIR, baseline_path)
+        full_path = (
+            os.path.join(baseline_output_dir, "mv", "mv.npy")
+            if managed_baseline
+            else os.path.join(BASE_OUTPUT_DIR, baseline_path)
+        )
     else:
         full_path = baseline_path
 
@@ -225,7 +229,9 @@ def ensure_mv_baseline(baseline_path):
         if managed_baseline and actual == expected:
             baseline_mtime = os.path.getmtime(full_path)
             dependencies = [H5_PATH, os.path.join(SCRIPT_DIR, "mv.py")]
-            dependencies.extend(os.path.join(SCRIPT_DIR, name) for name in ("beamforming_utils.py", "common_params.py", "h5_loader.py"))
+            dependencies.extend(
+                os.path.join(SCRIPT_DIR, name) for name in ("beamforming_utils.py", "common_params.py", "h5_loader.py")
+            )
             if any(os.path.getmtime(path) > baseline_mtime for path in dependencies):
                 return False, "输入数据或 MV 源码比基线更新"
         return (actual == expected, "参数一致" if actual == expected else "参数不一致")
@@ -432,7 +438,9 @@ def cmsaw_weight_from_delayed_data(
                 eye = torch.eye(length, dtype=torch.complex64, device=device)
                 exchange = torch.flip(eye, dims=(0,))
                 transpose = covariance.transpose(-2, -1)
-                rotary = 0.25 * (covariance + exchange @ transpose + exchange @ covariance @ exchange + transpose @ exchange)
+                rotary = 0.25 * (
+                    covariance + exchange @ transpose + exchange @ covariance @ exchange + transpose @ exchange
+                )
                 diagonal = torch.diag_embed(
                     torch.diagonal(rotary, dim1=-2, dim2=-1),
                 )

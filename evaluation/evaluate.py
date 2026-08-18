@@ -29,17 +29,19 @@ COMPARISON_VALUE_9 = 9
 
 try:
     from skimage.metrics import peak_signal_noise_ratio
-except Exception:
+except ImportError:
     peak_signal_noise_ratio = None
 
 
 DEFAULT_METHODS = ["DAS", "MV", "ESBMV", "F-DMAS"]
-CONTROLLED_SCENES = frozenset({
-    "simulation_contrast_speckle",
-    "simulation_resolution_distorsion",
-    "experiments_contrast_speckle",
-    "experiments_resolution_distorsion",
-})
+CONTROLLED_SCENES = frozenset(
+    {
+        "simulation_contrast_speckle",
+        "simulation_resolution_distorsion",
+        "experiments_contrast_speckle",
+        "experiments_resolution_distorsion",
+    }
+)
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, os.pardir))
 SOURCE_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, os.pardir))
@@ -96,7 +98,11 @@ def load_method_names(args, comparison_path, n_panels, has_gt):
     """Load method names."""
     if args.methods:
         methods = [m.strip().lower() for m in args.methods.split(",") if m.strip()]
-        names = [m.strip() for m in args.method_labels.split(",") if m.strip()] if args.method_labels else [m.upper() for m in methods]
+        names = (
+            [m.strip() for m in args.method_labels.split(",") if m.strip()]
+            if args.method_labels
+            else [m.upper() for m in methods]
+        )
     else:
         params_path = os.path.join(os.path.dirname(comparison_path), "run_params.json")
         names = None
@@ -201,14 +207,8 @@ def read_sample_meta(h5_path, sample_idx):
             if isinstance(sample_name, bytes):
                 sample_name = sample_name.decode("utf-8")
             dataset_meta = config.get("dataset") or {}
-            phantom_mode = str(
-                source_samples.get("phantom_mode")
-                or dataset_meta.get("phantom_mode", "")
-            )
-            phantom_source = str(
-                source_samples.get("phantom_source")
-                or dataset_meta.get("phantom_source", "")
-            )
+            phantom_mode = str(source_samples.get("phantom_mode") or dataset_meta.get("phantom_mode", ""))
+            phantom_source = str(source_samples.get("phantom_source") or dataset_meta.get("phantom_source", ""))
             return {
                 "has_gt": has_gt,
                 "sample_name": str(sample_name),
@@ -392,7 +392,11 @@ def read_phantom(phantom_path):
             xs = hf[f"{base}/phantom_xPts"][:].astype(float) * 1000.0
             zs = hf[f"{base}/phantom_zPts"][:].astype(float) * 1000.0
             for x, z in zip(xs, zs, strict=True):
-                if np.isfinite(x) and np.isfinite(z) and (abs(x) > COMPARISON_VALUE_1ENEG_9 or abs(z) > COMPARISON_VALUE_1ENEG_9):
+                if (
+                    np.isfinite(x)
+                    and np.isfinite(z)
+                    and (abs(x) > COMPARISON_VALUE_1ENEG_9 or abs(z) > COMPARISON_VALUE_1ENEG_9)
+                ):
                     out["resolution_targets"].append(
                         {"x_mm": float(x), "z_mm": float(z), "source": "phantom"},
                     )
@@ -592,7 +596,12 @@ def compute_6db_resolution(coord, profile_db):
     """
     profile = np.asarray(profile_db, dtype=np.float64)
     coord = np.asarray(coord, dtype=np.float64)
-    if profile.size < COMPARISON_VALUE_2 or coord.size != profile.size or not np.all(np.isfinite(coord)) or not np.any(np.isfinite(profile)):
+    if (
+        profile.size < COMPARISON_VALUE_2
+        or coord.size != profile.size
+        or not np.all(np.isfinite(coord))
+        or not np.any(np.isfinite(profile))
+    ):
         return np.nan
     finite = np.isfinite(profile)
     if not np.all(finite):
@@ -786,7 +795,11 @@ def rows_for_method_index(rows, method, index_key):
 
 def speckle_penalty_for_method(roi_rows, method):
     """Execute speckle penalty for method."""
-    passes = [row["speckle_pass"] for row in roi_rows if row.get("method") == method and "speckle_pass" in row and np.isfinite(row["speckle_pass"])]
+    passes = [
+        row["speckle_pass"]
+        for row in roi_rows
+        if row.get("method") == method and "speckle_pass" in row and np.isfinite(row["speckle_pass"])
+    ]
     if not passes:
         return np.nan
     return -40.0 if any(value < COMPARISON_VALUE_0_5 for value in passes) else 0.0
@@ -802,7 +815,9 @@ def build_resolution_group_rows(target_rows, source, target_count, methods):
             selected = [indexed[i] for i in indices if i in indexed]
             if not selected:
                 continue
-            pass_values = [row["distortion_pass"] for row in selected if np.isfinite(row.get("distortion_pass", np.nan))]
+            pass_values = [
+                row["distortion_pass"] for row in selected if np.isfinite(row.get("distortion_pass", np.nan))
+            ]
             if source == "simulation" and pass_values:
                 penalty = -40.0 if any(value < COMPARISON_VALUE_0_5 for value in pass_values) else 0.0
                 pass_rate = mean_or_nan(pass_values)
@@ -973,10 +988,7 @@ def main():
     has_gt = bool(meta_from_h5.get("has_gt", False))
     sample_name = str(meta_from_h5.get("sample_name", ""))
     if sample_name not in CONTROLLED_SCENES:
-        print(
-            f"Non-controlled scene {sample_name or '<unknown>'}: "
-            "skipped full phantom metric export."
-        )
+        print(f"Non-controlled scene {sample_name or '<unknown>'}: skipped full phantom metric export.")
         return
 
     comparison = np.load(comparison_path).astype(np.float64)
@@ -1063,7 +1075,9 @@ def main():
         elif has_gt:
             row["SSIM_dB_vs_GT"] = local_ssim(display, gt_display, data_range=1.0)
             row["SSIM_envelope_vs_GT"] = local_ssim(
-                env, gt_linear_envelope, data_range=1.0,
+                env,
+                gt_linear_envelope,
+                data_range=1.0,
             )
             if peak_signal_noise_ratio is not None:
                 row["PSNR_dB_vs_GT"] = float(

@@ -328,17 +328,25 @@ class RowDynamicMVBeamformerIQ:
                 )  # [width, subarray_size, subarray_count, T]
                 snapshots = subarray_count * self.temporal_win
                 x_snapshots = x_subarrays.reshape(self.width, subarray_size, snapshots)
-                covariance_forward = torch.matmul(x_snapshots, x_snapshots.mH) / snapshots  # [width, subarray_size, subarray_size]
+                covariance_forward = (
+                    torch.matmul(x_snapshots, x_snapshots.mH) / snapshots
+                )  # [width, subarray_size, subarray_size]
 
                 # ========== 前向-后向空间平滑 (FBSS) ==========
-                covariance = 0.5 * (covariance_forward + covariance_forward.conj().flip(-1, -2)) if self.use_fbss else covariance_forward
+                covariance = (
+                    0.5 * (covariance_forward + covariance_forward.conj().flip(-1, -2))
+                    if self.use_fbss
+                    else covariance_forward
+                )
 
                 # ========== ESBMV 使用加载协方差矩阵;MVDR 求解也使用同一加载矩阵 ==========
                 covariance_signal = 0.5 * (covariance + covariance.mH)
 
                 # ========== 对角加载 ==========
                 trace = covariance_signal.diagonal(dim1=-2, dim2=-1).real.sum(-1)  # [width]
-                covariance_loaded = covariance_signal + (self.dl_factor / subarray_size) * trace.view(self.width, 1, 1) * row["eye"]
+                covariance_loaded = (
+                    covariance_signal + (self.dl_factor / subarray_size) * trace.view(self.width, 1, 1) * row["eye"]
+                )
 
                 # ========== 标准 MVDR 求解 ==========
                 ones_subarray = row["ones"]
@@ -404,7 +412,11 @@ class RowDynamicMVBeamformerIQ:
                                 dtype=torch.float32,
                                 device=device,
                             )
-                            eigvecs = torch.eye(subarray_size, dtype=torch.complex64, device=device).unsqueeze(0).expand(self.width, -1, -1)
+                            eigvecs = (
+                                torch.eye(subarray_size, dtype=torch.complex64, device=device)
+                                .unsqueeze(0)
+                                .expand(self.width, -1, -1)
+                            )
 
                 eigvals = eigvals.flip(-1).real
                 eigvecs = eigvecs.flip(-1)

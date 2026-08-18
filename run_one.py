@@ -23,16 +23,18 @@ if str(ALGORITHMS_DIR) not in sys.path:
 from common_params import COMMON_PARAMS  # noqa: E402
 
 COMPARISON_VALUE_3 = 3
-EVALUATION_SCENE_IDS = frozenset({
-    "simulation_contrast_speckle",
-    "simulation_resolution_distorsion",
-    "experiments_contrast_speckle",
-    "experiments_resolution_distorsion",
-})
+EVALUATION_SCENE_IDS = frozenset(
+    {
+        "simulation_contrast_speckle",
+        "simulation_resolution_distorsion",
+        "experiments_contrast_speckle",
+        "experiments_resolution_distorsion",
+    }
+)
 
 try:
     import yaml
-except Exception:
+except ImportError:
     yaml = None
 
 

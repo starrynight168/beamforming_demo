@@ -31,8 +31,18 @@ COMPARISON_VALUE_8 = 8
 
 
 METHOD_PALETTE = [
-    "#4C72B0", "#55A868", "#C44E52", "#8172B3", "#CCB974", "#64B5CD",
-    "#E17C05", "#937860", "#DA8BC3", "#8C8C8C", "#2A9D8F", "#E76F51",
+    "#4C72B0",
+    "#55A868",
+    "#C44E52",
+    "#8172B3",
+    "#CCB974",
+    "#64B5CD",
+    "#E17C05",
+    "#937860",
+    "#DA8BC3",
+    "#8C8C8C",
+    "#2A9D8F",
+    "#E76F51",
 ]
 
 
@@ -665,9 +675,7 @@ def main():
             or any(not isinstance(method, str) or not method for method in methods)
             or len(methods) != len(set(methods))
         ):
-            raise ValueError(
-                f"comparison 数值/形状或 methods 非法: shape={comparison.shape}, methods={methods}"
-            )
+            raise ValueError(f"comparison 数值/形状或 methods 非法: shape={comparison.shape}, methods={methods}")
         comparison = np.clip(comparison, -dr, 0.0)
         phantom = (
             read_phantom(phantom_path)
@@ -679,8 +687,10 @@ def main():
         )
         rois = phantom.get("contrast_rois", []) or meta.get("contrast_rois", [])
         targets = (
-            phantom.get("resolution_targets", []) or meta.get("resolution_targets", [])
-        ) if meta.get("mode") == "resolution_distorsion" else []
+            (phantom.get("resolution_targets", []) or meta.get("resolution_targets", []))
+            if meta.get("mode") == "resolution_distorsion"
+            else []
+        )
         if meta.get("has_gt") and comparison.size:
             display = db_to_display(comparison[0], dr)
             peak_method = next(

@@ -1,5 +1,6 @@
 """Provide Python utilities for run_wizard_cn."""
 
+import argparse
 import json
 import math
 import subprocess
@@ -16,6 +17,12 @@ COMPARISON_VALUE_4 = 4
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
+
+
+def parse_args():
+    """Parse command-line options."""
+    parser = argparse.ArgumentParser(description="超声波束合成中文向导")
+    return parser.parse_args()
 
 
 def append_run_log(entry):
@@ -371,8 +378,7 @@ def inspect_h5(path):
                 raise ValueError("config_yaml.source_samples 数量必须与 H5 样本数一致")
             names = [str(sample.get("id", f"sample_{idx}")) for idx, sample in enumerate(samples)]
             in_vivo = [
-                sample.get("phantom_mode") == "in_vivo"
-                or sample.get("phantom_source") == "in_vivo"
+                sample.get("phantom_mode") == "in_vivo" or sample.get("phantom_source") == "in_vivo"
                 for sample in samples
             ]
         elif (
@@ -383,10 +389,7 @@ def inspect_h5(path):
             id_dataset = str(samples.get("acquisition_id_dataset", "/acquisition_id"))
             if id_dataset not in hf or hf[id_dataset].shape != (n,):
                 raise ValueError("EPFL 紧凑样本元数据缺少有效 acquisition_id 标签")
-            names = [
-                str(value.decode("utf-8") if isinstance(value, bytes) else value)
-                for value in hf[id_dataset][:]
-            ]
+            names = [str(value.decode("utf-8") if isinstance(value, bytes) else value) for value in hf[id_dataset][:]]
             dataset_id = str((config.get("dataset") or {}).get("id", "")).lower()
             is_in_vivo = "invivo" in dataset_id or "volunteer" in dataset_id
             in_vivo = [is_in_vivo] * n
@@ -467,10 +470,7 @@ def choose_sample(path, teaching=True):
         raw = ask_text("请选择样本", default="0")
         if raw.isdigit() and 0 <= int(raw) < info["n"]:
             return int(raw)
-        matched = [
-            (idx, name) for idx, name in enumerate(info["names"])
-            if raw.lower() in name.lower()
-        ]
+        matched = [(idx, name) for idx, name in enumerate(info["names"]) if raw.lower() in name.lower()]
         if len(matched) == 1:
             idx, name = matched[0]
             print(f"已匹配: {idx}: {name}")
@@ -551,6 +551,7 @@ def run_steps(steps):
 
 def main():
     """Run the command-line workflow."""
+    parse_args()
     print_title("超声波束合成中文向导")
     print(
         "这个向导会一步一步问你问题,然后调用现有 run_one.py 完成成像、对比和可选指标计算。",
@@ -915,8 +916,7 @@ def main():
             "sample_idx": int(state["sample_idx"]),
             "algorithms": state["algorithms"],
             "algorithm_params": {
-                algorithm: state["algorithm_params"].get(algorithm, {})
-                for algorithm in state["algorithms"]
+                algorithm: state["algorithm_params"].get(algorithm, {}) for algorithm in state["algorithms"]
             },
             "params": {
                 "select_angles": state["select_angles"],

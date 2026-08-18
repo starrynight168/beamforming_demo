@@ -19,7 +19,7 @@ import numpy as np
 
 try:
     import yaml
-except Exception:
+except ImportError:
     yaml = None
 
 from run_wizard_cn import (
@@ -214,13 +214,19 @@ def validate_values(param_name, default_value, values):
             raise ValueError("lmax_ratio 必须位于 (0,0.5]。")
         if param_name == "clip_percentile" and not all(0 < float(value) <= COMPARISON_VALUE_100 for value in values):
             raise ValueError("clip_percentile 必须位于 (0,100]。")
-        if param_name in {"num_eig", "gcf_low_bins"} and not all(isinstance(value, int) and value >= 0 for value in values):
+        if param_name in {"num_eig", "gcf_low_bins"} and not all(
+            isinstance(value, int) and value >= 0 for value in values
+        ):
             raise ValueError(f"{param_name} 必须是非负整数。")
-        if param_name == "min_subarray_len" and not all(isinstance(value, int) and value >= COMPARISON_VALUE_2 for value in values):
+        if param_name == "min_subarray_len" and not all(
+            isinstance(value, int) and value >= COMPARISON_VALUE_2 for value in values
+        ):
             raise ValueError("min_subarray_len 必须是大于等于 2 的整数。")
         if param_name == "depth_smooth_rows" and not all(isinstance(value, int) and value >= 1 for value in values):
             raise ValueError("depth_smooth_rows 必须是正整数。")
-        if param_name == "temporal_win" and not all(isinstance(value, int) and value >= 1 and value % 2 == 1 for value in values):
+        if param_name == "temporal_win" and not all(
+            isinstance(value, int) and value >= 1 and value % 2 == 1 for value in values
+        ):
             raise ValueError("temporal_win 必须是正奇数。")
         return values
 
@@ -286,7 +292,9 @@ def choose_values(param_name, default_value):
         if ask_yes_no("是否使用默认布尔取值", default=True):
             return default_values
 
-    list_only = param_name == "select_angles" or param_name in CATEGORICAL_PARAM_CHOICES or isinstance(default_value, bool)
+    list_only = (
+        param_name == "select_angles" or param_name in CATEGORICAL_PARAM_CHOICES or isinstance(default_value, bool)
+    )
     while True:
         mode = (
             "list"

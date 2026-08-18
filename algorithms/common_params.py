@@ -11,7 +11,7 @@ except ModuleNotFoundError:
 
 try:
     import yaml
-except Exception:
+except ImportError:
     yaml = None
 
 
