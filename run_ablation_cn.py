@@ -429,26 +429,43 @@ def method_output_path(scene_dir, algorithm, suffix):
     return scene_dir / algorithm / f"{algorithm}.{suffix}"
 
 
+def _backup_flatten_target(path: Path, backup_root: Path) -> None:
+    backup_root.mkdir(parents=True, exist_ok=True)
+    target = backup_root / path.name
+    suffix = 1
+    while target.exists():
+        target = backup_root / f"{path.name}.{suffix}"
+        suffix += 1
+    shutil.move(str(path), str(target))
+
+
 def flatten_ablation_result(scene_dir, algorithm):
     """Execute flatten ablation result."""
     method_dir = scene_dir / algorithm
     if not method_dir.exists():
         return
+    backup_root = None
+
+    def backup_existing(path: Path) -> None:
+        nonlocal backup_root
+        if backup_root is None:
+            backup_root = scene_dir / "_flatten_backup" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        _backup_flatten_target(path, backup_root)
+
     for source in method_dir.iterdir():
         target = scene_dir / source.name
         if target.exists():
-            if target.is_file():
-                target.unlink()
-            else:
-                shutil.rmtree(target)
+            backup_existing(target)
         shutil.move(str(source), str(target))
     method_dir.rmdir()
     for name in ("comparison.npy", "comparison.png", "run_params.json", "run.log"):
-        (scene_dir / name).unlink(missing_ok=True)
+        path = scene_dir / name
+        if path.exists():
+            backup_existing(path)
     for name in ("metrics", "individual_images"):
         path = scene_dir / name
         if path.exists():
-            shutil.rmtree(path)
+            backup_existing(path)
 
 
 def preserve_ground_truth(scene_dir, out_dir):
