@@ -128,7 +128,6 @@ def print_physical_summary(
     dx,
     depth_min,
     depth_max,
-    n_files,
     selected_angles,
     has_gt,
     baseline_path,
@@ -513,7 +512,6 @@ class CMSAWBeamformerIQ:
         gamma=0.5,
         clip_percentile=90.0,
         depth_smooth_rows=1,
-        baseline_mv=None,
     ):
         """Initialize the instance."""
         if not 0 < lmax_ratio <= COMPARISON_VALUE_0_5 or min_subarray_len < COMPARISON_VALUE_2:
@@ -796,7 +794,6 @@ def main():
         dx,
         depth_min,
         depth_max,
-        1,
         selected_angles,
         has_gt,
         baseline_path,

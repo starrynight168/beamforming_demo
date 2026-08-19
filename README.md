@@ -1,6 +1,6 @@
 # Beamforming Demo
 
-`beamforming_demo` 是一个基于 Python/PyTorch 实现的高效超声波束合成（Beamforming）对比与评估工程。本工程实现了多种主流的波束合成算法，支持利用 GPU 加速计算，并提供了一整套与 PICMUS (Platform for Interdisciplinary Research in Medical Ultrasound) 挑战赛标准对齐的成像质量评估系统。
+`beamforming_demo` 是一个基于 Python/PyTorch 实现的超声波束合成（Beamforming）对比与评估工程。本工程实现了多种主流波束合成算法，支持 GPU 加速，并对四个 controlled phantom 场景提供与 PICMUS (Platform for Interdisciplinary Research in Medical Ultrasound) 规则语义对齐的定量评估；in-vivo 场景用于成像对比，不执行官方靶标定量指标。
 
 ---
 
@@ -43,10 +43,10 @@ beamforming_demo/
   │    ├── gcfmv.py             # GCF-MV 重建脚本
   │    ├── cmsaw.py             # CMSAW 重建脚本
   │    ├── fdmas.py             # F-DMAS 重建脚本
-  │    └── template_algorithm.py# 添加新算法时的标准脚手架模版
+  │    └── template_algorithm.py # 添加新算法时的标准脚手架模版
   │
   ├── evaluation/               # 成像指标计算与绘图模块
-  │    ├── evaluate.py          # 定量指标计算核心（全量对齐 PICMUS 挑战赛规则）
+  │    ├── evaluate.py          # controlled phantom 场景的 PICMUS 语义定量指标核心
   │    └── plot_metrics.py      # 指标对比柱状图、横向波束剖面图（Profile）自动绘制工具
   │
   └── results/                  # 重建图像与评估报告输出目录（自动创建）
@@ -92,6 +92,7 @@ pip install -r requirements.txt
    ```bash
    python data/pack_data.py
    python data/pack_data.py --only simulation
+   # --only 也支持 experiments 或 in_vivo
    ```
 
 4. **进行数据完整性体检**：
@@ -117,14 +118,18 @@ python algorithms/das.py --h5_path data/simulation.h5 --h5_sample_idx 0 --output
 ```bash
 python run_one.py --scene simulation_contrast_speckle
 ```
-重建完成后，脚本会自动启动评估系统，在 `metrics/` 目录下生成：
+重建完成后，controlled phantom 场景会自动启动评估系统，在 `metrics/` 目录下生成：
 - **`summary_metrics.csv`**: 所有算法在当前场景的全面对比指标表。
-- **`standard_metrics.png` / `auxiliary_metrics.png`**: 主要和辅助评估指标的柱状对比图。
-- **`point_profile.png` / `roi_targets.png`**: 与官方标准对齐的横向分辨率波束剖面图及 ROI 划分示意图。
-- **`picmus_challenge_summary.txt`**: 与官方 PICMUS 分组得分完全一致的文本总结。
+- **`contrast_roi_metrics.csv` / `resolution_target_metrics.csv`**: 单个 ROI 和点目标的明细指标。
+- **`contrast_group_metrics.csv` / `resolution_group_metrics.csv`**: 按场景分组的汇总指标。
+- **`standard_metrics.png` / `auxiliary_metrics.png`**: 主要和辅助指标的柱状对比图。
+- **`cyst_profile.png` / `point_profile.png` / `roi_targets.png`**: 可用时生成的剖面图和 ROI/靶标示意图。
+- **`picmus_challenge_summary.txt`**: PICMUS 风格分组指标的文本总结。
+
+in-vivo 场景仍会生成算法输出、`comparison.png` 和 `individual_images/`，但会跳过 phantom ROI、点目标和 PICMUS 分组定量评估。
 
 ### 3. 一键重建并评估全部场景 (`run_all.py`)
-一次性运行并评估项目内的全部仿真、实验和在体（In-vivo）场景：
+一次性运行项目内的全部仿真、实验和在体（in-vivo）场景；其中只有四个 controlled phantom 场景会生成完整定量评估：
 ```bash
 python run_all.py
 ```
@@ -165,14 +170,14 @@ python run_ablation_cn.py
 
 ## 评估指标体系说明
 
-本工程内置的评估计算核心（`evaluation/evaluate.py`）严格对齐了 PICMUS 挑战赛官方 MATLAB 算法语义：
+本工程内置的评估计算核心（`evaluation/evaluate.py`）在四个 controlled phantom 场景中对齐 PICMUS 挑战赛官方 MATLAB 算法语义：
 - **对比度 (Contrast)**: 基于官方同心环形 ROI 划定，并且方差计算使用样本方差（$N-1$ 自由度），保障与 MATLAB 的 `var()` 结果完全一致；
 - **散斑拟合度 (Speckle Quality)**: 提取散斑区进行 5 倍下采样并执行 Kolmogorov-Smirnov 检验以拟合 Rayleigh 分布，评估 KS 统计量 $D$ 和 $p$ 值；
 - **分辨率 (Resolution)**: 提取点目标 lateral 剖面并线性插值至 $10\times$ 密度，计算 $-6\text{ dB}$ 的半高全宽（FWHM）；
 - **几何畸变 (Distortion)**: 基于官方给定的累加标签掩膜、轴向修正因子和 7 个指定靶点位置自动判定畸变是否达标。
-- **辅助学术指标**: 额外提供广义对比度噪声比（gCNR）、对比度噪声比（CNR）、峰值旁瓣电平（PSLR）、积分旁瓣电平（ISLR）以及基于 GT 的图像结构相似度（SSIM）、峰值信噪比（PSNR）与平均绝对误差（MAE）等分析。
+- **辅助学术指标**: 额外提供广义对比度噪声比（gCNR）、对比度噪声比（CNR）、峰值旁瓣电平（PSLR）、积分旁瓣电平（ISLR）以及基于参考图的图像结构相似度（SSIM）、峰值信噪比（PSNR）与平均绝对误差（MAE）等分析。
 
-*(注：在体 (in-vivo) 颈动脉图像因无物理靶点参考，会自动跳过定量指标的计算，仅做图像重建与对比拼接。)*
+*(注：in-vivo H5 中的 `all_envdb_norm` 是打包阶段生成的多角度 DAS 参考图，不等同于带物理靶标的 PICMUS GT。因此在体颈动脉场景会自动跳过 phantom ROI、点目标和 PICMUS 分组定量，只做图像重建与对比拼接。)*
 
 ---
 

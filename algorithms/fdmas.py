@@ -66,7 +66,6 @@ def print_physical_summary(
     dx,
     depth_min,
     depth_max,
-    n_files,
     selected_angles,
     has_gt,
 ):
@@ -119,7 +118,7 @@ def print_physical_summary(
 class FDMASBeamformerIQ:
     """Represent FDMASBeamformerIQ."""
 
-    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, t0_all, angles_rad):
+    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad):
         """Initialize the instance."""
         self.height, self.width, self.N = len(z_grid), len(x_grid), n_elem
         self.x_grid = torch.from_numpy(x_grid).float().to(device)
@@ -166,8 +165,7 @@ class FDMASBeamformerIQ:
         qw = q * weights
         pair_sum = 0.5 * (qw.sum(dim=-1).square() - qw.square().sum(dim=-1))
         pair_norm = 0.5 * (weights.sum(dim=-1).square() - weights.square().sum(dim=-1))
-        pair_sum = pair_sum / torch.clamp(pair_norm, min=eps)
-        return pair_sum
+        return pair_sum / torch.clamp(pair_norm, min=eps)
 
     def __call__(self, i_data, q_data, selected_angles, t_starts, fs):
         """Run the callable operation."""
@@ -416,7 +414,6 @@ def main():
         dx,
         depth_min,
         depth_max,
-        1,
         selected_angles,
         has_gt,
     )

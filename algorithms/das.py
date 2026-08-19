@@ -72,7 +72,6 @@ def print_physical_summary(
     dx,
     depth_min,
     depth_max,
-    n_files,
     selected_angles,
     has_gt,
 ):
@@ -126,7 +125,7 @@ def print_physical_summary(
 class DASBeamformerIQ:
     """Represent DASBeamformerIQ."""
 
-    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, t0_all, angles_rad):
+    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad):
         """Initialize the instance."""
         self.height, self.width, self.N = len(z_grid), len(x_grid), n_elem
         self.x_grid = torch.from_numpy(x_grid).float().to(device)
@@ -426,7 +425,6 @@ def main():
         dx,
         depth_min,
         depth_max,
-        1,
         selected_angles,
         has_gt,
     )

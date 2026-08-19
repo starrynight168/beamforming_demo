@@ -140,7 +140,7 @@ def save_figure(db_img, x_grid, z_grid, out_path, title, dr):
     plt.close(fig)
 
 
-def save_outputs(image_db, data, gt, args):
+def save_outputs(image_db, data, args):
     """Save outputs."""
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     output_dir = resolve_project_path(args.output_dir, project_root)
@@ -186,7 +186,7 @@ def main():
     image_db = beamform(data, args)
     expected_shape = (len(data["z_grid"]), len(data["x_grid"]))
     image_db = validate_db_output(image_db, expected_shape, METHOD_NAME)
-    method_dir = save_outputs(image_db, data, gt, args)
+    method_dir = save_outputs(image_db, data, args)
     print(f"Done | Output: {method_dir}")
 
 

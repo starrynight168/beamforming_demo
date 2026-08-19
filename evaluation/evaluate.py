@@ -440,7 +440,7 @@ def default_phantom(mode, source):
     return resolve_existing(rel)
 
 
-def infer_mode(args, comparison, meta=None):
+def infer_mode(args, meta=None):
     """Execute infer mode."""
     if args.phantom_mode != "auto":
         return args.phantom_mode
@@ -670,7 +670,6 @@ def target_resolution(
     target,
     window_mm,
     target_idx=None,
-    source="simulation",
     label_map=None,
 ):
     # The official implementation first adds all numbered ROIs into one label
@@ -1007,7 +1006,7 @@ def main():
     comparison = np.clip(comparison, -args.dr, 0.0)
     methods = load_method_names(args, comparison_path, comparison.shape[0], has_gt)
 
-    mode = infer_mode(args, comparison, meta_from_h5)
+    mode = infer_mode(args, meta_from_h5)
     source = infer_source(args, meta_from_h5)
     os.makedirs(out_dir, exist_ok=True)
     if args.phantom_path == "auto" and meta_from_h5.get("phantom_path"):
@@ -1160,7 +1159,6 @@ def main():
                 target,
                 args.fwhm_window_mm,
                 target_idx=idx + 1,
-                source=source,
                 label_map=resolution_label_map,
             )
             if stats is None:

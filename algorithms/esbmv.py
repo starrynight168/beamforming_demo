@@ -109,7 +109,6 @@ def print_physical_summary(
     dx,
     depth_min,
     depth_max,
-    n_files,
     selected_angles,
     has_gt,
 ):
@@ -182,7 +181,7 @@ class RowDynamicMVBeamformerIQ:
         c,
         fc,
         fs,
-        t0_all,
+        _t0_all,
         angles_rad,
         mv_dl=0.01,
         fbss=True,
@@ -642,7 +641,6 @@ def main():
         dx,
         depth_min,
         depth_max,
-        1,
         selected_angles,
         has_gt,
     )
