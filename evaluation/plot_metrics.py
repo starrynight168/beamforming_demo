@@ -17,6 +17,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import hsv_to_rgb, to_hex
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -64,6 +65,7 @@ def get_color(method_name):
 
 
 def build_method_colors(methods):
+    methods = list(dict.fromkeys(methods))
     result = {}
     used = set()
     for method in methods:
@@ -71,12 +73,24 @@ def build_method_colors(methods):
         if color not in used:
             result[method] = color
             used.add(color)
-    available = [color for color in METHOD_PALETTE if color not in used]
+    available = []
+    for colormap_name in ("tab20", "tab20b", "tab20c"):
+        for color in plt.get_cmap(colormap_name).colors:
+            color = to_hex(color)
+            if color not in used and color not in available:
+                available.append(color)
+    index = 0
+    while len(result) + len(available) < len(methods):
+        color = to_hex(hsv_to_rgb((index * 0.61803398875) % 1.0, 0.68, 0.86))
+        index += 1
+        if color not in used and color not in available:
+            available.append(color)
     for method in methods:
         if method not in result:
             if not available:
-                available = METHOD_PALETTE.copy()
+                raise RuntimeError("无法为所有评估方法生成唯一颜色")
             result[method] = available.pop(0)
+            used.add(result[method])
     return result
 
 
@@ -194,10 +208,10 @@ def save_bar_plot(path, metrics_to_plot):
 
     n_plots = len(metrics_to_plot)
     max_methods = max(len(item[3]) for item in metrics_to_plot)
-    cols = 1 if max_methods > COMPARISON_VALUE_8 else min(n_plots, 3)
+    cols = min(n_plots, 2) if max_methods > COMPARISON_VALUE_8 else min(n_plots, 3)
     rows_grid = (n_plots + cols - 1) // cols
-    panel_width = 6.2 if max_methods > COMPARISON_VALUE_6 else 5.0
-    panel_height = max(3.6, 0.42 * max_methods + 1.4) if max_methods > COMPARISON_VALUE_6 else 4.0
+    panel_width = max(7.8, 0.32 * max_methods + 3.6) if max_methods > COMPARISON_VALUE_6 else 5.0
+    panel_height = max(4.6, 0.34 * max_methods + 1.8) if max_methods > COMPARISON_VALUE_6 else 4.0
     fig, axes = plt.subplots(
         rows_grid,
         cols,
@@ -284,6 +298,47 @@ def save_group_metric_plot(path, group_rows, metric_keys, title_prefix):
             groups.append(row["group"])
         if row["method"] not in methods:
             methods.append(row["method"])
+    max_methods_per_page = 12
+    if len(methods) > max_methods_per_page:
+        baseline_names = {"GT", "DAS", "MV", "ESBMV", "GCFMV", "CMSAW", "FDMAS"}
+        baselines = [method for method in methods if str(method).upper() in baseline_names]
+        model_methods = [method for method in methods if method not in baselines]
+        chunk_size = max(max_methods_per_page - len(baselines), 1)
+        model_groups: list[list[str]] = []
+        group_keys: list[str] = []
+        for method in model_methods:
+            method_text = str(method)
+            group_key = method_text.split("_", 1)[0] if "_" in method_text else method_text
+            if group_key not in group_keys:
+                group_keys.append(group_key)
+                model_groups.append([])
+            model_groups[group_keys.index(group_key)].append(method)
+        chunks: list[list[str]] = []
+        current: list[str] = []
+        for model_group in model_groups:
+            if len(model_group) > chunk_size:
+                if current:
+                    chunks.append(current)
+                    current = []
+                chunks.extend(
+                    model_group[start : start + chunk_size]
+                    for start in range(0, len(model_group), chunk_size)
+                )
+            elif current and len(current) + len(model_group) > chunk_size:
+                chunks.append(current)
+                current = list(model_group)
+            else:
+                current.extend(model_group)
+        if current:
+            chunks.append(current)
+        root, ext = os.path.splitext(path)
+        for page_idx, chunk in enumerate(chunks, start=1):
+            page_methods = set(baselines + chunk)
+            page_rows = [row for row in group_rows if row["method"] in page_methods]
+            page_path = path if page_idx == 1 else f"{root}_page{page_idx}{ext}"
+            page_title = title_prefix if page_idx == 1 else f"{title_prefix} (page {page_idx}/{len(chunks)})"
+            save_group_metric_plot(page_path, page_rows, metric_keys, page_title)
+        return
     available_metrics = [
         (key, title)
         for key, title in metric_keys
