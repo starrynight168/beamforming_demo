@@ -23,6 +23,7 @@ if str(ALGORITHMS_DIR) not in sys.path:
 from common_params import COMMON_PARAMS  # noqa: E402
 
 COMPARISON_VALUE_3 = 3
+MAX_COMPARISON_IMAGES_PER_PAGE = 8
 EVALUATION_SCENE_IDS = frozenset(
     {
         "simulation_contrast_speckle",
@@ -257,10 +258,28 @@ def add_scale_bar(ax, extent_mm):
     )
 
 
-def save_comparison(images, titles, extent_mm, output_path, dr):
+def save_comparison(images, titles, extent_mm, output_path, dr, _cleanup_pages=True):
     """Save comparison."""
     n_images = len(images)
-    cols = min(4, max(1, math.ceil(math.sqrt(n_images))))
+    max_images_per_page = MAX_COMPARISON_IMAGES_PER_PAGE
+    if _cleanup_pages:
+        for stale in output_path.parent.glob(f"{output_path.stem}_page*{output_path.suffix}"):
+            stale.unlink(missing_ok=True)
+    if n_images > max_images_per_page:
+        for page_idx, start in enumerate(range(0, n_images, max_images_per_page), start=1):
+            page_path = output_path if page_idx == 1 else output_path.with_name(
+                f"{output_path.stem}_page{page_idx}{output_path.suffix}"
+            )
+            save_comparison(
+                images[start : start + max_images_per_page],
+                titles[start : start + max_images_per_page],
+                extent_mm,
+                page_path,
+                dr,
+                _cleanup_pages=False,
+            )
+        return
+    cols = 4 if n_images > 4 else min(2, n_images)
     rows = math.ceil(n_images / cols)
     fig, axes = plt.subplots(
         rows,
@@ -322,6 +341,8 @@ def save_single_image(image, title, extent_mm, output_path, dr):
 def save_individual_images(images, titles, image_names, extent_mm, output_dir, dr):
     """Save individual images."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    for stale in output_dir.glob("*.png"):
+        stale.unlink(missing_ok=True)
     for image, title, name in zip(images, titles, image_names, strict=True):
         save_single_image(image, title, extent_mm, output_dir / f"{name}.png", dr)
 
@@ -392,6 +413,8 @@ def run_evaluation(args, config, scene, scene_dir, comparison_path, methods):
             str(metrics_dir),
             "--dr",
             str(params["dr"]),
+            "--reference-mode",
+            "algorithms",
         ]
         result = subprocess.run(plot_cmd, cwd=ROOT, text=True, check=False)
         if result.returncode != 0:

@@ -26,6 +26,7 @@ COMPARISON_VALUE_5 = 5
 COMPARISON_VALUE_7 = 7
 COMPARISON_VALUE_8 = 8
 COMPARISON_VALUE_9 = 9
+PICMUS_OFFICIAL_Z_CORRECTION_MM = 0.2
 
 try:
     from skimage.metrics import peak_signal_noise_ratio
@@ -33,7 +34,6 @@ except ImportError:
     peak_signal_noise_ratio = None
 
 
-DEFAULT_METHODS = ["DAS", "MV", "ESBMV", "F-DMAS"]
 CONTROLLED_SCENES = frozenset(
     {
         "simulation_contrast_speckle",
@@ -105,21 +105,23 @@ def load_method_names(args, comparison_path, n_panels, has_gt):
         )
     else:
         params_path = os.path.join(os.path.dirname(comparison_path), "run_params.json")
-        names = None
-        if os.path.exists(params_path):
-            with open(params_path, encoding="utf-8") as f:
-                params = json.load(f)
-            label_map = params.get("algorithm_labels", {}) or {}
-            method_text = params.get("output", {}).get("methods")
-            if method_text:
-                methods = [m.strip().lower() for m in method_text.split(",") if m.strip()]
-                names = [label_map.get(m, m.upper()) for m in methods]
-        if names is None:
-            n_methods = n_panels - 1 if has_gt else n_panels
-            if n_methods <= len(DEFAULT_METHODS):
-                names = DEFAULT_METHODS[:n_methods]
-            else:
-                names = DEFAULT_METHODS + [f"Method{i + 1}" for i in range(len(DEFAULT_METHODS), n_methods)]
+        if not os.path.exists(params_path):
+            raise FileNotFoundError(f"缺少当前格式的 run_params.json: {params_path}")
+        with open(params_path, encoding="utf-8") as f:
+            params = json.load(f)
+        model_map = params.get("models")
+        if not isinstance(model_map, dict) or not model_map:
+            raise ValueError(f"run_params.json 缺少当前格式的 models 字典: {params_path}")
+        model_names = list(model_map)
+        skip_baselines = bool((params.get("evaluation") or {}).get("skip_baselines", False))
+        baseline_names = [] if skip_baselines else ["DAS", "MV"]
+        names = [*baseline_names, *model_names]
+        n_methods = n_panels - 1 if has_gt else n_panels
+        if len(names) != n_methods:
+            raise ValueError(
+                f"run_params.json 中的模型/基线数量与 comparison 不一致: "
+                f"expected={n_methods}, actual={len(names)}"
+            )
     if has_gt:
         names = ["GT", *names]
     if len(names) != n_panels:
@@ -217,6 +219,28 @@ def read_sample_meta(h5_path, sample_idx):
                 "phantom_path": "",
             }
         raise IndexError(f"source_samples has no sample index {sample_idx}")
+
+
+def picmus_distortion_z_offset_mm(h5_path, source):
+    """Return the distortion-mask depth correction for the packed dataset."""
+    if source != "simulation":
+        return 0.0
+    with h5py.File(h5_path, "r") as hf:
+        if "config_yaml" not in hf:
+            return PICMUS_OFFICIAL_Z_CORRECTION_MM
+        config = h5_embedded_config(hf)
+    evaluation = config.get("evaluation") or {}
+    configured = evaluation.get("picmus_distortion_z_offset_mm")
+    if configured is not None:
+        value = float(configured)
+        if not np.isfinite(value):
+            raise ValueError("evaluation.picmus_distortion_z_offset_mm 必须是有限数")
+        return value
+    provenance = config.get("provenance") or {}
+    source_kind = str(provenance.get("source_kind") or "").strip().lower()
+    if source_kind == "synthetic_rf_from_picmus_phantom":
+        return 0.0
+    return PICMUS_OFFICIAL_Z_CORRECTION_MM
 
 
 def load_grids(h5_path):
@@ -751,7 +775,7 @@ def mean_or_nan(values):
 
 
 def picmus_resolution_groups(source, target_count):
-    """Execute picmus resolution groups."""
+    """Return the official PICMUS resolution target groupings."""
     if source == "simulation" and target_count >= COMPARISON_VALUE_20:
         return [
             ("vertical_targets", list(range(1, 9))),
@@ -804,8 +828,24 @@ def speckle_penalty_for_method(roi_rows, method):
     return -40.0 if any(value < COMPARISON_VALUE_0_5 for value in passes) else 0.0
 
 
+def distortion_penalty_for_method(target_rows, method, source):
+    """Return the official PICMUS simulated distortion penalty."""
+    if source != "simulation":
+        return np.nan
+    passes = [
+        row["distortion_pass"]
+        for row in target_rows
+        if row.get("method") == method
+        and "distortion_pass" in row
+        and np.isfinite(row["distortion_pass"])
+    ]
+    if not passes:
+        return np.nan
+    return -40.0 if any(value < COMPARISON_VALUE_0_5 for value in passes) else 0.0
+
+
 def build_resolution_group_rows(target_rows, source, target_count, methods):
-    """Build resolution group rows."""
+    """Build rows using the official PICMUS target group order."""
     groups = picmus_resolution_groups(source, target_count)
     rows = []
     for method in methods:
@@ -815,7 +855,9 @@ def build_resolution_group_rows(target_rows, source, target_count, methods):
             if not selected:
                 continue
             pass_values = [
-                row["distortion_pass"] for row in selected if np.isfinite(row.get("distortion_pass", np.nan))
+                row["distortion_pass"]
+                for row in selected
+                if np.isfinite(row.get("distortion_pass", np.nan))
             ]
             if source == "simulation" and pass_values:
                 penalty = -40.0 if any(value < COMPARISON_VALUE_0_5 for value in pass_values) else 0.0
@@ -946,6 +988,9 @@ def write_picmus_report(
                 file.write(
                     f"distortion_pass_rate: {fmt_metric(row.get('distortion_pass_rate'), 3)}\n",
                 )
+                file.write(
+                    f"PICMUS_distortion_penalty: {fmt_metric(row.get('PICMUS_distortion_penalty'), 1)}\n",
+                )
                 for group in [r for r in resolution_group_rows if r["method"] == method]:
                     file.write(
                         f"  {group['group']} ({group['target_indices']}): "
@@ -1003,11 +1048,11 @@ def main():
     if not np.all(np.isfinite(comparison)):
         bad_count = int(comparison.size - np.count_nonzero(np.isfinite(comparison)))
         raise ValueError(f"comparison 包含 {bad_count} 个 NaN/Inf,拒绝生成无效指标")
-    comparison = np.clip(comparison, -args.dr, 0.0)
     methods = load_method_names(args, comparison_path, comparison.shape[0], has_gt)
 
     mode = infer_mode(args, meta_from_h5)
     source = infer_source(args, meta_from_h5)
+    distortion_z_offset_mm = picmus_distortion_z_offset_mm(h5_path, source)
     os.makedirs(out_dir, exist_ok=True)
     if args.phantom_path == "auto" and meta_from_h5.get("phantom_path"):
         phantom_path = resolve_existing(meta_from_h5["phantom_path"])
@@ -1047,14 +1092,14 @@ def main():
                 z_mm,
                 targets,
                 args.fwhm_window_mm,
-                z_offset_mm=0.2,
+                z_offset_mm=distortion_z_offset_mm,
             )
             distortion_inside_label_map = build_square_label_map(
                 x_mm,
                 z_mm,
                 targets,
                 0.29570,
-                z_offset_mm=0.2,
+                z_offset_mm=distortion_z_offset_mm,
             )
 
     gt_display = db_to_display(gt_db, args.dr) if has_gt else None
@@ -1145,6 +1190,10 @@ def main():
         row["speckle_pass_rate"] = mean_or_nan(
             [s["speckle_pass"] for s in speckle_stats],
         )
+        row["PICMUS_speckle_penalty"] = speckle_penalty_for_method(
+            roi_rows,
+            method,
+        )
         row["speckle_KS_D"] = mean_or_nan([s["speckle_KS_D"] for s in speckle_stats])
         row["speckle_KS_p"] = mean_or_nan([s["speckle_KS_p"] for s in speckle_stats])
         row["speckle_SNR"] = mean_or_nan([s["speckle_SNR"] for s in speckle_stats])
@@ -1182,6 +1231,11 @@ def main():
         row["distortion_pass_rate"] = mean_or_nan(
             [s["distortion_pass"] for s in target_stats],
         )
+        row["PICMUS_distortion_penalty"] = distortion_penalty_for_method(
+            target_rows,
+            method,
+            source,
+        )
         rows.append(row)
 
     summary_fields = [
@@ -1196,6 +1250,7 @@ def main():
         "gCNR",
         "cyst_residual_dB",
         "speckle_pass_rate",
+        "PICMUS_speckle_penalty",
         "speckle_KS_D",
         "speckle_KS_p",
         "speckle_SNR",
@@ -1206,6 +1261,7 @@ def main():
         "islr_db",
         "distortion_mm",
         "distortion_pass_rate",
+        "PICMUS_distortion_penalty",
     ]
     write_csv(os.path.join(out_dir, "summary_metrics.csv"), rows, summary_fields)
     contrast_group_rows = build_contrast_group_rows(
@@ -1262,6 +1318,7 @@ def main():
         "speckle_roi_count": len(speckle_rois),
         "resolution_target_count": len(targets),
         "fwhm_window_mm": args.fwhm_window_mm,
+        "picmus_distortion_z_offset_mm": distortion_z_offset_mm,
         "contrast_groups": picmus_contrast_groups(source, len(rois)),
         "resolution_groups": picmus_resolution_groups(source, len(targets)),
         "contrast_rois": rois,

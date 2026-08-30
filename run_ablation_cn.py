@@ -605,6 +605,8 @@ def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt):
         str(ROOT / "evaluation" / "plot_metrics.py"),
         "--metrics_dir",
         str(metrics_dir),
+        "--reference-mode",
+        "algorithms",
     ]
     result = subprocess.run(plot_cmd, cwd=ROOT, text=True, check=False)
     if result.returncode != 0:
