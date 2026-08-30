@@ -48,6 +48,7 @@ METRIC_PANEL_WIDTH = 10.5
 METRIC_PANEL_HEIGHT = 7.5
 METRIC_COLUMNS = 2
 REFERENCE_METHODS = {"GT", "DAS", "MV", "ESBMV", "GCFMV", "CMSAW", "FDMAS"}
+GROUP_HATCHES = ["", "//", "..", "\\\\", "xx"]
 
 
 METHOD_PALETTE = [
@@ -515,11 +516,7 @@ def save_group_metric_plot(
         "middle_column": "Middle column",
         "right_column": "Right column",
     }
-    group_palette = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00"]
-    color_map = {
-        group: group_palette[index % len(group_palette)]
-        for index, group in enumerate(groups)
-    }
+    method_colors = build_page_method_colors(methods)
     n_plots = len(available_metrics)
     cols = METRIC_COLUMNS
     rows_grid = 2
@@ -558,7 +555,8 @@ def save_group_metric_plot(
                 positions + offsets[group_idx],
                 values,
                 height=bar_height,
-                color=color_map[group],
+                color=[method_colors[method] for method in methods],
+                hatch=GROUP_HATCHES[group_idx % len(GROUP_HATCHES)],
                 edgecolor="black",
                 linewidth=0.7,
                 label=group_labels.get(group, str(group).replace("_", " ").title()),
@@ -595,10 +593,12 @@ def save_group_metric_plot(
         fig.suptitle(_page_title, fontsize=10, y=0.995)
     handles = [
         Patch(
-            color=color_map[group],
+            facecolor="#BDBDBD",
+            edgecolor="black",
+            hatch=GROUP_HATCHES[index % len(GROUP_HATCHES)],
             label=group_labels.get(group, str(group).replace("_", " ").title()),
         )
-        for group in groups
+        for index, group in enumerate(groups)
     ]
     fig.legend(
         handles,
