@@ -626,7 +626,7 @@ def build_metric_plots(rows):
     non_gt = [r for r in ordered_rows if r["method"] != "GT"]
     standard = []
     for title, key in [
-        ("Contrast (dB)", "contrast_dB"),
+        ("Contrast score (dB)", "contrast_score_dB"),
         ("CNR", "CNR"),
         ("gCNR", "gCNR"),
         ("Speckle Pass Rate", "speckle_pass_rate"),
@@ -637,8 +637,8 @@ def build_metric_plots(rows):
         ("PSLR (dB)", "pslr_db"),
         ("ISLR (dB)", "islr_db"),
         ("Distortion Pass Rate", "distortion_pass_rate"),
-        ("PICMUS Speckle Penalty", "PICMUS_speckle_penalty"),
-        ("PICMUS Distortion Penalty", "PICMUS_distortion_penalty"),
+        ("Speckle penalty", "speckle_penalty"),
+        ("Distortion penalty", "distortion_penalty"),
     ]:
         if any(np.isfinite(finite_value(r.get(key, np.nan))) for r in ordered_rows):
             standard.append(
@@ -988,7 +988,7 @@ def main():
         os.path.join(metrics_dir, "contrast_group_metrics.png"),
         contrast_group_rows,
         [
-            ("contrast_dB", "Contrast (dB)"),
+            ("contrast_score_dB", "Contrast score (dB)"),
             ("CNR", "CNR"),
             ("gCNR", "gCNR"),
             ("CR_dB", "CR (dB)"),

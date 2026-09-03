@@ -546,15 +546,13 @@ def contrast_roi_metrics(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padding
     cr_db = 20.0 * math.log10((mu_out + 1e-12) / (mu_in + 1e-12))
     residual_db = 20.0 * math.log10((mu_in + 1e-12) / (mu_out + 1e-12))
 
-    combined = np.concatenate([inside_env, outside_env])
-    lo, hi = float(np.min(combined)), float(np.max(combined))
-    if hi <= lo:
+    if not np.isfinite(inside_env).all() or not np.isfinite(outside_env).all():
         gcnr = np.nan
     else:
         hist_in, bins = np.histogram(
             inside_env,
-            bins=128,
-            range=(lo, hi),
+            bins=256,
+            range=(0.0, 1.0),
             density=False,
         )
         hist_out, _ = np.histogram(outside_env, bins=bins, density=False)
@@ -883,7 +881,7 @@ def build_resolution_group_rows(target_rows, source, target_count, methods):
                         [row.get("distortion_mm") for row in selected],
                     ),
                     "distortion_pass_rate": pass_rate,
-                    "PICMUS_distortion_penalty": penalty,
+                    "distortion_penalty": penalty,
                 },
             )
     return rows
@@ -895,7 +893,7 @@ def build_contrast_group_rows(roi_rows, source, roi_count, methods):
     rows = []
     for method in methods:
         indexed = rows_for_method_index(
-            [row for row in roi_rows if "contrast_dB" in row],
+            [row for row in roi_rows if "contrast_score_dB" in row],
             method,
             "roi_idx",
         )
@@ -910,8 +908,8 @@ def build_contrast_group_rows(roi_rows, source, roi_count, methods):
                     "group": group_name,
                     "roi_indices": " ".join(str(i) for i in indices0),
                     "n_rois": len(selected),
-                    "contrast_dB": mean_or_nan(
-                        [row.get("contrast_dB") for row in selected],
+                    "contrast_score_dB": mean_or_nan(
+                        [row.get("contrast_score_dB") for row in selected],
                     ),
                     "CR_dB": mean_or_nan([row.get("CR_dB") for row in selected]),
                     "CNR": mean_or_nan([row.get("CNR") for row in selected]),
@@ -919,7 +917,7 @@ def build_contrast_group_rows(roi_rows, source, roi_count, methods):
                     "cyst_residual_dB": mean_or_nan(
                         [row.get("cyst_residual_dB") for row in selected],
                     ),
-                    "PICMUS_speckle_penalty": speckle_penalty_for_method(
+                    "speckle_penalty": speckle_penalty_for_method(
                         roi_rows,
                         method,
                     ),
@@ -951,14 +949,14 @@ def write_picmus_report(
     """Execute write picmus report."""
     summary_by_method = {row["method"]: row for row in summary_rows}
     with open(path, "w", encoding="utf-8") as file:
-        file.write("PICMUS-style evaluation summary\n")
+        file.write("PICMUS-inspired evaluation summary (ours protocol)\n")
         file.write(f"mode: {mode}\nsource: {source}\n\n")
         for method in methods:
             row = summary_by_method.get(method, {})
             file.write(f"[{method}]\n")
             if mode == "contrast_speckle":
                 file.write(
-                    f"mean_contrast_dB: {fmt_metric(row.get('contrast_dB'), 1)}\n",
+                    f"mean_contrast_score_dB: {fmt_metric(row.get('contrast_score_dB'), 1)}\n",
                 )
                 file.write(f"mean_CR_dB: {fmt_metric(row.get('CR_dB'), 3)}\n")
                 file.write(f"mean_CNR: {fmt_metric(row.get('CNR'), 3)}\n")
@@ -967,12 +965,12 @@ def write_picmus_report(
                     f"speckle_pass_rate: {fmt_metric(row.get('speckle_pass_rate'), 3)}\n",
                 )
                 file.write(
-                    f"PICMUS_speckle_penalty: {fmt_metric(speckle_penalty_for_method(roi_rows, method), 1)}\n",
+                    f"speckle_penalty: {fmt_metric(speckle_penalty_for_method(roi_rows, method), 1)}\n",
                 )
                 for group in [r for r in contrast_group_rows if r["method"] == method]:
                     file.write(
                         f"  {group['group']} ({group['roi_indices']}): "
-                        f"contrast={fmt_metric(group.get('contrast_dB'), 1)}, "
+                        f"contrast={fmt_metric(group.get('contrast_score_dB'), 1)}, "
                         f"CNR={fmt_metric(group.get('CNR'), 3)}, "
                         f"gCNR={fmt_metric(group.get('gCNR'), 3)}\n",
                     )
@@ -989,17 +987,17 @@ def write_picmus_report(
                     f"distortion_pass_rate: {fmt_metric(row.get('distortion_pass_rate'), 3)}\n",
                 )
                 file.write(
-                    f"PICMUS_distortion_penalty: {fmt_metric(row.get('PICMUS_distortion_penalty'), 1)}\n",
+                    f"distortion_penalty: {fmt_metric(row.get('distortion_penalty'), 1)}\n",
                 )
                 for group in [r for r in resolution_group_rows if r["method"] == method]:
                     file.write(
                         f"  {group['group']} ({group['target_indices']}): "
                         f"axial={fmt_metric(group.get('FWHM_axial_mm'), 4)}, "
                         f"lateral={fmt_metric(group.get('FWHM_lateral_mm'), 4)}, "
-                        f"penalty={fmt_metric(group.get('PICMUS_distortion_penalty'), 1)}\n",
+                        f"penalty={fmt_metric(group.get('distortion_penalty'), 1)}\n",
                     )
             else:
-                file.write("No PICMUS phantom score for this mode.\n")
+                file.write("No controlled-scene score for this mode.\n")
             file.write("\n")
 
 
@@ -1129,7 +1127,9 @@ def main():
                 )
             else:
                 row["PSNR_dB_vs_GT"] = psnr(display, gt_display, data_range=1.0)
-            row["MAE_dB_vs_GT"] = float(np.mean(np.abs(db_img - gt_db)))
+            clipped_db = np.clip(db_img, -args.dr, 0.0)
+            clipped_gt_db = np.clip(gt_db, -args.dr, 0.0)
+            row["MAE_dB_vs_GT"] = float(np.mean(np.abs(clipped_db - clipped_gt_db)))
         else:
             row["SSIM_dB_vs_GT"] = np.nan
             row["SSIM_envelope_vs_GT"] = np.nan
@@ -1158,7 +1158,7 @@ def main():
             )
             if not np.isfinite(score) and metrics is None:
                 continue
-            roi_row = {"method": method, "roi_idx": idx, **roi, "contrast_dB": score}
+            roi_row = {"method": method, "roi_idx": idx, **roi, "contrast_score_dB": score}
             if metrics is not None:
                 roi_row.update(metrics)
                 cr_scores.append(metrics["CR_dB"])
@@ -1167,7 +1167,7 @@ def main():
                 residual_scores.append(metrics["cyst_residual_dB"])
             roi_rows.append(roi_row)
             contrast_scores.append(score)
-        row["contrast_dB"] = mean_or_nan(contrast_scores)
+        row["contrast_score_dB"] = mean_or_nan(contrast_scores)
         row["CR_dB"] = mean_or_nan(cr_scores)
         row["CNR"] = mean_or_nan(cnr_scores)
         row["gCNR"] = mean_or_nan(gcnr_scores)
@@ -1190,7 +1190,7 @@ def main():
         row["speckle_pass_rate"] = mean_or_nan(
             [s["speckle_pass"] for s in speckle_stats],
         )
-        row["PICMUS_speckle_penalty"] = speckle_penalty_for_method(
+        row["speckle_penalty"] = speckle_penalty_for_method(
             roi_rows,
             method,
         )
@@ -1231,7 +1231,7 @@ def main():
         row["distortion_pass_rate"] = mean_or_nan(
             [s["distortion_pass"] for s in target_stats],
         )
-        row["PICMUS_distortion_penalty"] = distortion_penalty_for_method(
+        row["distortion_penalty"] = distortion_penalty_for_method(
             target_rows,
             method,
             source,
@@ -1244,13 +1244,13 @@ def main():
         "SSIM_envelope_vs_GT",
         "PSNR_dB_vs_GT",
         "MAE_dB_vs_GT",
-        "contrast_dB",
+        "contrast_score_dB",
         "CR_dB",
         "CNR",
         "gCNR",
         "cyst_residual_dB",
         "speckle_pass_rate",
-        "PICMUS_speckle_penalty",
+        "speckle_penalty",
         "speckle_KS_D",
         "speckle_KS_p",
         "speckle_SNR",
@@ -1261,7 +1261,7 @@ def main():
         "islr_db",
         "distortion_mm",
         "distortion_pass_rate",
-        "PICMUS_distortion_penalty",
+        "distortion_penalty",
     ]
     write_csv(os.path.join(out_dir, "summary_metrics.csv"), rows, summary_fields)
     contrast_group_rows = build_contrast_group_rows(
@@ -1294,7 +1294,7 @@ def main():
         else:
             write_csv(path, [{"status": "not_applicable"}], ["status"])
     write_picmus_report(
-        os.path.join(out_dir, "picmus_challenge_summary.txt"),
+        os.path.join(out_dir, "evaluation_protocol_summary.txt"),
         mode,
         source,
         methods,
@@ -1324,6 +1324,25 @@ def main():
         "contrast_rois": rois,
         "resolution_targets": targets,
         "dr": args.dr,
+        "protocol": "ours_picmus_inspired",
+        "metric_domains": {
+            "contrast_score_dB": "relative dB domain from normalized envelope",
+            "CR_dB": "linear envelope mean ratio, reported in dB",
+            "CNR": "linear envelope domain",
+            "gCNR": "linear envelope domain, fixed 256-bin histogram on [0, 1]",
+            "speckle_KS_D": "linear envelope domain with 5-pixel block sampling",
+            "speckle_SNR": "linear envelope domain with 5-pixel block sampling",
+            "ENL": "linear envelope domain with 5-pixel block sampling",
+            "FWHM_axial_mm": "relative dB domain, -6 dB width",
+            "FWHM_lateral_mm": "relative dB domain, -6 dB width",
+            "pslr_db": "relative dB domain",
+            "islr_db": "relative dB domain",
+            "SSIM_dB_vs_GT": "[-dr, 0] dB display domain",
+            "SSIM_envelope_vs_GT": "normalized linear envelope domain",
+            "PSNR_dB_vs_GT": "[-dr, 0] dB display domain",
+            "MAE_dB_vs_GT": "clipped [-dr, 0] dB domain",
+        },
+        "normalization": "Each output and GT frame is independently peak-normalized to 0 dB before relative metrics.",
         "note": "Standard metrics use the predefined phantom ROI and target definitions when available.",
     }
     with open(
@@ -1343,7 +1362,7 @@ def main():
             f"Saved resolution group metrics: {os.path.join(out_dir, 'resolution_group_metrics.csv')}",
         )
     print(
-        f"Saved PICMUS-style report: {os.path.join(out_dir, 'picmus_challenge_summary.txt')}",
+        f"Saved evaluation protocol report: {os.path.join(out_dir, 'evaluation_protocol_summary.txt')}",
     )
     print(
         f"Mode={mode}, source={source}, contrast_rois={len(rois)}, resolution_targets={len(targets)}",
