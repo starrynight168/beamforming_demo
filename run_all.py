@@ -5,10 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-try:
-    import yaml
-except ImportError:
-    yaml = None
+from run_one import load_config as load_comparison_config
+from run_one import resolve_path, scene_ids
 
 
 ROOT = Path(__file__).resolve().parent
@@ -37,33 +35,11 @@ def parse_args():
     return args
 
 
-def load_config(path):
-    """Load config."""
-    if yaml is None:
-        raise RuntimeError(
-            "PyYAML is required to read config.yaml. Install with: pip install pyyaml",
-        )
-    with open(path, encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    if not isinstance(config, dict):
-        raise ValueError(f"Config must be a mapping: {path}")
-    return config
-
-
 def main():
     """Run the command-line workflow."""
     args = parse_args()
-    config = load_config(ROOT / args.config)
-    scene_configs = config.get("scenes")
-    if not isinstance(scene_configs, list) or not all(isinstance(scene, dict) for scene in scene_configs):
-        raise ValueError("config.scenes 必须是场景字典列表")
-    all_scenes = [scene.get("id") for scene in scene_configs]
-    if (
-        not all_scenes
-        or any(not isinstance(scene_id, str) or not scene_id.strip() for scene_id in all_scenes)
-        or len(all_scenes) != len(set(all_scenes))
-    ):
-        raise ValueError("config.scenes 必须包含非空且不重复的 id")
+    config = load_comparison_config(resolve_path(args.config))
+    all_scenes = scene_ids(config)
     scenes = all_scenes if args.only == "all" else [item.strip() for item in args.only.split(",") if item.strip()]
     if not scenes or len(scenes) != len(set(scenes)):
         raise ValueError("--only 必须包含非空且不重复的场景 id")

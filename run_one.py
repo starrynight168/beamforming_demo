@@ -90,20 +90,26 @@ def load_config(path):
 
 def find_scene(config, scene_id):
     """Execute find scene."""
-    scenes = config.get("scenes")
-    if not isinstance(scenes, list) or not all(isinstance(scene, dict) for scene in scenes):
-        raise ValueError("config.scenes 必须是场景字典列表")
-    scene_ids = [scene.get("id") for scene in scenes]
-    if (
-        not scene_ids
-        or any(not isinstance(value, str) or not value.strip() for value in scene_ids)
-        or len(scene_ids) != len(set(scene_ids))
-    ):
-        raise ValueError("config.scenes 必须包含非空且不重复的 id")
-    for scene in scenes:
+    scene_ids(config)
+    for scene in config["scenes"]:
         if scene.get("id") == scene_id:
             return scene
     raise ValueError(f"Scene not found: {scene_id}")
+
+
+def scene_ids(config):
+    """Return validated scene ids."""
+    scenes = config.get("scenes")
+    if not isinstance(scenes, list) or not all(isinstance(scene, dict) for scene in scenes):
+        raise ValueError("config.scenes 必须是场景字典列表")
+    ids = [scene.get("id") for scene in scenes]
+    if (
+        not ids
+        or any(not isinstance(value, str) or not value.strip() for value in ids)
+        or len(ids) != len(set(ids))
+    ):
+        raise ValueError("config.scenes 必须包含非空且不重复的 id")
+    return ids
 
 
 def resolve_path(path):
