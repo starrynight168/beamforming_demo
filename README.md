@@ -23,8 +23,10 @@ beamforming_demo/
   ├── config.yaml               # 统一全局实验与算法默认超参数配置文件
   ├── run_one.py                # 单场景多算法批量重建、对比拼接与指标评估入口
   ├── run_all.py                # 一键运行配置中所有场景的批处理脚本
-  ├── run_wizard_cn.py          # 面向交互式超声成像配置的中文引导向导
-  ├── run_ablation_cn.py        # 用于算法超参数调优与指标自动分析的消融实验工具
+  ├── tools/                    # 辅助工具与专项实验脚本
+  │    ├── run_wizard_cn.py     # 面向交互式超声成像配置的中文引导向导
+  │    ├── run_ablation_cn.py   # 用于算法超参数调优与指标自动分析的消融实验工具
+  │    └── ablate_sound_speed.py # 声速专项消融实验
   │
   ├── data/                     # 数据管理目录
   │    ├── pack_data.py         # 原始 PICMUS 格式数据打包为工程自描述 H5 的脚本
@@ -152,7 +154,7 @@ python run_all.py --only simulation_contrast_speckle,carotid_cross
 
 运行命令：
 ```bash
-python run_wizard_cn.py
+python tools/run_wizard_cn.py
 ```
 
 ### 2. 参数消融实验工具 (`run_ablation_cn.py`)
@@ -163,7 +165,13 @@ python run_wizard_cn.py
 
 运行命令：
 ```bash
-python run_ablation_cn.py
+python tools/run_ablation_cn.py
+```
+
+### 3. 声速专项消融 (`tools/ablate_sound_speed.py`)
+用于评估不同声速对单角度 MV 成像结果的影响：
+```bash
+python tools/ablate_sound_speed.py
 ```
 
 ---

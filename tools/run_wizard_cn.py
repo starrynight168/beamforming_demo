@@ -15,7 +15,7 @@ import yaml
 COMPARISON_VALUE_2 = 2
 COMPARISON_VALUE_4 = 4
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 
 
