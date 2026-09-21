@@ -1,38 +1,33 @@
 """Provide Python utilities for esbmv."""
 
 import argparse
-import json
 import os
 import time
 
-import matplotlib
 import numpy as np
 import torch
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from common import (
-    db_display_range,
-    dynamic_aperture_channel_count,
-    interpolate_channel_samples,
-    optional_aperture_window_1d,
-    parse_selected_angles,
-    resolve_project_path,
-    tgc_gain,
-    validate_db_output,
-)
-from common import (
+from algorithms.common import (
     add_common_arguments,
     add_io_arguments,
     closed_unit_interval_float,
+    dynamic_aperture_channel_count,
+    interpolate_channel_samples,
+    load_from_h5,
     nonnegative_float,
     nonnegative_int,
+    optional_aperture_window_1d,
+    parse_selected_angles,
+    print_physical_summary,
     positive_odd_int,
+    resolve_project_path,
+    save_comparison_figure,
+    save_figure,
+    tgc_gain,
     unit_interval_float,
+    validate_db_output,
+    write_params,
 )
-from common import load_from_h5
-from matplotlib import patches
-from matplotlib.gridspec import GridSpec
 
 COMPARISON_VALUE_3 = 3
 COMPARISON_VALUE_32 = 32
@@ -93,77 +88,6 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 H5_PATH = None
 OUTPUT_DIR = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def print_physical_summary(
-    c,
-    fc,
-    fs,
-    pitch,
-    n_elem,
-    angles,
-    t0,
-    height,
-    width,
-    dz,
-    dx,
-    depth_min,
-    depth_max,
-    selected_angles,
-    has_gt,
-):
-    """Execute print physical summary."""
-    wavelength = c / fc
-    pw = (n_elem - 1) * pitch
-    fov_lateral = pw * 1000
-    fov_depth = (depth_max - depth_min) * 1000
-
-    angle_display = f"{len(selected_angles)}"
-    if len(selected_angles) == 1:
-        angle_display += f" ({np.degrees(selected_angles[0]):.1f}°)"
-
-    print(f"\n{'=' * 70}")
-    print("  ESBMV Beamforming")
-    print(f"{'=' * 70}")
-    print(f"  H5 file      : {H5_PATH} (sample {args.h5_sample_idx})")
-    print(f"  GT           : {'Available' if has_gt else 'Not available'}")
-    print(f"  Angles       : {angle_display}")
-    print(f"{'=' * 70}")
-    print(f"  Hardware     : {device}", end="")
-    if torch.cuda.is_available():
-        gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
-        print(f" ({gpu_mem:.1f} GB)")
-    else:
-        print()
-    print(
-        f"  Transducer   : {n_elem}ch, fc={fc / 1e6:.1f}MHz, λ={wavelength * 1e3:.3f}mm, pitch={pitch * 1e3:.3f}mm",
-    )
-    print(
-        f"  Sampling     : fs={fs / 1e6:.1f}MHz, {len(angles)} angles, t0={t0[0] * 1e6 if isinstance(t0, np.ndarray) else t0 * 1e6:.3f}μs",
-    )
-    print(f"  Grid         : {height}x{width}, dz={dz * 1e3:.4f}mm, dx={dx * 1e3:.4f}mm")
-    print(
-        f"  FOV          : {fov_depth:.1f}mm x {fov_lateral:.1f}mm (depth {depth_min * 1e3:.1f}~{depth_max * 1e3:.1f}mm)",
-    )
-    print(f"{'=' * 70}")
-    print(f"  F-Number     : {args.f_number}")
-    print(f"  Aperture     : {'Dynamic' if args.dynamic_aperture else 'Fixed Full'}")
-    print(f"  FBSS         : {'Enabled' if args.fbss else 'Disabled'}")
-    print(f"  DL factor    : {args.mv_dl}")
-    print(f"  Subarray     : {args.subarray_ratio}")
-    print(f"  Temporal win : {args.temporal_win}")
-    if args.num_eig > 0:
-        print(f"  Signal eigs  : {args.num_eig}")
-    else:
-        print(f"  Eig threshold: {args.eig_threshold}")
-    print(f"  Window       : {args.window.upper()}")
-    print(f"  Interp       : {args.interp}")
-    print(f"  TGC          : {'Enabled' if args.tgc else 'Disabled'}")
-    if args.tgc:
-        print(f"  TGC Alpha    : {args.tgc_alpha} dB/MHz/cm")
-    print(f"  DR           : {args.dr} dB")
-    print(f"  Output       : {OUTPUT_DIR}")
-    print(f"{'=' * 70}\n")
 
 
 class RowDynamicMVBeamformerIQ:
@@ -463,123 +387,6 @@ class RowDynamicMVBeamformerIQ:
         return i_output, q_output
 
 
-# ================= 保存函数 =================
-def save_comparison_figure(mv_db, gt_norm, extent_mm, out_path, title_str, dr=60.0):
-    """Save comparison figure."""
-    vmin, vmax = db_display_range(dr)
-
-    def to_2d(arr):
-        """Execute to 2d."""
-        if arr.ndim == COMPARISON_VALUE_3:
-            return arr[0] if arr.shape[0] == 1 else arr[:, :, 0]
-        return arr
-
-    mv_db, gt_norm = to_2d(mv_db), to_2d(gt_norm)
-
-    fig = plt.figure(figsize=(12, 8), dpi=300)
-    gs = GridSpec(1, 3, width_ratios=[1, 1, 0.05], figure=fig)
-
-    # Ground Truth
-    ax1 = fig.add_subplot(gs[0, 0])
-    ax1.imshow(gt_norm, cmap="gray", vmin=0, vmax=1, extent=extent_mm, aspect="equal")
-    ax1.set_title("Ground Truth", fontsize=12, pad=10)
-    ax1.set_xlabel("Lateral (mm)")
-    ax1.set_ylabel("Depth (mm)")
-
-    # ESBMV Result
-    ax2 = fig.add_subplot(gs[0, 1])
-    im2 = ax2.imshow(
-        mv_db,
-        cmap="gray",
-        vmin=vmin,
-        vmax=vmax,
-        extent=extent_mm,
-        aspect="equal",
-    )
-    ax2.set_title(f"ESBMV\n{title_str}", fontsize=9, pad=10)
-    ax2.set_xlabel("Lateral (mm)")
-    ax2.set_ylabel("Depth (mm)")
-
-    # Colorbar
-    cax = fig.add_subplot(gs[0, 2])
-    cbar = fig.colorbar(im2, cax=cax, fraction=0.8)
-    cbar.set_label("Amplitude (dB)")
-
-    # Scale bar (5mm)
-    bar_length = 5.0
-    bar_x = extent_mm[1] - bar_length - 2.0
-    bar_y = extent_mm[2] - 2.0
-    scale_bar = patches.Rectangle(
-        (bar_x, bar_y),
-        bar_length,
-        0.5,
-        color="white",
-        zorder=5,
-    )
-    ax2.add_patch(scale_bar)
-    ax2.text(
-        bar_x + bar_length / 2,
-        bar_y - 1.0,
-        "5 mm",
-        color="white",
-        fontsize=10,
-        ha="center",
-        va="bottom",
-        fontweight="bold",
-    )
-
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-
-
-def save_figure(db_img, extent_mm, out_path, title_str, dr=60.0):
-    """Save figure."""
-    vmin, vmax = db_display_range(dr)
-    fig, ax = plt.subplots(figsize=(6, 8), dpi=300)
-    im = ax.imshow(
-        db_img,
-        cmap="gray",
-        vmin=vmin,
-        vmax=vmax,
-        extent=extent_mm,
-        aspect="equal",
-    )
-    ax.set_xlabel("Lateral (mm)")
-    ax.set_ylabel("Depth (mm)")
-    ax.set_title(f"ESBMV\n{title_str}", fontsize=9, pad=15)
-
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("Amplitude (dB)")
-
-    # Scale bar (5mm)
-    bar_length = 5.0
-    bar_x = extent_mm[1] - bar_length - 2.0
-    bar_y = extent_mm[2] - 2.0
-    scale_bar = patches.Rectangle(
-        (bar_x, bar_y),
-        bar_length,
-        0.5,
-        color="white",
-        zorder=5,
-    )
-    ax.add_patch(scale_bar)
-    ax.text(
-        bar_x + bar_length / 2,
-        bar_y - 1.0,
-        "5 mm",
-        color="white",
-        fontsize=10,
-        ha="center",
-        va="bottom",
-        fontweight="bold",
-    )
-
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-
-
 # ================= 主程序 =================
 def main():
     """Run the command-line workflow."""
@@ -628,21 +435,41 @@ def main():
     ]
 
     print_physical_summary(
-        c,
-        fc,
-        fs,
-        pitch,
-        n_elem,
-        angles_all,
-        t0_sub,
-        height,
-        width,
-        dz,
-        dx,
-        depth_min,
-        depth_max,
-        selected_angles,
-        has_gt,
+        method_name=METHOD_NAME,
+        h5_path=H5_PATH,
+        sample_idx=args.h5_sample_idx,
+        output_dir=OUTPUT_DIR,
+        device=device,
+        c=c,
+        fc=fc,
+        fs=fs,
+        pitch=pitch,
+        n_elem=n_elem,
+        angles=angles_all,
+        t0=t0_sub,
+        height=height,
+        width=width,
+        dz=dz,
+        dx=dx,
+        depth_min=depth_min,
+        depth_max=depth_max,
+        selected_angles=selected_angles,
+        has_gt=has_gt,
+        parameters=[
+            ("F-Number", args.f_number),
+            ("Aperture", "Dynamic" if args.dynamic_aperture else "Fixed Full"),
+            ("FBSS", "Enabled" if args.fbss else "Disabled"),
+            ("DL factor", args.mv_dl),
+            ("Subarray", args.subarray_ratio),
+            ("Temporal win", args.temporal_win),
+            ("Num eig", args.num_eig),
+            ("Eig threshold", args.eig_threshold),
+            ("Window", args.window.upper()),
+            ("Interp", args.interp),
+            ("TGC", "Enabled" if args.tgc else "Disabled"),
+            *([("TGC Alpha", f"{args.tgc_alpha} dB/MHz/cm")] if args.tgc else []),
+            ("DR", f"{args.dr} dB"),
+        ],
     )
 
     # 初始化 ESBMV + FBSS 波束合成器
@@ -721,6 +548,7 @@ def main():
         os.path.join(OUTPUT_DIR, f"{out_name}.png"),
         title_params,
         dr=args.dr,
+        method_name=METHOD_NAME,
     )
 
     if has_gt and args.save_gt:
@@ -736,8 +564,7 @@ def main():
     params = vars(args).copy()
     params["method"] = METHOD_NAME
     params["runtime_sec"] = float(dt)
-    with open(os.path.join(OUTPUT_DIR, "params.json"), "w", encoding="utf-8") as f:
-        json.dump(params, f, ensure_ascii=False, indent=2)
+    write_params(os.path.join(OUTPUT_DIR, "params.json"), params)
 
     print(f"  GPU Time: {dt:.2f}s | Saved -> {out_name}")
     print(f"\nDone | Output: {OUTPUT_DIR}")

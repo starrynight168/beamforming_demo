@@ -276,20 +276,20 @@ def load_from_h5(h5_path, sample_idx=0):
             if not np.all(np.isfinite(gt_data)):
                 raise ValueError("GT 包含 NaN/Inf")
 
-        return (
-            c,
-            fc,
-            fs,
-            pitch,
-            n_elem,
-            angles,
-            t0_vec,
-            z_grid,
-            x_grid,
-            i_data,
-            q_data,
-            gt_data,
-            has_gt,
+        return PackedSample(
+            c=c,
+            fc=fc,
+            fs=fs,
+            pitch=pitch,
+            n_elem=n_elem,
+            angles=angles,
+            t0_vec=t0_vec,
+            z_grid=z_grid,
+            x_grid=x_grid,
+            i_data=i_data,
+            q_data=q_data,
+            gt_data=gt_data,
+            has_gt=has_gt,
         )
 
 
@@ -445,7 +445,9 @@ def dynamic_aperture_channel_count(
     if not dynamic_aperture:
         return n_channels
     count = int(depth / (f_number * pitch)) + 1
-    return min(max(count, 1), n_channels)
+    if count < 1 or count > n_channels:
+        raise ValueError("动态孔径超出物理通道范围；请检查深度、F-number 和阵元间距")
+    return count
 
 
 def tgc_gain(z_grid, fc, tgc_alpha):

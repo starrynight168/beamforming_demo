@@ -18,14 +18,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from common import (
+from algorithms.common import (
+    add_common_arguments,
+    add_io_arguments,
     db_display_range,
+    load_from_h5 as load_packed_sample,
     parse_selected_angles,
     resolve_project_path,
     validate_db_output,
 )
-from common import add_common_arguments, add_io_arguments
-from common import load_from_h5 as load_packed_sample
 from matplotlib import patches
 
 METHOD_NAME = "template_algorithm"

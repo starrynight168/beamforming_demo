@@ -16,11 +16,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import patches
 
+from algorithms.common import COMMON_PARAMS
+
 ROOT = Path(__file__).resolve().parent
-ALGORITHMS_DIR = ROOT / "algorithms"
-if str(ALGORITHMS_DIR) not in sys.path:
-    sys.path.insert(0, str(ALGORITHMS_DIR))
-from common import COMMON_PARAMS  # noqa: E402
 
 COMPARISON_VALUE_3 = 3
 MAX_COMPARISON_IMAGES_PER_PAGE = 8
@@ -164,10 +162,12 @@ def build_algorithm_cmd(args, config, scene, algorithm, scene_dir):
     script = ROOT / "algorithms" / f"{algorithm}.py"
     if not script.exists():
         raise FileNotFoundError(f"Algorithm script not found: {script}")
+    module = f"algorithms.{algorithm}"
 
     cmd = [
         args.python_exe,
-        str(script),
+        "-m",
+        module,
         "--h5_path",
         str(resolve_path(scene["h5_path"])),
         "--h5_sample_idx",

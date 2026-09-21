@@ -19,16 +19,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-# Add algorithms and evaluation to path
+# Add project root and evaluation to path
 ROOT_DIR = Path(__file__).resolve().parent.parent
-ALGORITHMS_DIR = ROOT_DIR / "algorithms"
 EVAL_DIR = ROOT_DIR / "evaluation"
-if str(ALGORITHMS_DIR) not in sys.path:
-    sys.path.insert(0, str(ALGORITHMS_DIR))
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 if str(EVAL_DIR) not in sys.path:
     sys.path.insert(0, str(EVAL_DIR))
 
-from common import (  # noqa: E402
+from algorithms.common import (  # noqa: E402
     nonnegative_float,
     nonnegative_int,
     positive_float,
@@ -36,9 +35,8 @@ from common import (  # noqa: E402
     positive_odd_int,
     unit_interval_float,
 )
-from common import load_from_h5  # noqa: E402
-from common import INTERP_CHOICES, WINDOW_CHOICES, tgc_gain  # noqa: E402
-import mv  # noqa: E402
+from algorithms.common import INTERP_CHOICES, WINDOW_CHOICES, load_from_h5, tgc_gain  # noqa: E402
+from algorithms import mv  # noqa: E402
 from evaluate import local_ssim, db_to_display, psnr  # noqa: E402
 
 

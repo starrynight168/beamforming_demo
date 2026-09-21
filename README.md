@@ -42,8 +42,10 @@ beamforming_demo/
   │    ├── esbmv.py             # ESBMV 重建脚本
   │    ├── gcfmv.py             # GCF-MV 重建脚本
   │    ├── cmsaw.py             # CMSAW 重建脚本
-  │    ├── fdmas.py             # F-DMAS 重建脚本
-  │    └── template_algorithm.py # 添加新算法时的标准脚手架模版
+  │    └── fdmas.py             # F-DMAS 重建脚本
+  │
+  ├── docs/templates/           # 添加新算法时的标准脚手架模板
+  │    └── algorithm_template.py
   │
   ├── evaluation/               # 成像指标计算与绘图模块
   │    ├── evaluate.py          # controlled phantom 场景的 PICMUS 语义定量指标核心
@@ -109,7 +111,7 @@ pip install -r requirements.txt
 ### 1. 单独运行指定算法进行成像
 可以直接调用算法脚本对特定 H5 里的某个样本进行重建：
 ```bash
-python algorithms/das.py --h5_path data/simulation.h5 --h5_sample_idx 0 --output_dir results/simulation_contrast_speckle
+   python -m algorithms.das --h5_path data/simulation.h5 --h5_sample_idx 0 --output_dir results/simulation_contrast_speckle
 ```
 此操作将在 `results/simulation_contrast_speckle/das/` 下生成重建的矩阵 `das.npy` 和 B-Mode 图像 `das.png`。
 
@@ -193,7 +195,7 @@ python tools/ablate_sound_speed.py
 
 1. **复制模版**：
    ```bash
-   cp algorithms/template_algorithm.py algorithms/my_method.py
+   cp docs/templates/algorithm_template.py algorithms/my_method.py
    ```
 2. **设定唯一算法 ID**：
    打开新创建的脚本，确保顶部的 `METHOD_NAME = "my_method"`，保证脚本名、METHOD_NAME、以及后续在 `config.yaml` 中配置的键值三者完全一致。
