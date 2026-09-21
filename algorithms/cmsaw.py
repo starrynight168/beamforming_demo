@@ -13,7 +13,7 @@ import torch
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from beamforming_utils import (
+from common import (
     aperture_window_1d,
     db_display_range,
     dynamic_aperture_channel_count,
@@ -22,14 +22,14 @@ from beamforming_utils import (
     resolve_project_path,
     validate_db_output,
 )
-from common_params import (
+from common import (
     add_common_arguments,
     add_io_arguments,
     nonnegative_float,
     positive_odd_int,
     unit_interval_float,
 )
-from h5_loader import load_from_h5
+from common import load_from_h5
 from matplotlib import patches
 from matplotlib.gridspec import GridSpec
 
@@ -229,7 +229,7 @@ def ensure_mv_baseline(baseline_path):
             baseline_mtime = os.path.getmtime(full_path)
             dependencies = [H5_PATH, os.path.join(SCRIPT_DIR, "mv.py")]
             dependencies.extend(
-                os.path.join(SCRIPT_DIR, name) for name in ("beamforming_utils.py", "common_params.py", "h5_loader.py")
+                os.path.join(SCRIPT_DIR, "common.py")
             )
             if any(os.path.getmtime(path) > baseline_mtime for path in dependencies):
                 return False, "输入数据或 MV 源码比基线更新"

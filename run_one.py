@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent
 ALGORITHMS_DIR = ROOT / "algorithms"
 if str(ALGORITHMS_DIR) not in sys.path:
     sys.path.insert(0, str(ALGORITHMS_DIR))
-from common_params import COMMON_PARAMS  # noqa: E402
+from common import COMMON_PARAMS  # noqa: E402
 
 COMPARISON_VALUE_3 = 3
 MAX_COMPARISON_IMAGES_PER_PAGE = 8

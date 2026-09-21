@@ -36,9 +36,7 @@ beamforming_demo/
   │    └── in_vivo.h5           # 打包后的在体颈动脉数据（横切面与纵切面）
   │
   ├── algorithms/               # 核心重建算法及公共工具模块
-  │    ├── common_params.py     # 公共命令行参数定义
-  │    ├── beamforming_utils.py # 延迟计算、插值方法、窗函数、图像保存等基础工具
-  │    ├── h5_loader.py         # 统一的数据读取与数据 contract 硬校验模块
+  │    ├── common.py            # 公共参数、H5 数据、数值、路径和输出工具
   │    ├── das.py               # DAS 重建脚本
   │    ├── mv.py                # MV 重建脚本
   │    ├── esbmv.py             # ESBMV 重建脚本
@@ -200,7 +198,7 @@ python tools/ablate_sound_speed.py
 2. **设定唯一算法 ID**：
    打开新创建的脚本，确保顶部的 `METHOD_NAME = "my_method"`，保证脚本名、METHOD_NAME、以及后续在 `config.yaml` 中配置的键值三者完全一致。
 3. **实现核心重建逻辑**：
-   在 `my_method.py` 中实现 `beamform(data, args)` 函数。该函数的输入 `data` 已经通过公共 H5 载入器（`h5_loader.py`）完成了网格映射与通道延迟的映射。您只需要读取 `data["I"]` / `data["Q"]`，按需要计算加权值（如自适应权重矩阵），并返回最终二维的 B-Mode 对数包络图像矩阵（对齐 `[z_grid, x_grid]`，峰值归一化至 `0 dB`）。
+   在 `my_method.py` 中实现 `beamform(data, args)` 函数。该函数的输入 `data` 已经通过公共 H5 载入器（`common.py`）完成了网格映射与通道延迟的映射。您只需要读取 `data["I"]` / `data["Q"]`，按需要计算加权值（如自适应权重矩阵），并返回最终二维的 B-Mode 对数包络图像矩阵（对齐 `[z_grid, x_grid]`，峰值归一化至 `0 dB`）。
 4. **配置默认参数**：
    若新算法有专属的控制超参数，首先在 `my_method.py` 内部定义 argparse 参数（例如 `--my_param`），然后在 `config.yaml` 根目录的 `algorithm_params` 中加入默认值：
    ```yaml

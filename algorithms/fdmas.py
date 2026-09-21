@@ -11,7 +11,7 @@ import torch
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from beamforming_utils import (
+from common import (
     aperture_window_1d,
     db_display_range,
     dynamic_aperture_channel_count,
@@ -21,8 +21,8 @@ from beamforming_utils import (
     tgc_gain,
     validate_db_output,
 )
-from common_params import add_common_arguments, add_io_arguments
-from h5_loader import load_from_h5
+from common import add_common_arguments, add_io_arguments
+from common import load_from_h5
 from matplotlib import patches
 from matplotlib.gridspec import GridSpec
 

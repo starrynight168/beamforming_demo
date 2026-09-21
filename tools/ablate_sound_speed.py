@@ -28,7 +28,7 @@ if str(ALGORITHMS_DIR) not in sys.path:
 if str(EVAL_DIR) not in sys.path:
     sys.path.insert(0, str(EVAL_DIR))
 
-from common_params import (  # noqa: E402
+from common import (  # noqa: E402
     nonnegative_float,
     nonnegative_int,
     positive_float,
@@ -36,8 +36,8 @@ from common_params import (  # noqa: E402
     positive_odd_int,
     unit_interval_float,
 )
-from h5_loader import load_from_h5  # noqa: E402
-from beamforming_utils import INTERP_CHOICES, WINDOW_CHOICES, tgc_gain  # noqa: E402
+from common import load_from_h5  # noqa: E402
+from common import INTERP_CHOICES, WINDOW_CHOICES, tgc_gain  # noqa: E402
 import mv  # noqa: E402
 from evaluate import local_ssim, db_to_display, psnr  # noqa: E402
 
