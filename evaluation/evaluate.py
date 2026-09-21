@@ -44,7 +44,6 @@ CONTROLLED_SCENES = frozenset(
 )
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, os.pardir))
-SOURCE_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, os.pardir))
 PICMUS_ROOT = os.path.join(PROJECT_ROOT, "data", "PICMUS")
 
 
@@ -152,7 +151,6 @@ def resolve_existing(relative_path):
         os.path.join(PICMUS_ROOT, relative_path),
         os.path.join(PROJECT_ROOT, "data", relative_path),
         os.path.join(PROJECT_ROOT, relative_path),
-        os.path.join(SOURCE_ROOT, relative_path),
     ]
     for candidate in candidates:
         if os.path.exists(candidate):

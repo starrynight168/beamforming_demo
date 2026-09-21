@@ -263,7 +263,7 @@ def ask_multi_choice(prompt, options, default_keys):
             return default_keys
         selected = []
         ok = True
-        for item in raw.replace(",", ",").split(","):
+        for item in raw.split(","):
             token = item.strip().lower()
             if not token:
                 continue
@@ -295,7 +295,7 @@ def validate_select_angles(value):
     text = str(value).strip().lower()
     if text in ("center", "all"):
         return text
-    parts = [part.strip() for part in text.replace(",", ",").split(",") if part.strip()]
+    parts = [part.strip() for part in text.split(",") if part.strip()]
     if len(parts) == 1 and parts[0].isdigit() and int(parts[0]) > 0:
         return parts[0]
     if len(parts) > 1 and all(part.isdigit() for part in parts):
@@ -420,7 +420,7 @@ def choose_h5():
             try:
                 info = inspect_h5(path)
                 desc = f"{rel}  | 样本 {info['n']},角度 {info['a']},T={info['t']},通道={info['c']},GT={info['gt']}"
-            except Exception as exc:
+            except (OSError, KeyError, RuntimeError, TypeError, ValueError, yaml.YAMLError) as exc:
                 desc = f"{rel}  | 无法读取:{exc}"
             options.append((str(path), desc))
         options.append(("manual", "手动输入 H5 路径"))
@@ -432,7 +432,7 @@ def choose_h5():
         path = Path(raw.strip('"').strip("'"))
         if not path.is_absolute():
             path = ROOT / path
-        if path.exists():
+        if path.is_file():
             return path
         print("文件不存在,请重新输入。")
 
@@ -511,7 +511,10 @@ def load_base_config():
             "缺少 PyYAML,无法读取 config.yaml。请先安装:pip install pyyaml",
         )
     with open(ROOT / "config.yaml", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f) or {}
+    if not isinstance(config, dict):
+        raise ValueError("config.yaml 顶层必须是映射")
+    return config
 
 
 def make_temp_config_path(output_root, scene_id):
