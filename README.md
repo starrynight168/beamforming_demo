@@ -1,402 +1,209 @@
-# 单角度超声 IQ 学习与自适应波束形成
+# Beamforming Demo
 
-本项目围绕超声平面波成像中的单角度输入学习任务展开：以单角度 IQ 信号作为网络输入，学习高质量自适应波束形成结果，并保留多角度 DAS 等传统重建结果作为参考。
+`beamforming_demo` 是一个基于 Python/PyTorch 实现的超声波束合成（Beamforming）对比与评估工程。本工程实现了多种主流波束合成算法，支持 GPU 加速，并对四个 controlled phantom 场景提供与 PICMUS (Platform for Interdisciplinary Research in Medical Ultrasound) 规则语义对齐的定量评估；in-vivo 场景用于成像对比，不执行官方靶标定量指标。
 
-项目同时包含数据打包、传统/自适应波束形成算法、训练脚本、结果评估与 H5 数据检查工具，方便在仿真、PICMUS、EPFL 体内/体外数据上进行统一实验。
+---
 
-## 项目结构
+## 核心算法列表
+
+本工程目前支持并实现了以下波束合成算法：
+- **DAS (Delay and Sum)**: 延迟相加法，最基础、高效的经典波束合成方法。支持离散通道孔径与连续几何孔径模式。
+- **MV (Minimum Variance)**: 最小方差自适应波束合成，基于数据自适应计算空间加权矢量，显著提升图像分辨率与对比度。
+- **ESBMV (Eigenspace-Based Minimum Variance)**: 特征空间最小方差法，通过对协方差矩阵进行特征分解并投影到信号子空间，增强 MV 的稳健性。
+- **GCF-MV (Generalized Coherence Factor - Minimum Variance)**: 广义相干因子自适应波束合成，利用 GCF 压制旁瓣和噪声。
+- **F-DMAS (Filtered Delay Multiply and Sum)**: 滤波延迟相乘相加法，通过孔径内对信号进行两两相乘处理，有效降低主瓣宽度并抑制旁瓣。
+- **CMSAW (Coherence-based MV variant)**: 基于自适应相干权重的最小方差流式优化方法，在大角度复合 CPI 下兼顾画质与显存占用。
+
+---
+
+## 项目目录结构
 
 ```text
-deeplearn/
-├─ README.md                # 项目总览与统一工作流
-├─ config.yaml              # 根目录算法对比、场景和显示参数
-├─ run_one.py               # 单场景算法运行与评估
-├─ run_all.py               # 多场景批量运行
-├─ tools/                   # 辅助工具
-│  ├─ run_ablation_cn.py    # 算法/场景消融批处理
-│  └─ run_wizard_cn.py      # 算法运行向导
-├─ algorithms/              # DAS、MV、ESBMV、GCF-MV、CMSAW、F-DMAS、MBAN 及公共工具
-├─ data/
-│  ├─ scripts/              # EPFL/PICMUS 数据打包与仿真脚本
-│  ├─ checks/               # H5 字段、尺度、数据完整性检查工具
-│  ├─ EPFL/                 # EPFL 原始 npz 数据目录
-│  └─ *.h5                  # 打包后的训练/评估数据
-├─ train/                   # MBAN 训练、软件评估和硬件感知评估
-│  ├─ config.yaml           # 训练、数据、模型和软件运行模式
-│  ├─ hardware_eval.yaml    # 硬件默认值、profile 和评估矩阵
-│  ├─ evaluate_mban.py      # 软件/PTQ/MC/硬件统一评估入口
-│  ├─ protocols/            # 特殊实验协议
-│  ├─ benchmarks/           # 性能/数值 benchmark
-│  ├─ eval_core/            # 统一评估、图表和硬件链路诊断
-│  ├─ tests/                # MBAN 配置、硬件和 beamforming 回归测试
-│  ├─ docs/                 # 训练、评估和论文实验口径
-│  ├─ server_jobs/          # 云端训练与消融实验批处理入口
-│  └─ results/              # MBAN 实验与消融资产
-│     ├─ SI/                # 10 项核心微观/结构消融基线与评测 (README.md 详述)
-│     └─ model_ablation/    # 3×7 骨干容量与控制自由度 Pareto 消融 (README.md 详述)
-├─ evaluation/              # 指标计算与绘图
-└─ requirements.txt         # Python依赖
+beamforming_demo/
+  ├── config.yaml               # 统一全局实验与算法默认超参数配置文件
+  ├── run_one.py                # 单场景多算法批量重建、对比拼接与指标评估入口
+  ├── run_all.py                # 一键运行配置中所有场景的批处理脚本
+  ├── tools/                    # 辅助工具与专项实验脚本
+  │    ├── run_wizard_cn.py     # 面向交互式超声成像配置的中文引导向导
+  │    └── run_ablation_cn.py   # 用于算法超参数调优与指标自动分析的消融实验工具
+  │
+  ├── data/                     # 数据管理目录
+  │    ├── pack_data.py         # 原始 PICMUS 格式数据打包为工程自描述 H5 的脚本
+  │    ├── check_data.py        # 针对 H5 数据集类型、形状、完整性、NaN/Inf 的体检工具
+  │    ├── simulation.h5        # 打包后的仿真数据（暗斑/散斑与分辨率/畸变靶点）
+  │    ├── experiments.h5       # 打包后的水槽实验数据（暗斑/散斑与分辨率/畸变靶点）
+  │    └── in_vivo.h5           # 打包后的在体颈动脉数据（横切面与纵切面）
+  │
+  ├── algorithms/               # 核心重建算法及公共工具模块
+  │    ├── common.py            # 公共参数、H5 数据、数值、路径和输出工具
+  │    ├── das.py               # DAS 重建脚本
+  │    ├── mv.py                # MV 重建脚本
+  │    ├── esbmv.py             # ESBMV 重建脚本
+  │    ├── gcfmv.py             # GCF-MV 重建脚本
+  │    ├── cmsaw.py             # CMSAW 重建脚本
+  │    └── fdmas.py             # F-DMAS 重建脚本
+  │
+  ├── algorithms/template_algorithm.py # 添加新算法时的标准脚手架模板
+  │
+  ├── evaluation/               # 成像指标计算与绘图模块
+  │    ├── evaluate.py          # controlled phantom 场景的 PICMUS 语义定量指标核心
+  │    └── plot_metrics.py      # 指标对比柱状图、横向波束剖面图（Profile）自动绘制工具
+  │
+  └── results/                  # 重建图像与评估报告输出目录（自动创建）
 ```
 
-配置文件职责必须分开：根目录 `config.yaml` 只控制传统算法和场景；`train/config.yaml`
-控制 MBAN 训练与软件模型；`train/hardware_eval.yaml` 控制 QAT/PTQ 使用的硬件默认参数、
-非理想 profile 和 mapping/CrossSim/PPA 评估矩阵。不要把三类配置混写。
+---
 
-## 环境与执行约定
+## 环境安装与配置
 
-在项目根目录执行命令。依赖可使用 `requirements.txt` 或 `environment.yml` 安装；GPU训练还需要与本机 CUDA/PyTorch 匹配的环境。所有路径示例均相对于 `E:\paper1\deeplearn`，也可以替换为绝对路径。
+推荐使用 Conda 建立独立的 Python 环境：
 
-建议的最小顺序是：
-
-```text
-准备/打包 H5
-→ check_data.py --full 生成并固定检查凭证
-→ run_one.py / run_all.py 运行传统算法和场景评估
-→ train/mban.py 训练 FP32 MBAN
-→ train/evaluate_mban.py 做 test/PTQ/硬件评估
-→ evaluation/ 生成统一指标表和图
+```bash
+# 创建并激活 Conda 环境
+conda env create -f environment.yml
+conda activate beamforming-demo
 ```
 
-训练和正式评估都应固定 `seed`、数据 split、checkpoint、配置快照和代码版本。不要直接覆盖已有结果目录。
+也可以直接通过 pip 安装依赖项：
 
-辅助工具从根目录运行：
+```bash
+pip install -r requirements.txt
+```
 
-```text
+> [!NOTE]
+> 本项目核心计算完全基于 PyTorch 张量运算。默认配置为 CUDA GPU 加速；若无 NVIDIA GPU，程序将自动回退到 CPU 执行计算。
+
+---
+
+## 数据集准备与体检
+
+为了进行完整的算法比对，需要将 PICMUS 挑战赛数据导入本工程：
+
+1. **下载原始数据**：
+   从以下链接下载预整理好的 `PICMUS` 原始数据压缩包：
+   - 链接：[PICMUS 数据压缩包](https://drive.google.com/file/d/1CQxjvpwGHDyzwHSJQux-mkXLl97mul-f/view?usp=drive_link)
+
+2. **放置路径**：
+   在项目根目录下创建并解压到 `data/` 目录，确保其目录布局为：
+   `data/PICMUS/database/` 等。
+
+3. **打包生成 H5 数据集**：
+   运行打包工具，该脚本会执行 complex RMS 归一化，嵌入自描述元数据 `config_yaml`，并以 `float16` 存储 IQ。源数据必须提供有限正数的采样频率、声速、载频（`fc`/`modulation_frequency`）以及阵元间距（`pitch`/均匀 `probe_geometry`）；缺失时直接报错，不使用推测默认值。`initial_time` 可以是标量或与发射角数量一致的向量：
+   ```bash
+   python data/pack_data.py
+   python data/pack_data.py --only simulation
+   # --only 也支持 experiments 或 in_vivo
+   ```
+
+4. **进行数据完整性体检**：
+   验证必需字段、数据类型、形状、有限性、归一化尺度、路径元数据和 contract 一致性。`valid_time_samples` 必须是有效整数，其后的 IQ 必须保持零填充；`all_envdb_norm` 必须为有限的 `[N,1,H,W]` 且位于 `[0,1]`：
+   ```bash
+   python data/check_data.py
+   python data/check_data.py data/simulation.h5
+   ```
+
+---
+
+## 运行指南
+
+### 1. 单独运行指定算法进行成像
+可以直接调用算法脚本对特定 H5 里的某个样本进行重建：
+```bash
+   python -m algorithms.das --h5_path data/simulation.h5 --h5_sample_idx 0 --output_dir results/simulation_contrast_speckle
+```
+此操作将在 `results/simulation_contrast_speckle/das/` 下生成重建的矩阵 `das.npy` 和 B-Mode 图像 `das.png`。
+
+### 2. 单个场景的一键批量比对与评估 (`run_one.py`)
+使用 `run_one.py` 可以自动调度 `config.yaml` 中配置的所有成像方法进行同一场景的波束合成，并在场景根目录下生成包含 Ground Truth 的拼接对比图 `comparison.png`，同时导出高分辨率独立的个人 B-Mode 图像目录 `individual_images/`：
+```bash
+python run_one.py --scene simulation_contrast_speckle
+```
+重建完成后，controlled phantom 场景会自动启动评估系统，在 `metrics/` 目录下生成：
+- **`summary_metrics.csv`**: 所有算法在当前场景的全面对比指标表。
+- **`contrast_roi_metrics.csv` / `resolution_target_metrics.csv`**: 单个 ROI 和点目标的明细指标。
+- **`contrast_group_metrics.csv` / `resolution_group_metrics.csv`**: 按场景分组的汇总指标。
+- **`standard_metrics.png` / `auxiliary_metrics.png`**: 主要和辅助指标的柱状对比图。
+- **`cyst_profile.png` / `point_profile.png` / `roi_targets.png`**: 可用时生成的剖面图和 ROI/靶标示意图。
+- **`picmus_challenge_summary.txt`**: PICMUS 风格分组指标的文本总结。
+
+in-vivo 场景仍会生成算法输出、`comparison.png` 和 `individual_images/`，但会跳过 phantom ROI、点目标和 PICMUS 分组定量评估。
+
+### 3. 一键重建并评估全部场景 (`run_all.py`)
+一次性运行项目内的全部仿真、实验和在体（in-vivo）场景；其中只有四个 controlled phantom 场景会生成完整定量评估：
+```bash
+python run_all.py
+```
+若只想执行部分场景，可使用命令行过滤：
+```bash
+python run_all.py --only simulation_contrast_speckle,carotid_cross
+```
+
+---
+
+## 交互向导与参数实验工具
+
+为了更方便地进行研究，本工程提供了两个功能强大的中文交互式脚本：
+
+### 1. 成像引导向导 (`run_wizard_cn.py`)
+为初学者或临时调参设计的图形化命令行向导。支持一步步中文提问：
+- 交互式选择数据集、样本帧、波束合成方法及参数；
+- 提供详细的小白背景说明，解释诸如 F-Number、TGC、窗函数和插值法对画质的实质影响；
+- 支持自适应参数提示，根据所选算法动态询问其特有超参数（例如调节 ESBMV 的特征门限、F-DMAS 的时间平滑窗等），输入非法时实时拦截并报错。
+
+运行命令：
+```bash
 python tools/run_wizard_cn.py
+```
+
+### 2. 参数消融实验工具 (`run_ablation_cn.py`)
+针对学术研究设计的“控制单变量超参数消融”工具。可以快速获取特定超参数变化对重建质量的演变曲线：
+- 自由选择要消融的方法专属超参数（如 MV 的对角加载因子、GCF 的低频 bins 数量、发射角度数等）；
+- 支持指定具体的离散取值列表（如 `1, 3, 11, 75`），或使用等差生成器（如 `1.2:0.1:2.0`）；
+- 自动完成批量消融重建后，在消融根目录统一调度评估，把每个参数值视作“不同算法”绘制直观的横向演变柱状图、点目标波束剖面对比曲线等，并集中输出高品质高清成像对比单图 `individual_images/`。
+
+运行命令：
+```bash
 python tools/run_ablation_cn.py
 ```
 
-## 数据打包目标
-
-默认打包逻辑面向“单角度输入，学习高质量 teacher”的训练范式：
-
-```text
-输入：
-  单角度 baseband IQ
-
-主 teacher：
-  MV
-
-参考 teacher：
-  多角度 DAS
-```
-
-打包配置位于：
-
-```text
-data/scripts/pack_config.yaml
-```
-
-核心配置示例：
-
-```yaml
-outputs:
-  main: mv
-  references:
-    - das
-  angle_select:
-    mv: input
-    das: all
-  save_complex:
-    - mv
-  save_envdb:
-    - mv
-    - das
-  save_amp: []
-
-pack:
-  input_angles: 1
-  norm_mode: rms
-  preview_root: ../gt_images
-```
-
-其中：
-
-- `pack.input_angles` 控制保存到 H5 的输入角度数；
-- `outputs.angle_select` 控制每个 teacher 使用的重建角度；
-- `save_envdb` 保存显示域 B-mode 标签；
-- `save_complex` 保存复数 IQ teacher；
-- `save_amp` 可选保存线性幅值。
-
-运行 EPFL 打包：
-
-```powershell
-python data\scripts\pack_EPFL.py --config data\scripts\pack_config.yaml
-```
-
-打包脚本支持单个 `npz`、多个 `npz`、文件夹和多个 dataset 配置。已有 H5 会增量续写，并在恢复时自动检测和压缩断点空槽。
-
-EPFL 的 HDF5 压缩由 `pack_config.yaml` 的 `compression` 控制，可选 `none`、`gzip`、`lzf`、`blosc_zstd`；PICMUS 仿真的压缩参数直接在 `simulate_PICMUS.py` 文件顶部设置。
-
-## H5 主要字段
-
-当前 H5 字段以训练和复现实验为核心：
-
-```text
-all_multi_I              # 输入 IQ 实部，shape=[N,A,T,C]
-all_multi_Q              # 输入 IQ 虚部，shape=[N,A,T,C]
-time_start_vector        # 每个输入角度的 t0，shape=[N,A]
-valid_time_samples       # 每个样本的有效时间长度，shape=[N]；其后 IQ 必须为零填充
-angles                   # H5 保存的输入角度
-
-all_envdb_norm           # 主 teacher 显示域标签，默认 MV
-all_envdb_das_norm       # DAS 参考显示域标签
-
-mv_i
-mv_q                     # MV 复数 IQ teacher
-
-all_scale_ref            # 输入 IQ 归一化尺度
-all_norm_ref             # 主 teacher 相对输入尺度
-
-acquisition_id           # 样本 ID，例如 invivo_15002
-body_region              # 部位，例如 carotid
-input_angle_source       # 输入角度策略
-gt_angle_source_by_alg   # 各 teacher 的角度策略
-n_written                # 有效写入样本数
-```
-
-这里的`*_ref`是幅度归一化/恢复用的尺度因子，不是另一张GT图，也不是评估指标；`norm_references`则是H5元数据中“算法名→尺度字段”的映射。
-
-GT口径：四个受控场景的完整指标使用`all_envdb_norm`；EPFL打包数据默认该字段为MV显示域GT，训练监督对应`config_yaml.generation.training_targets.complex_iq_targets`中的`mv_i/mv_q`。PICMUS仿真只生成DAS，因此其`all_envdb_norm`为DAS。`all_envdb_das_norm`作为DAS参考保留。
-
-### 两级 IQ 尺度处理
-
-`pack_EPFL.py` 在离线打包时为每个输入记录计算全局 `scale_ref`，并用同一尺度归一化输入 IQ 与监督目标，保存到 `all_scale_ref`。这是数据集尺度标定，不是推理时的硬件 RMS 模块。
-
-训练/推理阶段的 `train/config.yaml:input.input_normalization` 默认使用 `rms`，按当前像素和有效动态孔径重新计算局部 RMS；波束合成后恢复 `input_scale`。实际硬件只需要实现一次局部 RMS，或用固定增益/AGC替代。若修改为 `none` 或 `std`，必须重新训练并在结果中记录该输入尺度协议。
-
-## 算法
-
-`algorithms/` 中包含：
-
-```text
-DAS
-MV
-ESBMV
-GCF-MV
-CMSAW
-F-DMAS
-```
-
-算法对比配置位于：
-
-```text
-config.yaml
-```
-
-运行单个场景：
-
-```powershell
-python run_one.py --scene invivo_15002
-```
-
-只运行指定算法：
-
-```powershell
-python run_one.py --scene invivo_15002 --algorithms das,mv,cmsaw --no_evaluate
-```
-
-默认结果保存到：
-
-```text
-results/<scene_id>/
-```
-
-批量运行根目录 `config.yaml` 中的场景：
-
-```powershell
-python run_all.py --only all
-python run_all.py --only simulation_contrast_speckle,simulation_resolution_distorsion --algorithms das,mv,cmsaw
-```
-
-### 动态孔径的统一对照与 DAS 专用模式
-
-默认算法对比使用按通道数扩张的离散动态孔径（`discrete`）：DAS 与 F-DMAS 均采用和 MV、ESBMV、GCF-MV 相同的离散有效通道数。这样可以排除孔径筛选规则不同造成的影响，使分辨率、旁瓣和散斑的差异主要反映算法本身；也避免 MV 在协方差估计和求解之外增加连续几何孔径的额外计算。
-
-几何孔径不作为公共模式。DAS 保留下列专属选项，用于单独研究孔径裁剪规则：
-
-- `discrete`：默认值，与其他算法的统一对照设置一致。
-- `geometry`：连续几何半宽裁剪，仅用于考察几何掩膜孔径本身的影响；不建议直接与默认 MV 作严格公平比较。
-
-在 `config.yaml` 中设置：
-
-```yaml
-algorithm_params:
-  das:
-    aperture_mode: discrete  # 或 geometry
-```
-
-临时使用几何模式：
-
-```powershell
-python run_one.py --scene invivo_15002 --algorithms das --aperture_mode geometry
-```
-
-`data/scripts/pack_EPFL.py` 中用于生成 DAS teacher 的内部实现固定采用离散通道孔径，并且会在延时采样越界后对有效窗权重重新归一化。因此当前打包出的 DAS 标签与默认对照设置一致；无需为打包流程增加 `geometry` 模式。
-
-## CMSAW 复数 IQ 说明
-
-CMSAW 本身主要是基于 MV baseline 的幅值加权方法。项目中提供了统一的 `CMSAWBeamformerIQ` 接口，使其可以作为 pack-time teacher 使用：
-
-```text
-S_cmsaw = S_mv × weight_cmsaw
-```
-
-因此：
-
-```text
-CMSAW 的 envelope / dB 图来自 CMSAW 幅值加权；
-CMSAW 的 phase 继承 MV。
-```
-
-这适合用于 B-mode / envdb 训练目标。如果实验关注真实复相位、多普勒或相干相位分析，应明确该 IQ 是“MV 相位 + CMSAW 幅值”的复数表示。
-
-## 训练
-
-主要训练入口：
-
-```text
-train/mban.py
-```
-
-示例：
-
-```powershell
-python train\mban.py `
-  --config train\config.yaml `
-  --mode software
-
-# BR/动态归一化 checkpoint 先折叠为唯一硬件部署格式
-python train\evaluate_mban.py --mode checkpoint fold path\best_val.pth path\best_val_deploy.pth
-
-# PTQ 不训练，使用统一评估入口校准并测试
-python train\evaluate_mban.py --mode ptq --config train\config.yaml --eval-config train\hardware_eval.yaml --model MBAN=path\best_val_deploy.pth --split-file path\mixed_split.csv --output results\mban_ptq4 --set weight_bits=4 --set input_bits=4 --set control_bits=4
-
-# QAT/HWA-QAT：必须记录训练配置、硬件评估配置和实际 profile
-python train\mban.py --config train\config.yaml --eval-config train\hardware_eval.yaml --mode qat --profile common --set resume=none --set initial_checkpoint=path\fp32\best_val_deploy.pth
-```
-
-训练脚本会在每个 H5 内按固定随机种子划分训练、验证和测试集合，并保存 split CSV，保证后续复现实验使用相同划分。选中样本在数据集初始化时一次性载入 CPU 内存，后续 epoch 不重复读取 H5；GPU 几何缓存按 `(time_start_vector, valid_time_samples)` 动态去重，有多少种唯一几何就建立多少份缓存，相同几何的样本共享一份。显存不足的几何单独回退为实时计算。
-
-正式结果必须同时保存：实际命令、checkpoint、split CSV、`effective_config.json`、训练日志和硬件评估时的 `hardware_eval_config_used.json`。`train/config.yaml` 当前仓库默认值为 `scheduler=onecycle`、`optimization_batch_pixels=16384`、`resume=all`；正式论文重跑若使用其他 override，必须以实际运行记录为准，不能混用不同配置产生的 checkpoint 和图表。
-
-注意：`resume=all` 会在输出目录存在 `latest.pth` 时恢复训练状态。需要从冻结的 FP32 checkpoint 开始做新实验时，显式使用新的输出目录、`--set resume=none`，并按文档指定 `initial_checkpoint`。
-
-## 数据检查
-
-检查工具位于：
-
-```text
-data/checks/
-```
-
-常用命令：
-
-```powershell
-python data\checks\check_data.py --no_log
-python data\checks\check_data.py --full --chunk-mb 128 data\volunteer_005.h5
-python data\checks\check_single_angle_scale.py --no_log
-```
-
-这些脚本默认检查 `data/` 下的 H5；也可以显式传入 H5 路径。`--full`会分块检查全部RF/GT并生成训练所需的`.h5.check.json`凭证。
-
-## 仿真与 PICMUS
-
-PICMUS 仿真脚本：
-
-```text
-data/scripts/simulate_PICMUS.py
-```
-
-仿真与 EPFL 打包共用同一套核心重建参数，包括：
-
-```text
-input_angles
-norm_mode
-f_number
-dynamic_aperture
-tgc
-tgc_alpha
-window
-interp
-outputs.angle_select
-```
-
-这样可以让仿真数据、体外数据和体内数据在训练及算法对比时保持一致的重建设定。
-
-## 评估与可视化
-
-`run_one.py` 会生成算法结果、对比图和参数记录。开启评估时会调用：
-
-```text
-evaluation/evaluate.py
-evaluation/plot_metrics.py
-```
-
-对于包含 GT 和标注的场景，可以计算参考指标和 ROI/target 指标；对于体内数据，主要用于定性对比和展示。
-
-MBAN 评估统一使用 `train/evaluate_mban.py`：
-
-```powershell
-# 受控场景/活体软件评估
-python train\evaluate_mban.py --mode scenes --config train\config.yaml --model MBAN16=path\best_val.pth --output results\mban_scenes
-
-# PTQ4（硬件入口只接受 folded checkpoint）
-python train\evaluate_mban.py --mode ptq --config train\config.yaml --eval-config train\hardware_eval.yaml --model MBAN16=path\best_val_deploy.pth --split-file path\mixed_split.csv --output results\mban_ptq4 --set weight_bits=4 --set input_bits=4 --set control_bits=4
-
-# 硬件行为级 stress；需要先完成 calibrate 并提供 references JSON
-python train\evaluate_mban.py --mode calibrate --config train\config.yaml --eval-config train\hardware_eval.yaml --model MBAN16=path\best_val_deploy.pth --split-file path\mixed_split.csv --output results\hardware_calibration
-python train\evaluate_mban.py --mode hardware --config train\config.yaml --eval-config train\hardware_eval.yaml --model MBAN16=path\best_val_deploy.pth --model Direct160=path\direct160\best_val_deploy.pth --split-file path\mixed_split.csv --references-json results\hardware_calibration\nonideal_references.json --mc-runs 30 --output results\hardware_stress
-```
-
-`hardware_eval.yaml` 当前是 system-level behavioral hardware-aware evaluation：包含 PTQ4、IR-drop、ADC、normalized drift stress、stuck-at、paired Monte Carlo，以及可选的 write/read noise 补充项；不等同于真实忆阻器、TCAD、SPICE 或流片结果。未定义的 realistic profile、器件工艺参数和外围电路参数不能在论文中宣称为已完成硬件仿真。
-
-训练、软件评估和硬件评估的详细口径分别见：
-
-```text
-train/docs/README_TRAIN.md
-train/docs/README_VALIDATE.md
-train/docs/PROJECT_MAP.md
-train/docs/MBAN.txt
-```
-
-## 推荐实验范式与消融资产索引
-
-基础训练设置：
-
-```text
-输入：单角度 IQ
-主目标：MV
-参考：多角度 DAS
-```
-
-扩展实验：
-
-```text
-ESBMV / GCF-MV / CMSAW / F-DMAS 作为额外 teacher 或算法对比
-```
-
-默认不建议一次性把所有 teacher 都写入正式训练包。更稳妥的做法是先保存核心字段，再根据实验目标增加额外 teacher。
-
-### 1. 结构与微观消融体系 (SI Ablations)
-项目在 `train/results/SI/` 下系统完成了 10 大核心模块的闭环消融实验（涵盖模型检查点与 4 大物理场景评测报告）：
-- **activation**: $3 \times 2$ 矩阵（ReLU, PWL, Tanh $\times$ Single, Dual 支路），证实 Dual 架构在所有激活函数下均显著超越 Single。
-- **envelope**: 线性包络监督损失权重扫描（$w_{\text{env}} \in [0.0, 1.0]$，步长 0.1），确定 $w_{\text{env}}=0.1$ 为最优平衡拐点。
-- **loss**: 组合损失项消融（MSE, L1, Charbonnier 与平滑度/范围正则约束）。
-- **input_norm**: 信号输入归一化方案（RMS、Std 与 None 对比，RMS 在动态孔径与物理增益下表现最优）。
-- **bias**: 随层间路径切换的 Bias 配置（None、Analog、Digital，另有 Array Bias）。
-- **normalization**: 隐藏层归一化行为（None, L1, L2, BatchRenorm 等在低比特硬件量化下的鲁棒性）。
-- **interpolation**: 控制点到物理孔径的插值策略（Linear, Nearest, Cubic 对比）。
-- **outlimit**: 输出值域约束（Nonnegative vs Signed, Hard vs Free 约束）。
-- **qattext**: QAT 训练演进轨迹与 Schedule 阶段消融（Ideal 预热 + Common 硬件感知优化）。
-- **windows**: 孔径窗函数与权重平滑窗口对比。
-
-详细消融数据表格、物理机制剖析及各场景指标参见：[`train/results/SI/README.md`](train/results/SI/README.md)。
-
-### 2. 模型容量与控制点 Pareto 消融 (Model Ablation)
-项目在 `train/results/model_ablation/` 下构建了 $3 \times 7 = 21$ 个模型的超算网格：
-- **Hidden Width ($H$)**: 32, 48, 64
-- **Output Controls ($K$)**: 8, 16, 24, 32, 48, 64, 160 (Direct-Full)
-- **核心结论**: $K=8$ 处存在极为明显的“收益悬崖”与 Pareto 拐点，仅凭 8 个控制点即可达到全通道 160 维输出 99.4% 的成像保真度，同时显著削减硬件 crossbar 阵列与 ADC 读出开销。
-
-详细 Pareto 曲线、FP32/QAT 对比及完整指标数据参见：[`train/results/model_ablation/README.md`](train/results/model_ablation/README.md)。
+---
+
+## 评估指标体系说明
+
+本工程内置的评估计算核心（`evaluation/evaluate.py`）在四个 controlled phantom 场景中对齐 PICMUS 挑战赛官方 MATLAB 算法语义：
+- **对比度 (Contrast)**: 基于官方同心环形 ROI 划定，并且方差计算使用样本方差（$N-1$ 自由度），保障与 MATLAB 的 `var()` 结果完全一致；
+- **散斑拟合度 (Speckle Quality)**: 提取散斑区进行 5 倍下采样并执行 Kolmogorov-Smirnov 检验以拟合 Rayleigh 分布，评估 KS 统计量 $D$ 和 $p$ 值；
+- **分辨率 (Resolution)**: 提取点目标 lateral 剖面并线性插值至 $10\times$ 密度，计算 $-6\text{ dB}$ 的半高全宽（FWHM）；
+- **几何畸变 (Distortion)**: 基于官方给定的累加标签掩膜、轴向修正因子和 7 个指定靶点位置自动判定畸变是否达标。
+- **辅助学术指标**: 额外提供广义对比度噪声比（gCNR）、对比度噪声比（CNR）、峰值旁瓣电平（PSLR）、积分旁瓣电平（ISLR）以及基于参考图的图像结构相似度（SSIM）、峰值信噪比（PSNR）与平均绝对误差（MAE）等分析。
+
+*(注：in-vivo H5 中的 `all_envdb_norm` 是打包阶段生成的多角度 DAS 参考图，不等同于带物理靶标的 PICMUS GT。因此在体颈动脉场景会自动跳过 phantom ROI、点目标和 PICMUS 分组定量，只做图像重建与对比拼接。)*
+
+---
+
+## 新增算法扩展指南
+
+本工程设计有高度的可扩展性。只需遵循以下步骤即可快速接入并测试自己的超声波束形成新算法：
+
+1. **复制模版**：
+   ```bash
+   cp algorithms/template_algorithm.py algorithms/my_method.py
+   ```
+2. **设定唯一算法 ID**：
+   打开新创建的脚本，确保顶部的 `METHOD_NAME = "my_method"`，保证脚本名、METHOD_NAME、以及后续在 `config.yaml` 中配置的键值三者完全一致。
+3. **实现核心重建逻辑**：
+   在 `my_method.py` 中实现 `beamform(data, args)` 函数。该函数的输入 `data` 已经通过公共 H5 载入器（`common.py`）完成了网格映射与通道延迟的映射。您只需要读取 `data["I"]` / `data["Q"]`，按需要计算加权值（如自适应权重矩阵），并返回最终二维的 B-Mode 对数包络图像矩阵（对齐 `[z_grid, x_grid]`，峰值归一化至 `0 dB`）。
+4. **配置默认参数**：
+   若新算法有专属的控制超参数，首先在 `my_method.py` 内部定义 argparse 参数（例如 `--my_param`），然后在 `config.yaml` 根目录的 `algorithm_params` 中加入默认值：
+   ```yaml
+   algorithm_params:
+     my_method:
+       my_param: 0.5
+   ```
+   并在 `config.yaml` 顶部的 `algorithms` 列表中追加 `"my_method"`。
+5. **一键测试与多维评估**：
+   参数配置完成后，新算法将被全局识别并可以与 DAS、MV 等算法同时跑对比：
+   ```bash
+   python run_one.py --scene simulation_contrast_speckle --algorithms das,mv,my_method
+   ```
+   重建系统和评估系统将完全自动生成对应的对比子图，并将其横向指标绘制到对比表和 Profile 曲线中，无需修改任何绘图或控制流代码。

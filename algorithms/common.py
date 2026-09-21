@@ -301,7 +301,6 @@ def format_method_name(method_name):
         "gcfmv": "GCF-MV",
         "cmsaw": "CMSAW",
         "fdmas": "F-DMAS",
-        "mban": "MBAN",
     }.get(method_name, method_name.upper())
 
 

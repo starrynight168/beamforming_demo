@@ -1,10 +1,13 @@
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+
+# C extensions
 *.so
+
+# Distribution / packaging
 .Python
-env/
 build/
 develop-eggs/
 dist/
@@ -17,93 +20,29 @@ parts/
 sdist/
 var/
 wheels/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
 
-# Virtual Environment
-venv/
-.venv/
-ENV/
-
 # IDEs
-.vscode/
 .idea/
+.vscode/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
-*.swp
+*.sw?
 
-# Logs and databases
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Project specific ignores
+PICMUS/
+data/*.h5
+data/logs/
+results/
+.ipynb_checkpoints/
 *.log
-*.sqlite
-
-# Data directory
-data/*
-!data/checks/
-!data/scripts/
-!data/EPFL/
-data/EPFL/*
-!data/EPFL/settings/
-!data/PICMUS/
-
-# Large data files
-*.hdf5
-*.h5
-*.h5.check.json
-*.npz
-
-# Model weights / checkpoints
-*.pth
-*.pt
-*.ckpt
-
-# Backup / Copy files
-备份/
-*备份*
-*副本*
-*.bak
-*.rar
-*.zip
-
-# Results and intermediate files
-**/results/
-tmp/
-tmp_*
-_tmp_*
-train/_tmp_*
-train/*/
-!train/mban_core/
-!train/mban_core/**
-!train/eval_core/
-!train/eval_core/**
-!train/server_jobs/
-!train/server_jobs/**
-train/server_jobs/**/__pycache__/
-!train/protocols/
-!train/protocols/**
-!train/benchmarks/
-!train/benchmarks/**
-!train/tests/
-!train/tests/**
-!train/tools/
-!train/tools/**
-train/tools/__pycache__/
-train/experiments/**/__pycache__/
-train/benchmarks/**/__pycache__/
-train/protocols/**/__pycache__/
-train/tests/__pycache__/
-train/eval_core/__pycache__/
-train/mban_core/__pycache__/
-!train/docs/
-!train/docs/**
-train/docs/**/__pycache__/
-train/docs/备份.rar
-external/cross-sim/
-external/neurosim/
-.codex_summary_work/
-.trash_smoke_*/
-_deleted_results_*/
-_legacy_results_*/
-.commandcode/
+_verify*/

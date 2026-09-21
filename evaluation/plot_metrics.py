@@ -7,6 +7,7 @@ Default input:
 import argparse
 import csv
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -24,7 +25,10 @@ from matplotlib.patches import Patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from evaluation.evaluate import db_to_display, load_grids, read_phantom
+evaluate = importlib.import_module("evaluation.evaluate")
+db_to_display = evaluate.db_to_display
+load_grids = evaluate.load_grids
+read_phantom = evaluate.read_phantom
 
 COMPARISON_VALUE_12 = 12
 PAGE_MODEL_PALETTE = [
