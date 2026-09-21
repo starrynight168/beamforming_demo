@@ -19,7 +19,9 @@ BASE = "US/US_DATASET0000"
 DYNAMIC_RANGE = 60.0
 TGC_ALPHA = 0.5
 F_NUMBER = 1.5
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SOURCE_ROOT = PROJECT_ROOT / "data" / "PICMUS"
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 SIMULATION_SCENES = [
@@ -84,16 +86,6 @@ IN_VIVO_SCENES = [
         "gt": "generated:multi_angle_das",
     },
 ]
-
-
-def project_root():
-    """Execute project root."""
-    return Path(__file__).resolve().parents[1]
-
-
-def default_source_root():
-    """Execute default source root."""
-    return project_root() / "data" / "PICMUS"
 
 
 def complex_rms_normalization(i_data, q_data):
@@ -183,8 +175,8 @@ def das_reference_from_iq(
         raise ValueError("DAS initial_time 必须是标量或与角度数一致的有限数组")
 
     with torch.no_grad():
-        z_t = torch.from_numpy(z_grid.astype(np.float32)).to(device)
-        x_t = torch.from_numpy(x_grid.astype(np.float32)).to(device)
+        z_t = torch.from_numpy(z_grid.astype(np.float32)).to(DEVICE)
+        x_t = torch.from_numpy(x_grid.astype(np.float32)).to(DEVICE)
         x_mesh, z_mesh = torch.meshgrid(x_t, z_t, indexing="xy")
 
         sc = fs / c
@@ -192,22 +184,22 @@ def das_reference_from_iq(
             -(n_channels - 1) / 2 * pitch,
             (n_channels - 1) / 2 * pitch,
             n_channels,
-            device=device,
+            device=DEVICE,
         )
         transmit_z = z_mesh * sc
         transmit_x = x_mesh * sc
-        ch = torch.arange(n_channels, device=device, dtype=torch.long).view(1, 1, -1)
+        ch = torch.arange(n_channels, device=DEVICE, dtype=torch.long).view(1, 1, -1)
 
-        i_tensor = torch.from_numpy(i_data.astype(np.float32)).to(device)
-        q_tensor = torch.from_numpy(q_data.astype(np.float32)).to(device)
-        cos_a = torch.from_numpy(np.cos(angles).astype(np.float32)).to(device)
-        sin_a = torch.from_numpy(np.sin(angles).astype(np.float32)).to(device)
-        t_starts_t = torch.from_numpy(t0.astype(np.float32)).to(device) * fs
+        i_tensor = torch.from_numpy(i_data.astype(np.float32)).to(DEVICE)
+        q_tensor = torch.from_numpy(q_data.astype(np.float32)).to(DEVICE)
+        cos_a = torch.from_numpy(np.cos(angles).astype(np.float32)).to(DEVICE)
+        sin_a = torch.from_numpy(np.sin(angles).astype(np.float32)).to(DEVICE)
+        t_starts_t = torch.from_numpy(t0.astype(np.float32)).to(DEVICE) * fs
 
         out_i = torch.zeros(
             (len(z_grid), len(x_grid)),
             dtype=torch.float32,
-            device=device,
+            device=DEVICE,
         )
         out_q = torch.zeros_like(out_i)
         max_sample = float(n_times - 2)
@@ -234,7 +226,7 @@ def das_reference_from_iq(
             block_i = torch.zeros(
                 (z1 - z0, len(x_grid)),
                 dtype=torch.float32,
-                device=device,
+                device=DEVICE,
             )
             block_q = torch.zeros_like(block_i)
 
@@ -939,8 +931,8 @@ def pack_dataset(
 def parse_args():
     """Parse args."""
     parser = argparse.ArgumentParser(description="Pack project H5 datasets.")
-    parser.add_argument("--source_root", default=str(default_source_root()))
-    parser.add_argument("--out_dir", default=str(project_root() / "data"))
+    parser.add_argument("--source_root", default=str(DEFAULT_SOURCE_ROOT))
+    parser.add_argument("--out_dir", default=str(PROJECT_ROOT / "data"))
     parser.add_argument(
         "--only",
         default="all",
