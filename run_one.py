@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import patches
 
-from algorithms.common import COMMON_PARAMS
+from algorithms.common import merge_common_params
 
 ROOT = Path(__file__).resolve().parent
 
@@ -30,7 +30,6 @@ EVALUATION_SCENE_IDS = frozenset(
         "experiments_resolution_distorsion",
     }
 )
-
 try:
     import yaml
 except ImportError:
@@ -139,14 +138,7 @@ def algorithm_params(config, algorithm):
     return all_params.get(algorithm, {}) or {}
 
 
-def common_params(config):
-    """Execute common params."""
-    params = COMMON_PARAMS.copy()
-    params.update(config.get("params", {}) or {})
-    params["select_angles"] = str(
-        params.get("select_angles", COMMON_PARAMS["select_angles"]),
-    )
-    return params
+common_params = merge_common_params
 
 
 def algorithm_label(config, algorithm):
@@ -159,10 +151,11 @@ def build_algorithm_cmd(args, config, scene, algorithm, scene_dir):
     """Build algorithm cmd."""
     params = common_params(config)
     method_params = algorithm_params(config, algorithm)
-    script = ROOT / "algorithms" / f"{algorithm}.py"
-    if not script.exists():
-        raise FileNotFoundError(f"Algorithm script not found: {script}")
     module = f"algorithms.{algorithm}"
+    module_file = ROOT / Path(*module.split("."))
+    module_file = module_file.with_suffix(".py")
+    if not module_file.exists():
+        raise FileNotFoundError(f"Algorithm module not found: {module_file}")
 
     cmd = [
         args.python_exe,

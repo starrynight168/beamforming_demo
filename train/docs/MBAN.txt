@@ -1,0 +1,215 @@
+MBAN 研究总纲（配置驱动版）
+================================
+
+本文件只规定研究问题、实验顺序、论文证据和硬件边界。训练操作见 README_TRAIN.md，评估操作见 README_VALIDATE.md；参数不在本文件重复定义，以 YAML 为准。
+
+状态：当前代码语义 v40；投稿结果登记见 [`TSON_submission.md`](TSON_submission.md)。`results/main` 的现有主线资产仍有 v31/v34 混用，统一复跑前不冻结最终数值。
+
+0. 唯一依据与候选
+------------------
+
+配置依据：
+- `train/config.yaml`：模型、数据、损失、训练过程；
+- `train/hardware_eval.yaml`：量化、层间路径、bias、非理想、QAT schedule、mapping/PPA 网格；
+- checkpoint：以自身 `effective_config.json`、`model_config` 和 semantic version 为最终依据。
+
+当前 YAML 默认候选是 H32×OC8、2 hidden layers、dual、RMS 输入、hidden normalization=none、nonnegative hard output、control normalization=none、dynamic aperture。默认值不是论文主线结论。现有 `results/main` 的投稿候选也是 H32×OC8 MBAN，但其 FP32 checkpoint 已出现 v34/Linf 配置，必须与 Direct160、Project160 和 QAT4 对齐后才能定稿。
+
+硬件评估默认路径是 `inter_layer=analog`、`bias_implementation=ordinary`、weight/input/control/bias=4 bit、`per_output_channel=false`、`interpolation_bits=32`。现有 QAT4 checkpoint 的层间配置需以自身合同为准；QAT schedule 是 5 epoch ideal + 95 epoch common；硬件 stress case 是 common，MC=30。
+
+历史 v21/L1/K16、旧 profile 名称和旧 PPA 数字只能作为回归或历史记录，不得混入当前结果。
+
+1. 研究问题
+------------
+
+核心问题不是“增加一个 QAT 模块”，而是：
+
+把超声自适应 apodization 从 M 维物理通道权重预测重新参数化为低维控制空间：
+
+```text
+aligned complex IQ → network → K controls → interpolation K→M → physical aperture weights → complex beamforming
+```
+
+必须验证三件事：
+
+1. native K-control 是否保持成像质量；
+2. 相比 Direct-Full 和 post-hoc projection，K-control 是否有更好的质量—资源折中；
+3. 低比特 CIM 和 common 行为级非理想下，候选是否仍处于可接受的质量—资源 Pareto 前沿。
+
+不要把 dynamic aperture、IQ、dual、normalization 或 Analog/Digital 每一项都包装成独立创新；它们是形成最终配置的选择因素。
+
+2. 系统边界
+------------
+
+公共输入链：
+
+```text
+RF ADC → DDC/IQ → TOF 与相位对齐 → RMS normalization
+```
+
+公共输出链：
+
+```text
+complex pixel → angle accumulation → envelope → TGC → log/display
+```
+
+这些模块对所有方法使用同一结果，不计入自适应模块自身的增量 PPA。若报告完整系统帧率、延迟或功耗，必须在 full-flow ledger 中计入。
+
+本文的增量硬件边界为：
+
+```text
+完成对齐和 RMS 归一化的 IQ
+→ input DAC
+→ RRAM FC1/FC2/FC3
+→ hidden boundary
+→ control ADC
+→ K→M interpolation
+→ IQ weighting / complex beamforming
+```
+
+因此不能声称 probe-to-B-mode 全模拟，也不能用软件微秒/像素替代芯片 latency。
+
+3. 算法与实现语义
+------------------
+
+对宽度 H、控制点 K、有效输入 M 的通用矩阵为：
+
+```text
+FC1: H × 2M
+FC2: H × 2H
+FC3: K × 2H       (native MBAN)
+FC3: M × 2H       (Direct-Full)
+```
+
+现有主线的 `network_channels=160`，因此 FC1 输入为 320 维；mapping ledger 记录的 `physical_channels=192`，代表性像素 active aperture 为 80。H32×OC8 主线矩阵为 `32×320`、`32×64`、`8×64`。正文必须区分 network channels、physical channels 和 active aperture，不能把三者都写成 M=160。
+
+dual 使用 `x+=ReLU(x)`、`x-=ReLU(-x)`，正负 rail 共用同一个归一化分母；默认 normalization=none。L1/L2 只有在候选 YAML 显式打开时才存在。
+
+E/explicit 显式生成 M 维权重；F/factorized 使用相同插值基直接合成等价 IQ，不物化 M 维中间权重。它不自动减少物理 IQ 通道访问或数据遍历次数。
+
+4. 模拟、数字与 bias 路径
+---------------------------
+
+`inter_layer` 是全局互斥开关：
+
+```text
+Analog:  TIA → dual/配置的模拟处理 → analog buffer → next FC
+Digital: TIA → ADC → 数字 Bias/处理 → DAC/selector → next FC；最终层为 TIA → 输出 ADC → 数字 Bias
+```
+
+当前 YAML 默认 Analog；Digital 只能作为明确候选重新训练和评估，不允许 fc1/fc2 混合。PPA mapping grid 比较 `none/analog/digital` 三种全局硬件路径，Digital 使用共享 ADC/DAC 参数。
+
+Bias 配置请求值为 `ordinary` 或 `array`。`ordinary` 跟随 `inter_layer` 解析为 `none/analog/digital`：`none` 不建模层间 Bias 非理想，但 Bias 仍可能按 `bias_bits` 量化；`analog` 在 TIA 前走模拟 Bias，`digital` 在对应 ADC 后走数字 Bias。`array` 使用独立的常量输入列，并按 `weight_bits` 量化。
+
+5. 当前 common profile
+----------------------
+
+`ideal` 关闭额外非理想；`common` 是 YAML 定义的代表性行为级压力，不是具体器件 worst-case，也不是单一器件实测复现。
+
+common 当前启用：
+
+- 64×64 定制子阵 IR-drop，`ir_drop_wire_resistance=0.35`、`ir_drop_g_max=3.13e-5`、`Vread=0.3`；
+- final control ADC noise `0.0333333333`、nonlinearity `0.02`、beta `3.0`；
+- shared input/hidden DAC noise `0.0333333333`、nonlinearity `0.02`、beta `3.0`；
+- drift `0.07`；stuck-at `0.01`，其中 high fraction `0.5`；
+- write error `0.05`，read noise `0.02`，读取模式 `common_mode_relative`；
+- TIA gain/offset static mismatch、channel gain mismatch `0.02`、channel offset mismatch `0.005`、TIA noise `0.005`；
+- Analog 路径 Bias gain/offset static mismatch、channel gain mismatch `0.01`、Bias noise `0.0025`；
+- L∞ reference noise `0.0166667`、静态 reference gain mismatch `0.01`。
+
+当前仍为0或有条件生效的项，不能写成已验证：Analog activation/buffer 的增益、阈值和噪声误差当前为0，TIA 饱和关闭；L∞ reference 仅在 `control_normalization=linf` 时生效。`0.35` 的 YAML 注释是归一化线阻，若要声称 Ω/cell 或真实器件参数，必须先完成单位和器件标定。
+
+CrossSim 是独立的 crossbar-level 趋势验证，不等于完整网络部署；CrossSim 参数是否真正进入 `get_matrix()` 必须用输出差异或单元测试确认，不能仅凭配置名归因。
+
+6. 已生成实验矩阵与结果状态
+----------------
+
+所有候选使用同一数据划分、seed、ROI、display range 和统计方法。
+
+已生成：
+
+- `results/main/evaluation/FP32/`：MBAN、Direct160、Project160 的四场景和 10 帧活体；
+- `results/main/evaluation/PTQ_ladder/`：3/4/6/8 bit，`none` 与 `linf`；
+- `results/main/evaluation/single_factors/`：PTQ4 的 7 项单因素与 MC30；
+- `results/main/evaluation/QAT4/`：common profile 四场景和 MC30；
+- `results/main/evaluation/ppa_mapping/`：64×64 analog/digital mapping ledger；
+- `results/model_ablation/`：H32/H48/H64 × K=8/16/24/32/48/64/160 的补充规模消融。
+
+评估口径：固定 split 为 344/98/50；当前主线活体只报告 10 个 test frames，压力结果报告 30 个 realization。所有数值仍需先通过 `TSON_submission.md` 的语义版本和配置一致性审计。
+
+7. 投稿前任务
+----------
+
+P0 统一配置和可复现性
+
+- [x] 固定 split、seed 和主要输出目录已记录；
+- [x] 主线 checkpoint 保存 effective config、semantic hash 和模型合同；
+- [ ] 统一 `results/main` 的 v31/v34 语义版本与 Linf/none 配置；
+- [ ] 统一后重新生成部署态 checkpoint 和评估输出。
+
+P1 图像质量和结构选择
+
+- [x] 已生成 DAS/MV/Direct160/Project160/MBAN 对比、四类 scene 和活体结果；
+- [x] 已生成 H×K 规模消融；
+- [ ] 统一语义版本后再冻结 Pareto 候选和正文数值。
+
+P2 低比特部署
+
+- [x] 已完成 FP32/PTQ8/6/4 结果；
+- [x] PTQ/MC 协议和 calibration 配置已落盘；
+- [x] 图包未把 4-bit weight + FP32 forward 当作部署数字；
+- [ ] 统一 checkpoint 来源后重新锁定低比特工作点。
+
+P3 硬件行为压力
+
+- [x] 已完成 PTQ4 common 单因素和 MC30；
+- [x] 已记录启用/未启用非理想项；
+- [x] write/drift/stuck 与 read/TIA/ADC 的 realization 口径已记录；
+- [x] CrossSim/mapping 仅作为阵列级或资源边界证据。
+
+P4 HWA-QAT 恢复
+
+- [x] 已生成 HWA-QAT4 common 结果和 recovery 图；
+- [x] 已记录 5 epoch ideal + 95 epoch common 与 MC30；
+- [ ] 统一 FP32/PTQ/QAT 的候选配置后再报告 recovery gap 为最终结论。
+
+P5 映射和系统账本
+
+- [x] 已生成 64×64 定制子阵、纵向时间复用和 analog/digital mapping；
+- [x] 已分开 logical coefficient、differential device、tile、conversion dimension 和 converter count；
+- [x] 已标注 physical circuit 尚未设计/验证；
+- [x] 公共 RF/TOF/RMS 与 envelope/TGC/log 不计入自适应模块增量账本。
+
+8. 论文结构与可声明结论
+--------------------------
+
+正文建议顺序：问题与参数化 → IQ/动态孔径方法 → 活体和受控成像 → K/Direct 机制 → 低比特 → common 压力 → HWA-QAT → mapping/PPA。
+
+可以声明：
+
+- MBAN 将自适应 apodization 参数化为低维控制空间；
+- native K 与 Direct/projection 的质量—资源差异；
+- 在明确声明的 system-level behavioral profile 下的量化和硬件鲁棒性；
+- 定制紧凑 mapping 和分项 PPA estimate。
+
+不能声明：
+
+- 具体 RRAM 器件实测、universally worst-case、retention law；
+- probe-to-B-mode 全模拟芯片；
+- CrossSim 单层误差直接等于端到端 SSIM 损失；
+- logical coefficient/device reduction 自动等于 macro/area reduction；
+- 未建模的外围或公共前后端已经完成硬件验证。
+
+9. 投稿定位
+------------
+
+目标为 TSON：正文主贡献应聚焦超声自适应波束形成、低维控制空间和受控/活体成像证据；CIM/RRAM 部分作为明确边界下的可部署性分析。当前结果只能支持 behavioral common profile、HWA-QAT 恢复趋势和 mapping ledger，不能写成真实芯片验证或完整 PPA。
+
+10. 文档维护规则
+-----------------
+
+- YAML 是参数唯一来源；本文不复制完整 YAML；
+- README 只写怎么运行，本文只写为什么做、做什么和如何判定完成；
+- 旧结果保留为 legacy/regression，不进入当前主结果目录；
+- 每个结果必须能追溯到 checkpoint、YAML、split、seed、脚本和原始 CSV；
+- 未运行实验只写任务，不写成结果；当前 v31/v34 混合问题以 `TSON_submission.md` 为准。
