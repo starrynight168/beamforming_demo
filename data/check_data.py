@@ -721,7 +721,7 @@ def inspect_file(path: Path) -> bool:
     print(f"文件: {path.name}")
     print(f"路径: {path}")
 
-    if not path.exists():
+    if not path.is_file():
         print("状态: 失败")
         print("原因: 文件不存在")
         return False
@@ -819,7 +819,16 @@ def inspect_file(path: Path) -> bool:
                     print(f"  - {item}")
 
             return status == "通过"
-    except Exception as exc:
+    except (
+        OSError,
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+        h5py.Error,
+        yaml.YAMLError,
+    ) as exc:
         print("状态: 失败")
         print(f"原因: {exc}")
         return False
@@ -862,12 +871,8 @@ def main() -> None:
     if not files:
         raise SystemExit("未找到 H5 文件。请把 H5 放到 data/ 下,或显式传入路径。")
 
-    def run() -> list[bool]:
-        """Execute run."""
-        return [inspect_file(path) for path in files]
-
     if args.no_log:
-        results = run()
+        results = [inspect_file(path) for path in files]
     else:
         log_path = Path(args.log) if args.log else default_log_path()
         log_path = log_path if log_path.is_absolute() else (ROOT / log_path).resolve()
@@ -876,7 +881,7 @@ def main() -> None:
             old_stdout = sys.stdout
             sys.stdout = Tee(old_stdout, f)
             try:
-                results = run()
+                results = [inspect_file(path) for path in files]
                 print()
                 print(f"日志: {log_path}")
             finally:
