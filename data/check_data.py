@@ -526,7 +526,11 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
 
     if "all_envdb_norm" in hf:
         gt_shape = hf["all_envdb_norm"].shape
-        if len(gt_shape) != 4 or gt_shape[1] != 1:
+        if (
+            len(gt_shape) != 4
+            or gt_shape[1] != 1
+            or min(gt_shape[0], gt_shape[2], gt_shape[3]) < 1
+        ):
             problems.append(f"all_envdb_norm 应为 [N,1,H,W]，实际 {gt_shape}")
         elif iq_shape is not None and gt_shape[0] != iq_shape[0]:
             problems.append("输入 IQ 与 GT 帧数不一致")
@@ -655,7 +659,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
                 )
                 validate_config_schema(config, hf, problems)
                 samples = config.get("source_samples")
-                n_samples = hf["all_multi_I"].shape[0] if "all_multi_I" in hf else 0
+                n_samples = iq_shape[0] if iq_shape is not None else 0
                 if not isinstance(samples, list) or len(samples) != n_samples:
                     problems.append(
                         "config_yaml.source_samples 数量必须与 H5 样本数一致",
@@ -755,9 +759,10 @@ def inspect_file(path: Path) -> bool:
             fs = scalar_float(hf, "fs")
             gt_reference_fs = None
             decimation = None
-            if "config_yaml" in hf:
+            config_dataset = hf.get("config_yaml")
+            if isinstance(config_dataset, h5py.Dataset):
                 try:
-                    config = yaml.safe_load(decode_value(hf["config_yaml"][()])) or {}
+                    config = yaml.safe_load(decode_value(config_dataset[()])) or {}
                     generation = config.get("generation", {}) or {}
                     gt_reference_fs = (generation.get("ground_truth", {}) or {}).get(
                         "reference_sampling_frequency_hz"
@@ -766,7 +771,8 @@ def inspect_file(path: Path) -> bool:
                         "decimation_factor"
                     )
                 except (AttributeError, TypeError, yaml.YAMLError):
-                    pass
+                    gt_reference_fs = None
+                    decimation = None
 
             summary_rows = [
                 ("检查状态", status),
@@ -819,8 +825,8 @@ def inspect_file(path: Path) -> bool:
                 ("字段", "形状", "类型", "占用空间", "范围/示例"),
             )
 
-            if "config_yaml" in hf:
-                config_text = str(decode_value(hf["config_yaml"][()]))
+            if isinstance(config_dataset, h5py.Dataset):
+                config_text = str(decode_value(config_dataset[()]))
                 print()
                 print("[config_yaml 完整内容]")
                 print(config_text.rstrip())
