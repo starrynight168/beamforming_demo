@@ -12,9 +12,9 @@ import h5py
 import numpy as np
 import yaml
 
-COMPARISON_VALUE_1024 = 1024
-COMPARISON_VALUE_2 = 2
-COMPARISON_VALUE_4096 = 4096
+BYTES_PER_UNIT = 1024
+MIN_DATA_POINTS = 2
+PREVIEW_MAX_ITEMS = 4096
 
 # 脚本位于 data/;默认检查同目录的打包 H5,和启动时的工作目录无关。
 DATA_DIR = Path(__file__).resolve().parent
@@ -147,7 +147,7 @@ def dataset_preview(ds: h5py.Dataset) -> str:
     if ds.dtype.kind in {"S", "U", "O"}:
         return format_value(ds[:])
 
-    if ds.size <= COMPARISON_VALUE_4096:
+    if ds.size <= PREVIEW_MAX_ITEMS:
         arr = np.asarray(ds[:], dtype=np.float64)
     else:
         index = (0, *tuple(slice(None) for _ in range(ds.ndim - 1)))
@@ -175,7 +175,7 @@ def format_bytes(num_bytes: int) -> str:
     units = ["B", "KiB", "MiB", "GiB", "TiB"]
     value = float(num_bytes)
     for unit in units:
-        if value < COMPARISON_VALUE_1024 or unit == units[-1]:
+        if value < BYTES_PER_UNIT or unit == units[-1]:
             if unit == "B":
                 return f"{int(value)} {unit}"
             return f"{value:.3f} {unit}"
@@ -220,6 +220,12 @@ def scalar_float(hf: h5py.File, key: str) -> float | None:
         return float(decode_value(hf[key][()]))
     except (OverflowError, TypeError, ValueError):
         return None
+
+
+def dataset_shape(hf: h5py.File, key: str):
+    """Return a dataset shape, or None for missing/non-dataset fields."""
+    dataset = hf.get(key)
+    return dataset.shape if isinstance(dataset, h5py.Dataset) else None
 
 
 def decode_compact_sequence(value) -> np.ndarray:
@@ -472,9 +478,11 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
     if invalid_datasets:
         return "失败", problems
 
+    iq_dataset = hf.get("all_multi_I")
+    q_dataset = hf.get("all_multi_Q")
     iq_shape = None
-    if "all_multi_I" in hf and isinstance(hf["all_multi_I"], h5py.Dataset):
-        iq_shape = hf["all_multi_I"].shape
+    if isinstance(iq_dataset, h5py.Dataset):
+        iq_shape = iq_dataset.shape
         if (
             len(iq_shape) != 4
             or min(iq_shape[0], iq_shape[1], iq_shape[3]) < 1
@@ -484,9 +492,9 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
             iq_shape = None
 
     if (
-        "all_multi_I" in hf
-        and "all_multi_Q" in hf
-        and hf["all_multi_I"].shape != hf["all_multi_Q"].shape
+        isinstance(iq_dataset, h5py.Dataset)
+        and isinstance(q_dataset, h5py.Dataset)
+        and iq_dataset.shape != q_dataset.shape
     ):
         problems.append("all_multi_I / all_multi_Q 形状不一致")
 
@@ -544,13 +552,22 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
             problems.append("angles 必须是匹配输入角度维的有限一维数组")
 
     if iq_shape is not None and "num_channels" in hf:
-        channels = int(decode_value(hf["num_channels"][()]))
-        if channels < 1 or channels != iq_shape[-1]:
-            problems.append(
-                f"num_channels={channels}, 输入通道数={iq_shape[-1]}",
-            )
+        try:
+            channels = int(decode_value(hf["num_channels"][()]))
+        except (OverflowError, TypeError, ValueError):
+            problems.append("num_channels 必须是整数标量")
+        else:
+            if channels < 1 or channels != iq_shape[-1]:
+                problems.append(
+                    f"num_channels={channels}, 输入通道数={iq_shape[-1]}",
+                )
 
-    if iq_shape is not None and "valid_time_samples" in hf:
+    if (
+        iq_shape is not None
+        and isinstance(iq_dataset, h5py.Dataset)
+        and isinstance(q_dataset, h5py.Dataset)
+        and "valid_time_samples" in hf
+    ):
         valid_ds = hf["valid_time_samples"]
         valid = np.asarray(valid_ds[:], dtype=np.int64).reshape(-1)
         n_samples, _, n_time, _ = iq_shape
@@ -562,9 +579,9 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
             problems.append(
                 f"valid_time_samples 必须是长度 {n_samples} 的一维整数数组",
             )
-        elif np.any((valid < COMPARISON_VALUE_2) | (valid > n_time)):
+        elif np.any((valid < MIN_DATA_POINTS) | (valid > n_time)):
             problems.append(
-                f"valid_time_samples 必须位于 [2,{n_time}],实际={valid.tolist()}",
+                f"valid_time_samples 必须位于 [{MIN_DATA_POINTS},{n_time}],实际={valid.tolist()}",
             )
         else:
             for sample_idx, valid_time in enumerate(valid):
@@ -590,7 +607,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
     for key in ("x_grid", "z_grid"):
         if key in hf:
             grid = np.asarray(hf[key][:], dtype=np.float64)
-            if grid.ndim != 1 or grid.size < COMPARISON_VALUE_2:
+            if grid.ndim != 1 or grid.size < MIN_DATA_POINTS:
                 problems.append(f"{key} 必须是至少含 2 点的一维数组")
             elif not np.all(np.isfinite(grid)) or not np.all(np.diff(grid) > 0):
                 problems.append(f"{key} 必须全部有限且严格递增")
@@ -601,7 +618,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
             if value is None or not np.isfinite(value) or value <= 0:
                 problems.append(f"{key} 必须是有限正数")
 
-    if "all_envdb_norm" in hf and hf["all_envdb_norm"].shape:
+    if "all_envdb_norm" in hf and hf["all_envdb_norm"].size:
         gt_min = float(np.min(hf["all_envdb_norm"][:]))
         gt_max = float(np.max(hf["all_envdb_norm"][:]))
         if (
@@ -730,15 +747,11 @@ def inspect_file(path: Path) -> bool:
         with h5py.File(path, "r") as hf:
             status, problems = run_checks(hf)
             file_size = path.stat().st_size / 1024**2
-            n_frames = hf["all_multi_I"].shape[0] if "all_multi_I" in hf else "?"
-            input_shape = (
-                format_shape(hf["all_multi_I"].shape) if "all_multi_I" in hf else "缺失"
-            )
-            gt_shape = (
-                format_shape(hf["all_envdb_norm"].shape)
-                if "all_envdb_norm" in hf
-                else "无"
-            )
+            input_shape = dataset_shape(hf, "all_multi_I")
+            gt_shape = dataset_shape(hf, "all_envdb_norm")
+            n_frames = input_shape[0] if input_shape else "?"
+            input_shape = format_shape(input_shape) if input_shape else "缺失"
+            gt_shape = format_shape(gt_shape) if gt_shape else "无"
             fs = scalar_float(hf, "fs")
             gt_reference_fs = None
             decimation = None
@@ -851,14 +864,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="打包 H5 文件简洁体检。")
     parser.add_argument("files", nargs="*", help="H5 文件;默认检查 data/*.h5")
     parser.add_argument(
-        "--files",
-        dest="files_opt",
-        nargs="*",
-        default=None,
-        help="H5 文件列表。",
-    )
-    parser.add_argument("--h5_path", nargs="*", default=None, help="等价于 --files。")
-    parser.add_argument(
         "--log",
         default=None,
         help="日志路径;默认 data/logs/check_data_*.txt",
@@ -866,7 +871,7 @@ def main() -> None:
     parser.add_argument("--no_log", action="store_true", help="只打印到命令行。")
     args = parser.parse_args()
 
-    file_args = args.h5_path or args.files_opt or args.files
+    file_args = args.files
     files = resolve_files(file_args)
     if not files:
         raise SystemExit("未找到 H5 文件。请把 H5 放到 data/ 下,或显式传入路径。")

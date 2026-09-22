@@ -13,7 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import patches
 
-COMPARISON_VALUE_2 = 2
+MIN_GRID_POINTS = 2
 
 BASE = "US/US_DATASET0000"
 DYNAMIC_RANGE = 60.0
@@ -88,6 +88,29 @@ IN_VIVO_SCENES = [
 ]
 
 
+def validate_grid(values, name):
+    """Validate a strictly increasing one-dimensional grid."""
+    grid = np.asarray(values)
+    if (
+        grid.ndim != 1
+        or grid.size < MIN_GRID_POINTS
+        or not np.isfinite(grid).all()
+        or not np.all(np.diff(grid) > 0)
+    ):
+        raise ValueError(
+            f"{name} 必须是至少含两个点的有限严格递增一维数组"
+        )
+    return grid
+
+
+def validate_physical_parameters(fs, c, fc, pitch):
+    """Validate the shared acquisition parameters."""
+    if not all(
+        np.isfinite(value) and value > 0 for value in (fs, c, fc, pitch)
+    ):
+        raise ValueError("fs/c/fc/pitch 必须是有限正数")
+
+
 def complex_rms_normalization(i_data, q_data):
     """Execute complex rms normalization."""
     i_data = np.asarray(i_data, dtype=np.float32)
@@ -108,8 +131,15 @@ def complex_rms_normalization(i_data, q_data):
 def read_gt(gt_path):
     """Read gt."""
     with h5py.File(gt_path, "r") as f:
-        real = f[f"{BASE}/data/real"][:][-1].T
-        imag = f[f"{BASE}/data/imag"][:][-1].T
+        real_raw = f[f"{BASE}/data/real"][:]
+        imag_raw = f[f"{BASE}/data/imag"][:]
+    if real_raw.shape != imag_raw.shape or real_raw.ndim != 3 or not real_raw.shape[0]:
+        raise ValueError(
+            f"GT real/imag 必须是形状一致的非空三维数组: "
+            f"{real_raw.shape}/{imag_raw.shape}"
+        )
+    real = real_raw[-1].T
+    imag = imag_raw[-1].T
     if real.shape != imag.shape or real.ndim != 2 or min(real.shape) < 1:
         raise ValueError(
             f"GT real/imag 必须是形状一致的非空二维数组: {real.shape}/{imag.shape}"
@@ -153,19 +183,13 @@ def das_reference_from_iq(
         raise ValueError("DAS 输入的角度/通道不能为空，时间维至少为 2")
     if not np.isfinite(i_data).all() or not np.isfinite(q_data).all():
         raise ValueError("DAS 输入 IQ 包含 NaN/Inf")
-    if not all(
-        np.isfinite(value) and value > 0 for value in (fs, c, fc, pitch, F_NUMBER)
-    ):
-        raise ValueError("DAS 的 fs/c/fc/pitch/F_NUMBER 必须是有限正数")
+    validate_physical_parameters(fs, c, fc, pitch)
+    if not np.isfinite(F_NUMBER) or F_NUMBER <= 0:
+        raise ValueError("DAS 的 F_NUMBER 必须是有限正数")
     if angles.size != n_angles or not np.isfinite(angles).all():
         raise ValueError("DAS angles 必须匹配 IQ 角度维且全部有限")
-    for name, grid in (("x_grid", x_grid), ("z_grid", z_grid)):
-        if (
-            grid.size < 2
-            or not np.isfinite(grid).all()
-            or not np.all(np.diff(grid) > 0)
-        ):
-            raise ValueError(f"DAS {name} 必须是至少含两个点的有限严格递增数组")
+    validate_grid(x_grid, "DAS x_grid")
+    validate_grid(z_grid, "DAS z_grid")
     if interp not in {"nearest", "linear", "cubic"}:
         raise ValueError(f"不支持的 DAS 插值方式: {interp}")
     t0 = np.asarray(t0, dtype=np.float32).reshape(-1)
@@ -374,8 +398,7 @@ def process_scene(scene, source_root, row_block=24):
             )
         angles = np.array(f[f"{BASE}/angles"]).flatten().astype(np.float32)
 
-    if not all(np.isfinite(value) and value > 0 for value in (fs, c, fc, pitch)):
-        raise ValueError("fs/c/fc/pitch 必须是有限正数")
+    validate_physical_parameters(fs, c, fc, pitch)
     if angles.size != i_trans.shape[0] or not np.isfinite(angles).all():
         raise ValueError("angles 必须匹配 IQ 角度维且全部有限")
     if not np.isfinite(t0).all():
@@ -384,13 +407,8 @@ def process_scene(scene, source_root, row_block=24):
     with h5py.File(scan_path, "r") as f:
         x_grid = np.array(f[f"{BASE}/x_axis"]).flatten().astype(np.float32)
         z_grid = np.array(f[f"{BASE}/z_axis"]).flatten().astype(np.float32)
-    for name, grid in (("x_grid", x_grid), ("z_grid", z_grid)):
-        if (
-            grid.size < 2
-            or not np.isfinite(grid).all()
-            or not np.all(np.diff(grid) > 0)
-        ):
-            raise ValueError(f"{name} 必须是至少含两个点的有限严格递增数组")
+    validate_grid(x_grid, "x_grid")
+    validate_grid(z_grid, "z_grid")
 
     if scene["gt"] == "generated:multi_angle_das":
         gt, safe_max = das_reference_from_iq(
@@ -674,7 +692,7 @@ def save_gt_images(items, image_dir, dr=DYNAMIC_RANGE):
 
         x_grid = np.asarray(item.get("x_grid", []), dtype=np.float32)
         z_grid = np.asarray(item.get("z_grid", []), dtype=np.float32)
-        if x_grid.size < COMPARISON_VALUE_2 or z_grid.size < COMPARISON_VALUE_2:
+        if x_grid.size < MIN_GRID_POINTS or z_grid.size < MIN_GRID_POINTS:
             plt.imsave(out_path, gt_sample, cmap="gray", vmin=0.0, vmax=1.0)
             continue
 
@@ -759,16 +777,7 @@ def validate_shared_metadata(items):
         ):
             raise ValueError(f"样本 {index} 的 num_channels 与 IQ 不一致")
         for grid_name in ("z_grid", "x_grid"):
-            grid = np.asarray(item[grid_name])
-            if (
-                grid.ndim != 1
-                or grid.size < 2
-                or not np.isfinite(grid).all()
-                or not np.all(np.diff(grid) > 0)
-            ):
-                raise ValueError(
-                    f"样本 {index} 的 {grid_name} 必须是有限严格递增一维数组"
-                )
+            validate_grid(item[grid_name], f"样本 {index} 的 {grid_name}")
         gt = np.asarray(item["gt"])
         expected_gt_shape = (1, 1, len(item["z_grid"]), len(item["x_grid"]))
         if gt.shape != expected_gt_shape or not np.isfinite(gt).all():
