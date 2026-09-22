@@ -1,39 +1,45 @@
 """Template for adding a new beamforming algorithm.
 
-Copy this file to algorithms/my_method.py, change METHOD_NAME, then implement
-beamform(). The command-line interface and output format are kept compatible
-with run_one.py and run_all.py.
+Copy this file to algorithms/my_method.py, set METHOD_NAME, then implement
+beamform(). The command-line flags and the output layout are what run_one.py and
+run_all.py expect, so keep them intact:
 
-This template is for ordinary reconstruction/comparison scripts. To use a new
-method as an H5 pack-time teacher, also implement one unique *BeamformerIQ
-class whose __call__ returns i_output, q_output; see data/pack_data.py.
+    results/<scene>/<method>/<method>.npy   # 2D B-mode image in dB
+    results/<scene>/<method>/<method>.png   # rendered figure
+    results/<scene>/<method>/params.json    # run parameters
+
+Reusable pieces live in algorithms/common.py: input loading and angle selection
+(prepare_beamforming_input), device handling and GPU timing (run_beamformer),
+envelope-to-dB conversion (envelope_to_db), figure output (save_figure) and the
+parameter record (write_params). Use them instead of re-implementing the
+boilerplate.
+
+To use this method as an H5 pack-time teacher as well, expose one uniquely named
+*BeamformerIQ class whose __call__(i_data, q_data, selected_angles, t_starts, fs)
+returns (i_output, q_output); see data/scripts/pack_EPFL.py for the discovery
+contract.
 """
 
 import argparse
-import json
 import os
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
+
 from algorithms.common import (
     add_common_arguments,
     add_io_arguments,
-    db_display_range,
-    load_from_h5 as load_packed_sample,
-    parse_selected_angles,
+    prepare_beamforming_input,
     resolve_project_path,
+    save_figure,
     validate_db_output,
+    write_params,
 )
-from matplotlib import patches
 
 METHOD_NAME = "template_algorithm"
 
 
 def parse_args():
-    """Parse args."""
+    """Build the command-line interface expected by run_one.py."""
     parser = argparse.ArgumentParser(description=f"{METHOD_NAME} beamforming template")
     add_io_arguments(parser)
 
@@ -45,129 +51,69 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_from_h5(h5_path, sample_idx):
-    """Load from h5."""
-    c, fc, fs, pitch, n_elem, angles, t0, z_grid, x_grid, i_data, q_data, gt, _ = load_packed_sample(
-        h5_path,
-        sample_idx,
-    )
-    data = {
-        "I": i_data,
-        "Q": q_data,
-        "t0": t0,
-        "fs": fs,
-        "c": c,
-        "fc": fc,
-        "pitch": pitch,
-        "num_channels": n_elem,
-        "z_grid": z_grid,
-        "x_grid": x_grid,
-        "angles": angles,
-    }
-    if gt is not None and gt.ndim == 3:
-        gt = gt[0]
-    return data, gt
-
-
-def beamform(data, args):
-    """Implement your algorithm here.
+def beamform(input_data, args):
+    """Implement your algorithm here and return the dB image.
 
     Inputs:
-        data["I"]: IQ real part, shape [angles, time, channels]
-        data["Q"]: IQ imag part, shape [angles, time, channels]
-        data["x_grid"], data["z_grid"]: image grid in meters
-        data["angles"], data["fs"], data["c"], data["fc"], data["pitch"]: physics metadata
-        args: command-line arguments
+        input_data.i_data, input_data.q_data: IQ, shape [n_angles, time, channels]
+        input_data.selected_angles: selected steering angles (rad)
+        input_data.t0: per-angle start time (s)
+        input_data.sample: PackedSample with c, fc, fs, pitch, n_elem, z_grid,
+            x_grid, angles, gt_data and has_gt
+        args: parsed command-line arguments
 
     Return:
-        image_db: 2D B-mode image in dB, shape [len(z_grid), len(x_grid)].
-                  The maximum should normally be normalized to 0 dB.
+        image_db: 2D B-mode image in dB, shape [len(z_grid), len(x_grid)], with the
+        peak normalized to about 0 dB.
 
-    If the method performs delayed channel sampling, mask out-of-range samples
-    and renormalize the remaining aperture weights before summation.
+    A delay-and-sum style method only needs a beamformer callable plus the shared
+    helpers, which keeps device handling, GPU timing and the dB conversion
+    consistent with the other algorithms:
 
+        from algorithms.common import envelope_to_db, run_beamformer
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        i_out, q_out, elapsed = run_beamformer(
+            beamformer, input_data.i_data, input_data.q_data,
+            input_data.selected_angles, input_data.t0, input_data.sample.fs, device,
+        )
+        return envelope_to_db(
+            i_out, q_out, input_data.sample.z_grid, input_data.sample.fc,
+            args.tgc, args.tgc_alpha,
+        )
+
+    If the method performs delayed channel sampling, mask out-of-range samples and
+    renormalize the remaining aperture weights before summation.
     """
     raise NotImplementedError(
         "Copy this file, set METHOD_NAME, and implement beamform().",
     )
 
 
-def add_scale_bar(ax, extent_mm):
-    """Execute add scale bar."""
-    bar_length = 5.0
-    bar_x = extent_mm[1] - bar_length - 2.0
-    bar_y = extent_mm[2] - 2.0
-    ax.add_patch(
-        patches.Rectangle((bar_x, bar_y), bar_length, 0.5, color="white", zorder=5),
-    )
-    ax.text(
-        bar_x + bar_length / 2,
-        bar_y - 1.0,
-        "5 mm",
-        color="white",
-        fontsize=9,
-        ha="center",
-        va="bottom",
-        fontweight="bold",
-    )
-
-
-def save_figure(db_img, x_grid, z_grid, out_path, title, dr):
-    """Save figure."""
-    vmin, vmax = db_display_range(dr)
-    extent_mm = [
-        float(x_grid[0] * 1000.0),
-        float(x_grid[-1] * 1000.0),
-        float(z_grid[-1] * 1000.0),
-        float(z_grid[0] * 1000.0),
-    ]
-    fig, ax = plt.subplots(figsize=(7, 8), dpi=300)
-    im = ax.imshow(
-        db_img,
-        cmap="gray",
-        vmin=vmin,
-        vmax=vmax,
-        extent=extent_mm,
-        aspect="equal",
-    )
-    ax.set_title(title, fontsize=14, pad=10)
-    ax.set_xlabel("Lateral (mm)")
-    ax.set_ylabel("Depth (mm)")
-    add_scale_bar(ax, extent_mm)
-    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("Amplitude (dB)")
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-
-
-def save_outputs(image_db, data, args):
-    """Save outputs."""
+def save_outputs(image_db, input_data, args):
+    """Write the image, the figure and the parameter record."""
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    output_dir = resolve_project_path(args.output_dir, project_root)
-    method_dir = os.path.join(output_dir, METHOD_NAME)
+    method_dir = os.path.join(
+        resolve_project_path(args.output_dir, project_root),
+        METHOD_NAME,
+    )
     os.makedirs(method_dir, exist_ok=True)
 
-    npy_path = os.path.join(method_dir, f"{METHOD_NAME}.npy")
-    png_path = os.path.join(method_dir, f"{METHOD_NAME}.png")
-    params_path = os.path.join(method_dir, "params.json")
-
-    np.save(npy_path, image_db.astype(np.float32))
+    np.save(
+        os.path.join(method_dir, f"{METHOD_NAME}.npy"),
+        image_db.astype(np.float32),
+    )
     save_figure(
         image_db,
-        data["x_grid"],
-        data["z_grid"],
-        png_path,
+        input_data.extent_mm,
+        os.path.join(method_dir, f"{METHOD_NAME}.png"),
         METHOD_NAME,
-        args.dr,
+        dr=args.dr,
+        method_name=METHOD_NAME,
     )
-
-    params = vars(args).copy()
-    params["method"] = METHOD_NAME
-    params["output_dir"] = args.output_dir
-    with open(params_path, "w", encoding="utf-8") as file:
-        json.dump(params, file, ensure_ascii=False, indent=2)
-
+    write_params(
+        os.path.join(method_dir, "params.json"),
+        {**vars(args), "method": METHOD_NAME},
+    )
     return method_dir
 
 
@@ -175,19 +121,24 @@ def main():
     """Run the command-line workflow."""
     args = parse_args()
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    h5_path = resolve_project_path(args.h5_path, project_root)
-    data, gt = load_from_h5(h5_path, args.h5_sample_idx)
-    selected, _ = parse_selected_angles(data["angles"], args.select_angles)
-    data["selected_angle_indices"] = selected
-    data["selected_angles"] = data["angles"][selected]
+    input_data = prepare_beamforming_input(
+        resolve_project_path(args.h5_path, project_root),
+        args.h5_sample_idx,
+        args.select_angles,
+    )
+    sample = input_data.sample
 
     print(
-        f"{METHOD_NAME}: {h5_path} sample={args.h5_sample_idx}, angles={len(selected)}",
+        f"{METHOD_NAME}: sample={args.h5_sample_idx}, "
+        f"angles={len(input_data.selected_angles)}/{len(sample.angles)}",
     )
-    image_db = beamform(data, args)
-    expected_shape = (len(data["z_grid"]), len(data["x_grid"]))
-    image_db = validate_db_output(image_db, expected_shape, METHOD_NAME)
-    method_dir = save_outputs(image_db, data, args)
+    image_db = beamform(input_data, args)
+    image_db = validate_db_output(
+        image_db,
+        (len(sample.z_grid), len(sample.x_grid)),
+        METHOD_NAME,
+    )
+    method_dir = save_outputs(image_db, input_data, args)
     print(f"Done | Output: {method_dir}")
 
 

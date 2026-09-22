@@ -16,15 +16,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 
-try:
-    import yaml
-except ImportError:
-    yaml = None
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from run_wizard_cn import (
+from tools.run_wizard_cn import (
     ALGORITHMS,
-    ROOT,
     ExitCommandError,
     append_run_log,
     ask_choice,
@@ -33,15 +32,11 @@ from run_wizard_cn import (
     choose_h5,
     choose_sample,
     inspect_h5,
+    load_base_config,
     print_title,
     relative_to_root,
     run_steps,
 )
-
-COMPARISON_VALUE_0_5 = 0.5
-COMPARISON_VALUE_100 = 100
-COMPARISON_VALUE_2 = 2
-COMPARISON_VALUE_3 = 3
 
 GLOBAL_PARAM_DESCRIPTIONS = {
     "select_angles": "角度选择。center=中心角,all=全部角度,也可以填 1/3/11 等数量。",
@@ -97,16 +92,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_base_config():
-    """Load base config."""
-    if yaml is None:
-        raise RuntimeError(
-            "缺少 PyYAML,无法读取 config.yaml。请先安装:pip install pyyaml",
-        )
-    with open(ROOT / "config.yaml", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
 def safe_name(value):
     """Execute safe name."""
     text = str(value).strip().replace("\\", "_").replace("/", "_").replace(" ", "")
@@ -137,7 +122,7 @@ def parse_scalar(text):
 
 def parse_value_list(raw):
     """Parse value list."""
-    return [parse_scalar(item) for item in raw.replace(",", ",").split(",") if item.strip()]
+    return [parse_scalar(item) for item in raw.split(",") if item.strip()]
 
 
 def numeric_range_values():
@@ -210,16 +195,16 @@ def validate_values(param_name, default_value, values):
             raise ValueError(f"{param_name} 必须位于 [0,1]。")
         if param_name in {"gamma"} and not all(0 < float(value) <= 1 for value in values):
             raise ValueError("gamma 必须位于 (0,1]。")
-        if param_name == "lmax_ratio" and not all(0 < float(value) <= COMPARISON_VALUE_0_5 for value in values):
+        if param_name == "lmax_ratio" and not all(0 < float(value) <= 0.5 for value in values):
             raise ValueError("lmax_ratio 必须位于 (0,0.5]。")
-        if param_name == "clip_percentile" and not all(0 < float(value) <= COMPARISON_VALUE_100 for value in values):
+        if param_name == "clip_percentile" and not all(0 < float(value) <= 100 for value in values):
             raise ValueError("clip_percentile 必须位于 (0,100]。")
         if param_name in {"num_eig", "gcf_low_bins"} and not all(
             isinstance(value, int) and value >= 0 for value in values
         ):
             raise ValueError(f"{param_name} 必须是非负整数。")
         if param_name == "min_subarray_len" and not all(
-            isinstance(value, int) and value >= COMPARISON_VALUE_2 for value in values
+            isinstance(value, int) and value >= 2 for value in values
         ):
             raise ValueError("min_subarray_len 必须是大于等于 2 的整数。")
         if param_name == "depth_smooth_rows" and not all(isinstance(value, int) and value >= 1 for value in values):
@@ -314,7 +299,7 @@ def choose_values(param_name, default_value):
             else:
                 raw = ask_text("请输入消融取值,多个用逗号分隔")
                 values = parse_value_list(raw)
-            if len(values) < COMPARISON_VALUE_2:
+            if len(values) < 2:
                 print("消融至少需要两个取值,请重新输入。")
                 continue
             return validate_values(param_name, default_value, values)
@@ -349,7 +334,7 @@ def build_config(
     return config
 
 
-def save_config(config, out_dir, idx, param_name, value):
+def save_config(config, out_dir, param_name, value):
     """Save config."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{value_scene_id(param_name, value)}.yaml"
@@ -477,7 +462,7 @@ def preserve_ground_truth(scene_dir, out_dir):
     if not comparison_path.exists():
         return None
     comparison = np.load(comparison_path).astype(np.float32)
-    if comparison.ndim != COMPARISON_VALUE_3 or comparison.shape[0] < COMPARISON_VALUE_2:
+    if comparison.ndim != 3 or comparison.shape[0] < 2:
         return None
     np.save(target, comparison[0])
     return target
@@ -767,7 +752,6 @@ def main():
         cfg_path = save_config(
             cfg,
             state["config_dir"],
-            idx,
             state["param_name"],
             value,
         )

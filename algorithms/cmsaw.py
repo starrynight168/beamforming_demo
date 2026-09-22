@@ -29,12 +29,6 @@ from algorithms.common import (
     write_params,
 )
 
-COMPARISON_VALUE_0_5 = 0.5
-COMPARISON_VALUE_100 = 100
-COMPARISON_VALUE_2 = 2
-COMPARISON_VALUE_3 = 3
-COMPARISON_VALUE_4 = 4
-
 # ================= 命令行参数配置 =================
 parser = argparse.ArgumentParser(
     description="CMSAW - Coherence-based Minimum Variance Adaptive Weighting",
@@ -108,6 +102,27 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 H5_PATH = None
 BASE_OUTPUT_DIR = None
 OUTPUT_DIR = None
+
+
+def validate_cmsaw_params(
+    lmax_ratio,
+    min_subarray_len,
+    delta_max,
+    gamma,
+    clip_percentile,
+    temporal_win,
+    depth_smooth_rows,
+):
+    if not 0 < lmax_ratio <= 0.5 or min_subarray_len < 2:
+        raise ValueError("Require lmax_ratio in (0, 0.5] and min_subarray_len >= 2")
+    if not 0 <= delta_max <= 1 or not 0 < gamma <= 1 or not 0 < clip_percentile <= 100:
+        raise ValueError(
+            "Require delta_max in [0,1], gamma in (0,1], clip_percentile in (0,100]",
+        )
+    if temporal_win < 1 or temporal_win % 2 == 0:
+        raise ValueError("temporal_win must be a positive odd integer")
+    if depth_smooth_rows < 1:
+        raise ValueError("depth_smooth_rows must be at least 1")
 
 
 def ensure_mv_baseline(baseline_path):
@@ -286,16 +301,17 @@ def cmsaw_weight_from_delayed_data(
     return_lengths=False,
 ):
     """Compute one CMSAW map per angle and average the normalized maps."""
-    if data.ndim == COMPARISON_VALUE_3:
+    if data.ndim == 3:
         data = data.unsqueeze(0)
-    if data.ndim != COMPARISON_VALUE_4 or data.shape[0] < 1:
+    if data.ndim != 4 or data.shape[0] < 1:
         raise ValueError("delayed IQ 必须是 [A,height,width,C] 或 [height,width,C]")
 
     _, height, width, n_channels = data.shape
+    data_device = data.device
     z_grid = np.asarray(z_grid, dtype=np.float32)
     x_grid = np.asarray(x_grid, dtype=np.float32)
-    x_t = torch.from_numpy(x_grid).to(device)
-    element_x = (torch.arange(n_channels, device=device) - (n_channels - 1) / 2.0) * pitch
+    x_t = torch.from_numpy(x_grid).to(data_device)
+    element_x = (torch.arange(n_channels, device=data_device) - (n_channels - 1) / 2.0) * pitch
     centers = torch.argmin(torch.abs(x_t[:, None] - element_x[None]), dim=1)
 
     row_cache = []
@@ -308,15 +324,15 @@ def cmsaw_weight_from_delayed_data(
             dynamic_aperture,
         )
         starts = torch.clamp(centers - k // 2, 0, n_channels - k)
-        channels = starts[:, None] + torch.arange(k, device=device)[None]
+        channels = starts[:, None] + torch.arange(k, device=data_device)[None]
         row_cache.append(
-            (k, channels, aperture_window_1d(k, window, device)[None]),
+            (k, channels, aperture_window_1d(k, window, data_device)[None]),
         )
 
     angle_weights = []
     angle_lengths = []
     for angle_data in data:
-        sigma = torch.empty((height, width), dtype=torch.float32, device=device)
+        sigma = torch.empty((height, width), dtype=torch.float32, device=data_device)
         active_rows = []
         k_rows = []
         for iz, (k, channels, aperture_window) in enumerate(row_cache):
@@ -331,7 +347,7 @@ def cmsaw_weight_from_delayed_data(
         length_map = torch.zeros(
             (height, width),
             dtype=torch.int16,
-            device=device,
+            device=data_device,
         )
 
         for iz, active in enumerate(active_rows):
@@ -361,7 +377,7 @@ def cmsaw_weight_from_delayed_data(
                 subset = active[columns]
                 sub = subset.unfold(1, length, 1).transpose(1, 2)
                 covariance = sub @ sub.mH / float(k - length + 1)
-                eye = torch.eye(length, dtype=torch.complex64, device=device)
+                eye = torch.eye(length, dtype=torch.complex64, device=data_device)
                 exchange = torch.flip(eye, dims=(0,))
                 transpose = covariance.transpose(-2, -1)
                 rotary = 0.25 * (
@@ -381,7 +397,7 @@ def cmsaw_weight_from_delayed_data(
                 raise ValueError(
                     f"depth_smooth_rows={depth_smooth_rows} 超过图像深度 {height}",
                 )
-            coord = torch.arange(rows, device=device).float() - rows // 2
+            coord = torch.arange(rows, device=data_device).float() - rows // 2
             kernel = torch.exp(
                 -0.5 * (coord / max(rows / 4.0, 1.0)) ** 2,
             )
@@ -441,16 +457,15 @@ class CMSAWBeamformerIQ:
         depth_smooth_rows=1,
     ):
         """Initialize the instance."""
-        if not 0 < lmax_ratio <= COMPARISON_VALUE_0_5 or min_subarray_len < COMPARISON_VALUE_2:
-            raise ValueError("Require lmax_ratio in (0, 0.5] and min_subarray_len >= 2")
-        if not 0 <= delta_max <= 1 or not 0 < gamma <= 1 or not 0 < clip_percentile <= COMPARISON_VALUE_100:
-            raise ValueError(
-                "Require delta_max in [0,1], gamma in (0,1], clip_percentile in (0,100]",
-            )
-        if temporal_win < 1 or temporal_win % 2 == 0:
-            raise ValueError("temporal_win must be a positive odd integer")
-        if depth_smooth_rows < 1:
-            raise ValueError("depth_smooth_rows must be at least 1")
+        validate_cmsaw_params(
+            lmax_ratio,
+            min_subarray_len,
+            delta_max,
+            gamma,
+            clip_percentile,
+            temporal_win,
+            depth_smooth_rows,
+        )
 
         self.z_grid = np.asarray(z_grid, dtype=np.float32)
         self.x_grid = np.asarray(x_grid, dtype=np.float32)
@@ -540,17 +555,17 @@ def main():
     BASE_OUTPUT_DIR = args.output_dir
     OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, METHOD_NAME)
 
-    # 参数验证
-    if not 0 < args.lmax_ratio <= COMPARISON_VALUE_0_5 or args.min_subarray_len < COMPARISON_VALUE_2:
-        raise ValueError("Require lmax_ratio in (0, 0.5] and min_subarray_len >= 2")
-    if not 0 <= args.delta_max <= 1 or not 0 < args.gamma <= 1 or not 0 < args.clip_percentile <= COMPARISON_VALUE_100:
-        raise ValueError(
-            "Require delta_max in [0,1], gamma in (0,1], clip_percentile in (0,100]",
-        )
-    if args.depth_smooth_rows < 1:
-        raise ValueError("depth_smooth_rows must be at least 1")
-
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    validate_cmsaw_params(
+        args.lmax_ratio,
+        args.min_subarray_len,
+        args.delta_max,
+        args.gamma,
+        args.clip_percentile,
+        args.temporal_win,
+        args.depth_smooth_rows,
+    )
 
     # ========== 自动生成MV基线 ==========
     baseline_path = ensure_mv_baseline(args.baseline_mv)

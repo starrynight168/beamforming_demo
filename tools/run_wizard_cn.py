@@ -12,9 +12,6 @@ from pathlib import Path
 import h5py
 import yaml
 
-COMPARISON_VALUE_2 = 2
-COMPARISON_VALUE_4 = 4
-
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 
@@ -345,7 +342,7 @@ def inspect_h5(path):
         missing = sorted(required - set(hf.keys()))
         if missing:
             raise ValueError(f"不是当前 pack_data 格式,缺少字段:{', '.join(missing)}")
-        if hf["all_multi_I"].shape != hf["all_multi_Q"].shape or hf["all_multi_I"].ndim != COMPARISON_VALUE_4:
+        if hf["all_multi_I"].shape != hf["all_multi_Q"].shape or hf["all_multi_I"].ndim != 4:
             raise ValueError("all_multi_I/all_multi_Q 必须是形状一致的 [N,A,T,C] 数组")
         n, a, t, c = hf["all_multi_I"].shape
         if min(n, a, c) < 1 or t < 2:
@@ -354,7 +351,7 @@ def inspect_h5(path):
         if valid_time_dataset.ndim != 1 or valid_time_dataset.dtype.kind not in "iu":
             raise ValueError("valid_time_samples 必须是一维整数数组")
         valid_time = [int(value) for value in valid_time_dataset[:]]
-        if len(valid_time) != n or any(value < COMPARISON_VALUE_2 or value > t for value in valid_time):
+        if len(valid_time) != n or any(value < 2 or value > t for value in valid_time):
             raise ValueError(
                 "valid_time_samples 必须为每个样本提供至少 2 个有效时间采样点",
             )
@@ -506,10 +503,6 @@ def build_config(base_config, h5_path, sample_idx, algorithms, params):
 
 def load_base_config():
     """Load base config."""
-    if yaml is None:
-        raise RuntimeError(
-            "缺少 PyYAML,无法读取 config.yaml。请先安装:pip install pyyaml",
-        )
     with open(ROOT / "config.yaml", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
     if not isinstance(config, dict):

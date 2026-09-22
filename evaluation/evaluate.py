@@ -16,16 +16,17 @@ import yaml
 from scipy.ndimage import convolve, gaussian_filter
 from scipy.stats import kstest
 
-COMPARISON_VALUE_0_05 = 0.05
-COMPARISON_VALUE_0_5 = 0.5
-COMPARISON_VALUE_1ENEG_9 = 1e-9
-COMPARISON_VALUE_2 = 2
-COMPARISON_VALUE_20 = 20
-COMPARISON_VALUE_3 = 3
-COMPARISON_VALUE_5 = 5
-COMPARISON_VALUE_7 = 7
-COMPARISON_VALUE_8 = 8
-COMPARISON_VALUE_9 = 9
+EPSILON = 1e-9
+PASS_THRESHOLD = 0.5
+MIN_PROFILE_POINTS = 2
+MIN_SIDE_LOBE_POINTS = 5
+MIN_ROI_SAMPLES = 8
+SIMULATION_RESOLUTION_TARGETS = 20
+EXPERIMENT_RESOLUTION_TARGETS = 7
+SIMULATION_CONTRAST_ROIS = 9
+EXPERIMENT_CONTRAST_ROIS = 2
+IMAGE_STACK_DIMENSIONS = 3
+SPECKLE_PASS_ALPHA = 0.05
 PICMUS_OFFICIAL_Z_CORRECTION_MM = 0.2
 
 try:
@@ -417,7 +418,7 @@ def read_phantom(phantom_path):
                 if (
                     np.isfinite(x)
                     and np.isfinite(z)
-                    and (abs(x) > COMPARISON_VALUE_1ENEG_9 or abs(z) > COMPARISON_VALUE_1ENEG_9)
+                    and (abs(x) > EPSILON or abs(z) > EPSILON)
                 ):
                     out["resolution_targets"].append(
                         {"x_mm": float(x), "z_mm": float(z), "source": "phantom"},
@@ -499,7 +500,7 @@ def standard_contrast_score(
     dist2 = (x - roi["x_mm"]) ** 2 + (z - roi["z_mm"]) ** 2
     inside = db_img[dist2 <= rin**2]
     outside = db_img[(dist2 >= rout1**2) & (dist2 <= rout2**2)]
-    if inside.size < COMPARISON_VALUE_8 or outside.size < COMPARISON_VALUE_8:
+    if inside.size < MIN_ROI_SAMPLES or outside.size < MIN_ROI_SAMPLES:
         return np.nan
     # Match MATLAB var() in the official PICMUS evaluator (sample variance, N-1).
     denom = math.sqrt(
@@ -531,7 +532,7 @@ def contrast_roi_metrics(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padding
     outside_db = db_img[(dist2 >= rout1**2) & (dist2 <= rout2**2)]
     inside_db = inside_db[np.isfinite(inside_db)]
     outside_db = outside_db[np.isfinite(outside_db)]
-    if inside_db.size < COMPARISON_VALUE_8 or outside_db.size < COMPARISON_VALUE_8:
+    if inside_db.size < MIN_ROI_SAMPLES or outside_db.size < MIN_ROI_SAMPLES:
         return None
 
     inside_env = db_to_envelope(inside_db)
@@ -593,13 +594,13 @@ def standard_speckle_quality(
         return None
     sample = env_roi[::5, ::5].ravel()
     sample = sample[np.isfinite(sample)]
-    if sample.size < COMPARISON_VALUE_8:
+    if sample.size < MIN_ROI_SAMPLES:
         return None
     rayleigh_var = float(np.sum(sample**2) / (2.0 * sample.size))
     scale = math.sqrt(max(rayleigh_var, 1e-24))
     ks = kstest(sample, "rayleigh", args=(0.0, scale))
     return {
-        "speckle_pass": 1.0 if ks.pvalue >= COMPARISON_VALUE_0_05 else 0.0,
+        "speckle_pass": 1.0 if ks.pvalue >= SPECKLE_PASS_ALPHA else 0.0,
         "speckle_KS_D": float(ks.statistic),
         "speckle_KS_p": float(ks.pvalue),
         "speckle_SNR": float(np.mean(sample) / (np.std(sample) + 1e-12)),
@@ -617,7 +618,7 @@ def compute_6db_resolution(coord, profile_db):
     profile = np.asarray(profile_db, dtype=np.float64)
     coord = np.asarray(coord, dtype=np.float64)
     if (
-        profile.size < COMPARISON_VALUE_2
+        profile.size < MIN_PROFILE_POINTS
         or coord.size != profile.size
         or not np.all(np.isfinite(coord))
         or not np.any(np.isfinite(profile))
@@ -627,7 +628,7 @@ def compute_6db_resolution(coord, profile_db):
     if not np.all(finite):
         coord = coord[finite]
         profile = profile[finite]
-    if profile.size < COMPARISON_VALUE_2:
+    if profile.size < MIN_PROFILE_POINTS:
         return np.nan
     interp_coord = np.linspace(coord[0], coord[-1], profile.size * 10)
     interp_profile = np.interp(interp_coord, coord, profile)
@@ -641,7 +642,7 @@ def profile_sidelobe_metrics(profile_db):
     """Execute profile sidelobe metrics."""
     profile = np.asarray(profile_db, dtype=np.float64)
     profile = profile[np.isfinite(profile)]
-    if profile.size < COMPARISON_VALUE_5:
+    if profile.size < MIN_SIDE_LOBE_POINTS:
         return np.nan, np.nan
 
     peak_idx = int(np.argmax(profile))
@@ -772,13 +773,13 @@ def mean_or_nan(values):
 
 def picmus_resolution_groups(source, target_count):
     """Return the official PICMUS resolution target groupings."""
-    if source == "simulation" and target_count >= COMPARISON_VALUE_20:
+    if source == "simulation" and target_count >= SIMULATION_RESOLUTION_TARGETS:
         return [
             ("vertical_targets", list(range(1, 9))),
             ("horizontal_targets_2cm", [9, 10, 11, 3, 12, 13, 14]),
             ("horizontal_targets_4cm", [15, 16, 17, 7, 18, 19, 20]),
         ]
-    if source == "experiments" and target_count >= COMPARISON_VALUE_7:
+    if source == "experiments" and target_count >= EXPERIMENT_RESOLUTION_TARGETS:
         return [
             ("vertical_targets", list(range(1, 6))),
             ("horizontal_targets_near_4cm", [6, 4, 7]),
@@ -788,13 +789,13 @@ def picmus_resolution_groups(source, target_count):
 
 def picmus_contrast_groups(source, roi_count):
     """Execute picmus contrast groups."""
-    if source == "simulation" and roi_count >= COMPARISON_VALUE_9:
+    if source == "simulation" and roi_count >= SIMULATION_CONTRAST_ROIS:
         return [
             ("left_column", [4, 5, 6]),
             ("middle_column", [1, 2, 3]),
             ("right_column", [7, 8, 9]),
         ]
-    if source == "experiments" and roi_count >= COMPARISON_VALUE_2:
+    if source == "experiments" and roi_count >= EXPERIMENT_CONTRAST_ROIS:
         return [("middle_column", [1, 2])]
     return [("all_cysts", list(range(1, roi_count + 1)))] if roi_count else []
 
@@ -821,7 +822,7 @@ def speckle_penalty_for_method(roi_rows, method):
     ]
     if not passes:
         return np.nan
-    return -40.0 if any(value < COMPARISON_VALUE_0_5 for value in passes) else 0.0
+    return -40.0 if any(value < PASS_THRESHOLD for value in passes) else 0.0
 
 
 def distortion_penalty_for_method(target_rows, method, source):
@@ -837,7 +838,7 @@ def distortion_penalty_for_method(target_rows, method, source):
     ]
     if not passes:
         return np.nan
-    return -40.0 if any(value < COMPARISON_VALUE_0_5 for value in passes) else 0.0
+    return -40.0 if any(value < PASS_THRESHOLD for value in passes) else 0.0
 
 
 def build_resolution_group_rows(target_rows, source, target_count, methods):
@@ -856,7 +857,7 @@ def build_resolution_group_rows(target_rows, source, target_count, methods):
                 if np.isfinite(row.get("distortion_pass", np.nan))
             ]
             if source == "simulation" and pass_values:
-                penalty = -40.0 if any(value < COMPARISON_VALUE_0_5 for value in pass_values) else 0.0
+                penalty = -40.0 if any(value < PASS_THRESHOLD for value in pass_values) else 0.0
                 pass_rate = mean_or_nan(pass_values)
             else:
                 penalty = np.nan
@@ -1033,7 +1034,7 @@ def main():
 
     comparison = np.load(comparison_path).astype(np.float64)
     x_mm, z_mm = load_grids(h5_path)
-    if comparison.ndim != COMPARISON_VALUE_3 or comparison.shape[0] < 1:
+    if comparison.ndim != IMAGE_STACK_DIMENSIONS or comparison.shape[0] < 1:
         raise ValueError(
             f"comparison 必须是非空 [method,z,x] 三维数组,实际为 {comparison.shape}",
         )

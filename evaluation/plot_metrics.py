@@ -7,7 +7,6 @@ Default input:
 import argparse
 import csv
 import hashlib
-import importlib
 import json
 import math
 import os
@@ -25,12 +24,9 @@ from matplotlib.patches import Patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-evaluate = importlib.import_module("evaluation.evaluate")
-db_to_display = evaluate.db_to_display
-load_grids = evaluate.load_grids
-read_phantom = evaluate.read_phantom
+from evaluation.evaluate import db_to_display, load_grids, read_phantom  # noqa: E402
 
-COMPARISON_VALUE_12 = 12
+MAX_METHOD_LABELS_LARGE_FONT = 12
 PAGE_MODEL_PALETTE = [
     "#2CA02C",
     "#D62728",
@@ -429,7 +425,10 @@ def save_bar_plot(
             linewidth=0.8,
         )
         ax.set_yticks(positions)
-        ax.set_yticklabels(methods, fontsize=8 if len(methods) <= COMPARISON_VALUE_12 else 7)
+        ax.set_yticklabels(
+            methods,
+            fontsize=8 if len(methods) <= MAX_METHOD_LABELS_LARGE_FONT else 7,
+        )
         ax.invert_yaxis()
         ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
         ax.grid(axis="x", linestyle="--", alpha=0.5)

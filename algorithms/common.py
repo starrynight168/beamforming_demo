@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import time
 from pathlib import Path
 from typing import NamedTuple
 
@@ -47,6 +48,16 @@ class PackedSample(NamedTuple):
     q_data: np.ndarray
     gt_data: np.ndarray | None
     has_gt: bool
+
+
+class BeamformingInput(NamedTuple):
+    sample: PackedSample
+    selected_indices: np.ndarray
+    selected_angles: np.ndarray
+    i_data: np.ndarray
+    q_data: np.ndarray
+    t0: np.ndarray
+    extent_mm: tuple[float, float, float, float]
 
 
 def positive_float(value):
@@ -291,6 +302,66 @@ def load_from_h5(h5_path, sample_idx=0):
             gt_data=gt_data,
             has_gt=has_gt,
         )
+
+
+def prepare_beamforming_input(h5_path, sample_idx, select_str):
+    sample = load_from_h5(h5_path, sample_idx)
+    selected_indices, selected_angles = parse_selected_angles(
+        sample.angles,
+        select_str,
+    )
+    return BeamformingInput(
+        sample=sample,
+        selected_indices=selected_indices,
+        selected_angles=selected_angles,
+        i_data=sample.i_data[selected_indices],
+        q_data=sample.q_data[selected_indices],
+        t0=sample.t0_vec[selected_indices],
+        extent_mm=(
+            float(sample.x_grid[0] * 1000),
+            float(sample.x_grid[-1] * 1000),
+            float(sample.z_grid[-1] * 1000),
+            float(sample.z_grid[0] * 1000),
+        ),
+    )
+
+
+def time_start_tensor(t_starts, n_angles, fs, device):
+    values = np.asarray(t_starts, dtype=np.float32).reshape(-1)
+    if values.size == 1:
+        values = np.repeat(values, n_angles)
+    if values.size != n_angles:
+        raise ValueError(
+            f"time starts must contain one value or exactly {n_angles} values, got {values.size}",
+        )
+    return torch.from_numpy(values).to(device) * fs
+
+
+def envelope_to_db(i_output, q_output, z_grid, fc, tgc_enabled, tgc_alpha):
+    i_output = np.asarray(i_output, dtype=np.float32)
+    q_output = np.asarray(q_output, dtype=np.float32)
+    if i_output.ndim != 2 or i_output.shape != q_output.shape:
+        raise ValueError(
+            f"beamformer I/Q output must have matching 2D shapes, got {i_output.shape} and {q_output.shape}",
+        )
+    if not np.isfinite(i_output).all() or not np.isfinite(q_output).all():
+        raise FloatingPointError("beamformer I/Q output contains NaN/Inf")
+    tgc = tgc_gain(z_grid, fc, tgc_alpha) if tgc_enabled else np.ones(len(z_grid))
+    envelope_sq = (i_output**2 + q_output**2) * (tgc[:, None] ** 2)
+    peak = float(np.max(envelope_sq))
+    if not np.isfinite(peak) or peak <= 0:
+        raise ValueError(f"beamformer envelope peak must be finite and positive, got {peak}")
+    return 10.0 * np.log10(envelope_sq / peak + 1e-24)
+
+
+def run_beamformer(beamformer, i_data, q_data, selected_angles, t0, fs, device):
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    start = time.perf_counter()
+    i_output, q_output = beamformer(i_data, q_data, selected_angles, t0, fs)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    return i_output, q_output, time.perf_counter() - start
 
 
 def format_method_name(method_name):
@@ -628,7 +699,7 @@ def _to_2d(array):
     return array
 
 
-def _add_scale_bar(axis, extent_mm, fontsize=10):
+def add_scale_bar(axis, extent_mm, fontsize=10):
     bar_length = 5.0
     bar_x = extent_mm[1] - bar_length - 2.0
     bar_y = extent_mm[2] - 2.0
@@ -681,7 +752,7 @@ def save_comparison_figure(
     image_axis.set_title(f"{format_method_name(method_name)}\n{title_str}", fontsize=9, pad=10)
     image_axis.set_xlabel("Lateral (mm)")
     image_axis.set_ylabel("Depth (mm)")
-    _add_scale_bar(image_axis, extent_mm)
+    add_scale_bar(image_axis, extent_mm)
 
     color_axis = fig.add_subplot(grid[0, 2])
     colorbar = fig.colorbar(image_handle, cax=color_axis, fraction=0.8)
@@ -707,7 +778,7 @@ def save_figure(image_db, extent_mm, out_path, title_str, dr=60.0, method_name="
     axis.set_title(f"{format_method_name(method_name)}\n{title_str}", fontsize=9, pad=15)
     colorbar = fig.colorbar(image_handle, ax=axis, fraction=0.046, pad=0.04)
     colorbar.set_label("Amplitude (dB)")
-    _add_scale_bar(axis, extent_mm)
+    add_scale_bar(axis, extent_mm)
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight", facecolor="white")
     plt.close(fig)

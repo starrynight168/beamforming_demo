@@ -14,13 +14,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib import patches
+import yaml
 
-from algorithms.common import merge_common_params
+from algorithms.common import add_scale_bar, merge_common_params
 
 ROOT = Path(__file__).resolve().parent
 
-COMPARISON_VALUE_3 = 3
 MAX_COMPARISON_IMAGES_PER_PAGE = 8
 EVALUATION_SCENE_IDS = frozenset(
     {
@@ -30,12 +29,6 @@ EVALUATION_SCENE_IDS = frozenset(
         "experiments_resolution_distorsion",
     }
 )
-try:
-    import yaml
-except ImportError:
-    yaml = None
-
-
 def parse_args():
     """Parse args."""
     parser = argparse.ArgumentParser(
@@ -74,10 +67,6 @@ def parse_args():
 
 def load_config(path):
     """Load config."""
-    if yaml is None:
-        raise RuntimeError(
-            "PyYAML is required to read config.yaml. Install with: pip install pyyaml",
-        )
     with open(path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
     if not isinstance(config, dict):
@@ -138,9 +127,6 @@ def algorithm_params(config, algorithm):
     return all_params.get(algorithm, {}) or {}
 
 
-common_params = merge_common_params
-
-
 def algorithm_label(config, algorithm):
     """Execute algorithm label."""
     labels = config.get("algorithm_labels", {}) or {}
@@ -149,7 +135,7 @@ def algorithm_label(config, algorithm):
 
 def build_algorithm_cmd(args, config, scene, algorithm, scene_dir):
     """Build algorithm cmd."""
-    params = common_params(config)
+    params = merge_common_params(config)
     method_params = algorithm_params(config, algorithm)
     module = f"algorithms.{algorithm}"
     module_file = ROOT / Path(*module.split("."))
@@ -203,7 +189,7 @@ def load_grid_and_gt(h5_path, sample_idx, has_gt):
     for name, grid in (("x_grid", x_grid), ("z_grid", z_grid)):
         if grid.ndim != 1 or grid.size < 2 or not np.isfinite(grid).all() or not np.all(np.diff(grid) > 0):
             raise ValueError(f"{name} 必须是至少含两个点的有限严格递增一维网格")
-    if gt is not None and gt.ndim == COMPARISON_VALUE_3:
+    if gt is not None and gt.ndim == 3:
         if gt.shape[0] != 1:
             raise ValueError(f"GT 三维形状必须为 [1,H,W]，实际 {gt.shape}")
         gt = gt[0]
@@ -235,26 +221,6 @@ def scene_is_non_controlled(scene):
 def gt_norm_to_db(gt, dr):
     """Execute gt norm to db."""
     return np.clip(gt, 0.0, 1.0) * dr - dr
-
-
-def add_scale_bar(ax, extent_mm):
-    """Execute add scale bar."""
-    bar_length = 5.0
-    bar_x = extent_mm[1] - bar_length - 2.0
-    bar_y = extent_mm[2] - 2.0
-    ax.add_patch(
-        patches.Rectangle((bar_x, bar_y), bar_length, 0.5, color="white", zorder=5),
-    )
-    ax.text(
-        bar_x + bar_length / 2,
-        bar_y - 1.0,
-        "5 mm",
-        color="white",
-        fontsize=9,
-        ha="center",
-        va="bottom",
-        fontweight="bold",
-    )
 
 
 def save_comparison(images, titles, extent_mm, output_path, dr, _cleanup_pages=True):
@@ -305,7 +271,7 @@ def save_comparison(images, titles, extent_mm, output_path, dr, _cleanup_pages=T
             ax.set_ylabel("Depth (mm)")
         else:
             ax.set_yticklabels([])
-        add_scale_bar(ax, extent_mm)
+        add_scale_bar(ax, extent_mm, fontsize=9)
 
     for idx in range(n_images, rows * cols):
         axes[idx // cols][idx % cols].axis("off")
@@ -330,7 +296,7 @@ def save_single_image(image, title, extent_mm, output_path, dr):
     ax.set_title(title, fontsize=12, pad=8, fontweight="bold")
     ax.set_xlabel("Lateral (mm)")
     ax.set_ylabel("Depth (mm)")
-    add_scale_bar(ax, extent_mm)
+    add_scale_bar(ax, extent_mm, fontsize=9)
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label("Amplitude (dB)")
     fig.savefig(output_path, bbox_inches="tight", facecolor="white")
@@ -354,12 +320,12 @@ def can_reuse_existing(scene_dir, config, scene, method, args):
     try:
         with open(params_path, encoding="utf-8") as f:
             previous = json.load(f)
-    except Exception as exc:
+    except (OSError, json.JSONDecodeError) as exc:
         return False, f"无法读取旧 run_params.json: {exc}"
 
     expected = {
         "scene": scene,
-        "params": common_params(config),
+        "params": merge_common_params(config),
         "method_params": algorithm_params(config, method),
         "extra_algorithm_args": args.extra_algorithm_args,
     }
@@ -376,7 +342,7 @@ def can_reuse_existing(scene_dir, config, scene, method, args):
 
 def run_evaluation(args, config, scene, scene_dir, comparison_path, methods):
     """Execute run evaluation."""
-    params = common_params(config)
+    params = merge_common_params(config)
     labels = [algorithm_label(config, method) for method in methods]
     cmd = [
         args.python_exe,
@@ -455,7 +421,7 @@ def main():
         if result.returncode != 0 or not expected.exists():
             raise RuntimeError(f"Algorithm failed or output missing: {method}")
 
-    params = common_params(config)
+    params = merge_common_params(config)
     dr = float(params["dr"])
     has_gt = scene_has_gt(scene)
     extent_mm, gt = load_grid_and_gt(

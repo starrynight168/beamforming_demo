@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,13 +22,13 @@ import torch
 
 # Add project root and evaluation to path
 ROOT_DIR = Path(__file__).resolve().parent.parent
-EVAL_DIR = ROOT_DIR / "evaluation"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
-if str(EVAL_DIR) not in sys.path:
-    sys.path.insert(0, str(EVAL_DIR))
 
 from algorithms.common import (  # noqa: E402
+    INTERP_CHOICES,
+    WINDOW_CHOICES,
+    load_from_h5,
     nonnegative_float,
     nonnegative_int,
     positive_float,
@@ -35,9 +36,9 @@ from algorithms.common import (  # noqa: E402
     positive_odd_int,
     unit_interval_float,
 )
-from algorithms.common import INTERP_CHOICES, WINDOW_CHOICES, load_from_h5, tgc_gain  # noqa: E402
+from algorithms.common import tgc_gain  # noqa: E402
 from algorithms import mv  # noqa: E402
-from evaluate import local_ssim, db_to_display, psnr  # noqa: E402
+from evaluation.evaluate import db_to_display, local_ssim, psnr  # noqa: E402
 
 
 def resolve_path(path):

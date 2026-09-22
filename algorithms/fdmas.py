@@ -2,7 +2,6 @@
 
 import argparse
 import os
-import time
 
 import numpy as np
 import torch
@@ -12,19 +11,18 @@ from algorithms.common import (
     add_io_arguments,
     aperture_window_1d,
     dynamic_aperture_channel_count,
+    envelope_to_db,
     interpolate_channel_samples,
-    load_from_h5,
-    parse_selected_angles,
+    prepare_beamforming_input,
     print_physical_summary,
     resolve_project_path,
+    run_beamformer,
     save_comparison_figure,
     save_figure,
-    tgc_gain,
+    time_start_tensor,
     validate_db_output,
     write_params,
 )
-
-COMPARISON_VALUE_3 = 3
 
 # ================= 命令行参数配置 =================
 parser = argparse.ArgumentParser(
@@ -113,10 +111,7 @@ class FDMASBeamformerIQ:
         cos_a = torch.from_numpy(np.cos(selected_angles).astype(np.float32)).to(device)
         sin_a = torch.from_numpy(np.sin(selected_angles).astype(np.float32)).to(device)
 
-        t_starts_arr = np.asarray(t_starts, dtype=np.float32).reshape(-1)
-        if t_starts_arr.size == 1:
-            t_starts_arr = np.repeat(t_starts_arr, n_a)
-        t_starts_t = torch.from_numpy(t_starts_arr[:n_a]).to(device) * fs
+        t_starts_t = time_start_tensor(t_starts, n_a, fs, device)
 
         beam_out = torch.zeros((self.height, self.width), dtype=torch.complex64, device=device)
         ch = self.ch
@@ -187,41 +182,21 @@ def main():
     OUTPUT_DIR = os.path.join(args.output_dir, METHOD_NAME)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    (
-        c,
-        fc,
-        fs,
-        pitch,
-        n_elem,
-        angles_all,
-        t0_all,
-        z_grid,
-        x_grid,
-        i_data,
-        q_data,
-        gt_data,
-        has_gt,
-    ) = load_from_h5(
+    input_data = prepare_beamforming_input(
         H5_PATH,
         args.h5_sample_idx,
-    )
-
-    selected_indices, selected_angles = parse_selected_angles(
-        angles_all,
         args.select_angles,
     )
-    i_sub, q_sub = i_data[selected_indices], q_data[selected_indices]
-    t0_sub = t0_all[selected_indices] if isinstance(t0_all, (np.ndarray, list)) else t0_all
-
+    sample = input_data.sample
+    c, fc, fs, pitch, n_elem = sample.c, sample.fc, sample.fs, sample.pitch, sample.n_elem
+    angles_all, z_grid, x_grid = sample.angles, sample.z_grid, sample.x_grid
+    selected_angles = input_data.selected_angles
+    i_sub, q_sub, t0_sub = input_data.i_data, input_data.q_data, input_data.t0
+    gt_data, has_gt = sample.gt_data, sample.has_gt
     height, width = len(z_grid), len(x_grid)
     dz, dx = z_grid[1] - z_grid[0], x_grid[1] - x_grid[0]
     depth_min, depth_max = z_grid[0], z_grid[-1]
-    extent_mm = [
-        x_grid[0] * 1000,
-        x_grid[-1] * 1000,
-        z_grid[-1] * 1000,
-        z_grid[0] * 1000,
-    ]
+    extent_mm = input_data.extent_mm
 
     print_physical_summary(
         method_name=METHOD_NAME,
@@ -267,20 +242,17 @@ def main():
         angles_all,
     )
 
-    tgc = tgc_gain(z_grid, fc, args.tgc_alpha) if args.tgc else np.ones_like(z_grid)
-
     print("Processing F-DMAS...")
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    t1 = time.time()
-    i_out, q_out = beamformer(i_sub, q_sub, selected_angles, t0_sub, fs)
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    dt = time.time() - t1
-
-    env = (i_out**2 + q_out**2) * (tgc[:, None] ** 2)
-    env /= env.max() + 1e-24
-    fdmas_db = 10 * np.log10(env + 1e-24)
+    i_out, q_out, dt = run_beamformer(
+        beamformer,
+        i_sub,
+        q_sub,
+        selected_angles,
+        t0_sub,
+        fs,
+        device,
+    )
+    fdmas_db = envelope_to_db(i_out, q_out, z_grid, fc, args.tgc, args.tgc_alpha)
     fdmas_db = validate_db_output(fdmas_db, (height, width), METHOD_NAME)
 
     # ========== 生成图标题(所有参数简写) ==========
