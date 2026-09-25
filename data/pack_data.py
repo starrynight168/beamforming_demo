@@ -1,4 +1,4 @@
-"""Provide Python utilities for pack_data."""
+"""Pack PICMUS IQ and reference images into the project HDF5 format."""
 
 import argparse
 from pathlib import Path
@@ -90,7 +90,7 @@ IN_VIVO_SCENES = [
 
 def validate_grid(values, name):
     """Validate a strictly increasing one-dimensional grid."""
-    grid = np.asarray(values)
+    grid = np.asarray(values, dtype=np.float64)
     if (
         grid.ndim != 1
         or grid.size < MIN_GRID_POINTS
@@ -101,6 +101,13 @@ def validate_grid(values, name):
             f"{name} 必须是至少含两个点的有限严格递增一维数组"
         )
     return grid
+
+
+def _read_h5_scalar(handle, key):
+    values = np.asarray(handle[key]).reshape(-1)
+    if values.size != 1:
+        raise ValueError(f"{key} 必须只包含一个数值，实际元素数 {values.size}")
+    return float(values[0])
 
 
 def validate_physical_parameters(fs, c, fc, pitch):
@@ -133,17 +140,17 @@ def read_gt(gt_path):
     with h5py.File(gt_path, "r") as f:
         real_raw = f[f"{BASE}/data/real"][:]
         imag_raw = f[f"{BASE}/data/imag"][:]
-    if real_raw.shape != imag_raw.shape or real_raw.ndim != 3 or not real_raw.shape[0]:
+    if (
+        real_raw.shape != imag_raw.shape
+        or real_raw.ndim != 3
+        or min(real_raw.shape) < 1
+    ):
         raise ValueError(
             f"GT real/imag 必须是形状一致的非空三维数组: "
             f"{real_raw.shape}/{imag_raw.shape}"
         )
-    real = real_raw[-1].T
-    imag = imag_raw[-1].T
-    if real.shape != imag.shape or real.ndim != 2 or min(real.shape) < 1:
-        raise ValueError(
-            f"GT real/imag 必须是形状一致的非空二维数组: {real.shape}/{imag.shape}"
-        )
+    real = real_raw[-1].T.astype(np.float64)
+    imag = imag_raw[-1].T.astype(np.float64)
     if not np.isfinite(real).all() or not np.isfinite(imag).all():
         raise ValueError("GT real/imag 包含 NaN/Inf")
     env_sq = real**2 + imag**2
@@ -184,8 +191,6 @@ def das_reference_from_iq(
     if not np.isfinite(i_data).all() or not np.isfinite(q_data).all():
         raise ValueError("DAS 输入 IQ 包含 NaN/Inf")
     validate_physical_parameters(fs, c, fc, pitch)
-    if not np.isfinite(F_NUMBER) or F_NUMBER <= 0:
-        raise ValueError("DAS 的 F_NUMBER 必须是有限正数")
     if angles.size != n_angles or not np.isfinite(angles).all():
         raise ValueError("DAS angles 必须匹配 IQ 角度维且全部有限")
     validate_grid(x_grid, "DAS x_grid")
@@ -226,7 +231,6 @@ def das_reference_from_iq(
             device=DEVICE,
         )
         out_q = torch.zeros_like(out_i)
-        max_sample = float(n_times - 2)
         row_block = len(z_grid) if row_block <= 0 else max(1, row_block)
 
         for z0 in range(0, len(z_grid), row_block):
@@ -257,18 +261,20 @@ def das_reference_from_iq(
             for i in range(n_angles):
                 tx_samples = tx_z * cos_a[i] + tx_x * sin_a[i]
                 sample = tx_samples[..., None] + receive_samples - t_starts_t[i]
-                valid = (sample >= 0) & (sample < n_times - 1)
-                sample.clamp_(0.0, max_sample)
+                sample_safe = sample.clamp(0.0, float(n_times - 1))
                 i_angle = i_tensor[i]
                 q_angle = q_tensor[i]
 
                 if interp == "nearest":
-                    idx = sample.round().long().clamp(0, n_times - 1)
+                    valid = (sample >= 0) & (sample <= n_times - 1)
+                    idx = sample_safe.round().long()
                     i_center = i_angle[idx, ch]
                     q_center = q_angle[idx, ch]
                 elif interp == "cubic":
-                    idx0 = sample.floor().long()
-                    frac = sample - idx0.float()
+                    valid = (sample >= 0) & (sample < n_times - 1)
+                    idx0 = sample_safe.floor().long()
+                    frac = sample_safe - idx0.float()
+                    idx0 = idx0.clamp(0, n_times - 2)
                     frac2 = frac * frac
                     frac3 = frac2 * frac
                     c_m1 = -0.5 * frac3 + frac2 - 0.5 * frac
@@ -292,8 +298,10 @@ def das_reference_from_iq(
                         + q_angle[idx_2, ch] * c_2
                     )
                 else:
-                    idx0 = sample.floor().long()
-                    frac = sample - idx0.float()
+                    valid = (sample >= 0) & (sample < n_times - 1)
+                    idx0 = sample_safe.floor().long()
+                    frac = sample_safe - idx0.float()
+                    idx0 = idx0.clamp(0, n_times - 2)
                     i_center = (
                         i_angle[idx0, ch] * (1.0 - frac) + i_angle[idx0 + 1, ch] * frac
                     )
@@ -360,16 +368,16 @@ def process_scene(scene, source_root, row_block=24):
         i_trans = np.transpose(i_norm, (0, 2, 1)).astype(np.float32)
         q_trans = np.transpose(q_norm, (0, 2, 1)).astype(np.float32)
 
-        fs = float(np.array(f[f"{BASE}/sampling_frequency"]).flatten()[0])
-        c = float(np.array(f[f"{BASE}/sound_speed"]).flatten()[0])
+        fs = _read_h5_scalar(f, f"{BASE}/sampling_frequency")
+        c = _read_h5_scalar(f, f"{BASE}/sound_speed")
         if f"{BASE}/fc" in f:
-            fc = float(np.array(f[f"{BASE}/fc"]).flatten()[0])
+            fc = _read_h5_scalar(f, f"{BASE}/fc")
         elif f"{BASE}/modulation_frequency" in f:
-            fc = float(np.array(f[f"{BASE}/modulation_frequency"]).flatten()[0])
+            fc = _read_h5_scalar(f, f"{BASE}/modulation_frequency")
         else:
             raise KeyError("IQ 源文件缺少 fc/modulation_frequency，不能推断载波频率")
         if f"{BASE}/pitch" in f:
-            pitch = float(np.array(f[f"{BASE}/pitch"]).flatten()[0])
+            pitch = _read_h5_scalar(f, f"{BASE}/pitch")
         elif f"{BASE}/probe_geometry" in f:
             geom = np.asarray(f[f"{BASE}/probe_geometry"], dtype=np.float64)
             if geom.ndim != 2 or geom.shape[0] < 1 or geom.shape[1] != i_trans.shape[2]:
@@ -379,6 +387,7 @@ def process_scene(scene, source_root, row_block=24):
                 spacing.size == 0
                 or not np.isfinite(spacing).all()
                 or np.any(spacing == 0)
+                or not (np.all(spacing > 0) or np.all(spacing < 0))
                 or not np.allclose(
                     np.abs(spacing), np.median(np.abs(spacing)), rtol=1e-4, atol=1e-9
                 )
@@ -684,18 +693,12 @@ def save_gt_images(items, image_dir, dr=DYNAMIC_RANGE):
 
     for item in items:
         gt = item["gt"]
-        if gt is None:
-            continue
         gt_sample = np.squeeze(gt).astype(np.float32)
         sample_name = item["meta"]["name"]
         out_path = image_dir / f"{sample_name}.png"
 
-        x_grid = np.asarray(item.get("x_grid", []), dtype=np.float32)
-        z_grid = np.asarray(item.get("z_grid", []), dtype=np.float32)
-        if x_grid.size < MIN_GRID_POINTS or z_grid.size < MIN_GRID_POINTS:
-            plt.imsave(out_path, gt_sample, cmap="gray", vmin=0.0, vmax=1.0)
-            continue
-
+        x_grid = np.asarray(item["x_grid"], dtype=np.float32)
+        z_grid = np.asarray(item["z_grid"], dtype=np.float32)
         extent_mm = [
             x_grid[0] * 1000.0,
             x_grid[-1] * 1000.0,

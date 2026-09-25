@@ -1,4 +1,4 @@
-"""打包 H5 文件简洁体检脚本。."""
+"""打包 H5 文件体检脚本。"""
 
 from __future__ import annotations
 
@@ -21,26 +21,7 @@ DATA_DIR = Path(__file__).resolve().parent
 ROOT = DATA_DIR.parent
 LOG_DIR = DATA_DIR / "logs"
 
-REQUIRED_FIELDS = [
-    "all_multi_I",
-    "all_multi_Q",
-    "all_envdb_norm",
-    "time_start_vector",
-    "fs",
-    "c",
-    "fc",
-    "pitch",
-    "num_channels",
-    "z_grid",
-    "x_grid",
-    "angles",
-    "all_scale_ref",
-    "all_norm_ref",
-    "valid_time_samples",
-    "config_yaml",
-]
-
-KEY_FIELDS = [
+KEY_FIELDS = (
     "all_multi_I",
     "all_multi_Q",
     "all_envdb_norm",
@@ -57,8 +38,9 @@ KEY_FIELDS = [
     "pitch",
     "num_channels",
     "config_yaml",
-]
+)
 
+REQUIRED_FIELDS = KEY_FIELDS
 PREFERRED_FIELD_ORDER = {name: idx for idx, name in enumerate(KEY_FIELDS)}
 
 MOVED_TO_CONFIG_FIELDS = {
@@ -92,7 +74,7 @@ class Tee:
 
 def default_log_path() -> Path:
     """Execute default log path."""
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     return LOG_DIR / f"check_data_{stamp}.txt"
 
 
@@ -100,8 +82,6 @@ def decode_value(value):
     """Execute decode value."""
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
-    if isinstance(value, np.bytes_):
-        return value.astype(str).item()
     arr = np.asarray(value)
     if arr.shape == ():
         item = arr.item()
@@ -122,7 +102,19 @@ def display_width(value) -> int:
 def shorten_text(text, limit: int = 110) -> str:
     """Execute shorten text."""
     text = str(text).replace("\n", " | ")
-    return text if display_width(text) <= limit else text[:limit] + " ..."
+    if display_width(text) <= limit:
+        return text
+    suffix = " ..."
+    max_width = max(limit - display_width(suffix), 0)
+    shortened = []
+    width = 0
+    for char in text:
+        char_width = display_width(char)
+        if width + char_width > max_width:
+            break
+        shortened.append(char)
+        width += char_width
+    return "".join(shortened) + suffix
 
 
 def format_value(value, max_items: int = 1) -> str:
@@ -164,10 +156,7 @@ def dataset_preview(ds: h5py.Dataset) -> str:
 
 def dataset_storage_bytes(ds: h5py.Dataset) -> int:
     """Execute dataset storage bytes."""
-    try:
-        return int(ds.id.get_storage_size())
-    except (OSError, RuntimeError, ValueError):
-        return 0
+    return int(ds.id.get_storage_size())
 
 
 def format_bytes(num_bytes: int) -> str:
@@ -179,8 +168,7 @@ def format_bytes(num_bytes: int) -> str:
             if unit == "B":
                 return f"{int(value)} {unit}"
             return f"{value:.3f} {unit}"
-        value /= 1024
-    return f"{num_bytes} B"
+        value /= BYTES_PER_UNIT
 
 
 def format_shape(shape) -> str:
@@ -250,34 +238,41 @@ def decode_compact_sequence(value) -> np.ndarray:
     return start + np.arange(count) * step
 
 
+def _config_mapping(config, key, label, problems):
+    value = config.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        problems.append(f"{label} 必须是字典")
+        return {}
+    return value
+
+
 def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> None:
     """Validate config schema."""
-    if config.get("schema_version") != 1:
+    schema_version = config.get("schema_version")
+    if type(schema_version) is not int or schema_version != 1:
         problems.append(
-            f"config_yaml.schema_version 应为 1,实际为 {config.get('schema_version')}",
+            f"config_yaml.schema_version 应为整数 1,实际为 {schema_version}",
         )
 
-    dataset = config.get("dataset", {}) or {}
-    if not isinstance(dataset, dict):
-        problems.append("config_yaml.dataset 必须是字典")
-        dataset = {}
+    dataset = _config_mapping(config, "dataset", "config_yaml.dataset", problems)
     if dataset.get("purpose") != "algorithm_evaluation":
         problems.append("config_yaml.dataset.purpose 应为 algorithm_evaluation")
 
-    schema = config.get("h5_schema", {}) or {}
-    if not isinstance(schema, dict):
-        problems.append("config_yaml.h5_schema 必须是字典")
-        schema = {}
+    schema = _config_mapping(config, "h5_schema", "config_yaml.h5_schema", problems)
     if schema.get("iq_layout") != ["sample", "angle", "time", "channel"]:
         problems.append("config_yaml.h5_schema.iq_layout 与实际 IQ 布局不一致")
     if schema.get("ground_truth_layout") != ["sample", "image_channel", "z", "x"]:
         problems.append(
             "config_yaml.h5_schema.ground_truth_layout 与实际 GT 布局不一致",
         )
-    padding = schema.get("padding", {}) or {}
-    if not isinstance(padding, dict):
-        problems.append("config_yaml.h5_schema.padding 必须是字典")
-        padding = {}
+    padding = _config_mapping(
+        schema,
+        "padding",
+        "config_yaml.h5_schema.padding",
+        problems,
+    )
     if padding.get("value") != 0.0:
         problems.append("config_yaml.h5_schema.padding.value 应为 0")
     if padding.get("time_valid_length_dataset") != "/valid_time_samples":
@@ -288,62 +283,68 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
         problems.append(
             "config_yaml.h5_schema.sample_metadata 应指向 config_yaml.source_samples",
         )
-    units = schema.get("units", {}) or {}
-    if not isinstance(units, dict):
-        problems.append("config_yaml.h5_schema.units 必须是字典")
-        units = {}
-    problems.extend(
-        f"config_yaml.h5_schema.units 缺少 {key}"
-        for key in (
-            "fs",
-            "c",
-            "fc",
-            "pitch",
-            "x_grid",
-            "z_grid",
-            "angles",
-            "time_start_vector",
-        )
-        if key not in units
+    units = _config_mapping(
+        schema,
+        "units",
+        "config_yaml.h5_schema.units",
+        problems,
     )
+    expected_units = {
+        "fs": "Hz",
+        "c": "m/s",
+        "fc": "Hz",
+        "pitch": "m",
+        "x_grid": "m",
+        "z_grid": "m",
+        "angles": "rad",
+        "time_start_vector": "s",
+    }
+    for key, expected_unit in expected_units.items():
+        if key not in units:
+            problems.append(f"config_yaml.h5_schema.units 缺少 {key}")
+        elif units[key] != expected_unit:
+            problems.append(f"config_yaml.h5_schema.units.{key} 应为 {expected_unit}")
 
-    generation = config.get("generation", {}) or {}
-    if not isinstance(generation, dict):
-        problems.append("config_yaml.generation 必须是字典")
-        generation = {}
-    input_iq = generation.get("input_iq", {}) or {}
-    ground_truth = generation.get("ground_truth", {}) or {}
-    if not isinstance(input_iq, dict) or not input_iq:
+    generation = _config_mapping(
+        config,
+        "generation",
+        "config_yaml.generation",
+        problems,
+    )
+    input_iq = _config_mapping(
+        generation,
+        "input_iq",
+        "config_yaml.generation.input_iq",
+        problems,
+    )
+    ground_truth = _config_mapping(
+        generation,
+        "ground_truth",
+        "config_yaml.generation.ground_truth",
+        problems,
+    )
+    if not input_iq:
         problems.append("config_yaml.generation.input_iq 必须是非空字典")
-        input_iq = {}
-    if not isinstance(ground_truth, dict) or not ground_truth:
+    if not ground_truth:
         problems.append("config_yaml.generation.ground_truth 必须是非空字典")
-        ground_truth = {}
-    if (
-        isinstance(ground_truth, dict)
-        and ground_truth.get("dataset") != "/all_envdb_norm"
-    ):
+    if ground_truth.get("dataset") != "/all_envdb_norm":
         problems.append(
             "config_yaml.generation.ground_truth.dataset 应指向 /all_envdb_norm",
         )
-    reference_fs = (
-        ground_truth.get("reference_sampling_frequency_hz")
-        if isinstance(ground_truth, dict)
-        else None
-    )
+    reference_fs = ground_truth.get("reference_sampling_frequency_hz")
     if (
-        not isinstance(reference_fs, (int, float))
+        type(reference_fs) not in (int, float)
         or not np.isfinite(reference_fs)
         or reference_fs <= 0
     ):
         problems.append("ground_truth.reference_sampling_frequency_hz 必须是有限正数")
-    input_norm = (
-        (input_iq.get("normalization", {}) or {}) if isinstance(input_iq, dict) else {}
+    input_norm = _config_mapping(
+        input_iq,
+        "normalization",
+        "config_yaml.generation.input_iq.normalization",
+        problems,
     )
-    if (
-        not isinstance(input_norm, dict)
-        or input_norm.get("scale_reference_dataset") != "/all_scale_ref"
-    ):
+    if input_norm.get("scale_reference_dataset") != "/all_scale_ref":
         problems.append(
             "input_iq.normalization.scale_reference_dataset 应指向 /all_scale_ref",
         )
@@ -379,7 +380,7 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
                 problems.append(
                     "input_iq.packed_sampling_frequency_hz 与根数据集 fs 不一致"
                 )
-            elif isinstance(reference_fs, (int, float)) and not np.isclose(
+            elif type(reference_fs) in (int, float) and not np.isclose(
                 float(reference_fs), source_fs_value, rtol=1e-5, atol=1.0
             ):
                 problems.append(
@@ -431,6 +432,7 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
             angles_valid
             and indices_valid
             and "angles" in hf
+            and hf["angles"].dtype.kind in "iuf"
             and (
                 selected_indices.shape != hf["angles"].shape
                 or not np.allclose(
@@ -442,15 +444,13 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
             )
         ):
             problems.append("config_yaml 输入角度记录与根数据集 angles 不一致")
-    gt_norm = (
-        (ground_truth.get("normalization", {}) or {})
-        if isinstance(ground_truth, dict)
-        else {}
+    gt_norm = _config_mapping(
+        ground_truth,
+        "normalization",
+        "config_yaml.generation.ground_truth.normalization",
+        problems,
     )
-    if (
-        not isinstance(gt_norm, dict)
-        or gt_norm.get("norm_reference_dataset") != "/all_norm_ref"
-    ):
+    if gt_norm.get("norm_reference_dataset") != "/all_norm_ref":
         problems.append(
             "ground_truth.normalization.norm_reference_dataset 应指向 /all_norm_ref",
         )
@@ -543,7 +543,11 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
 
     if iq_shape is not None and "time_start_vector" in hf:
         time_start = np.asarray(hf["time_start_vector"][:])
-        if time_start.shape != iq_shape[:2] or not np.isfinite(time_start).all():
+        if (
+            time_start.shape != iq_shape[:2]
+            or time_start.dtype.kind not in "iuf"
+            or not np.isfinite(time_start).all()
+        ):
             problems.append("time_start_vector 必须是匹配 IQ [N,A] 的有限数组")
 
     if iq_shape is not None and "angles" in hf:
@@ -551,6 +555,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
         if (
             angles.ndim != 1
             or angles.size != iq_shape[1]
+            or angles.dtype.kind not in "iuf"
             or not np.isfinite(angles).all()
         ):
             problems.append("angles 必须是匹配输入角度维的有限一维数组")
@@ -573,12 +578,12 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
         and "valid_time_samples" in hf
     ):
         valid_ds = hf["valid_time_samples"]
-        valid = np.asarray(valid_ds[:], dtype=np.int64).reshape(-1)
+        valid = np.asarray(valid_ds[:])
         n_samples, _, n_time, _ = iq_shape
         if (
-            valid_ds.ndim != 1
-            or valid_ds.dtype.kind not in "iu"
-            or len(valid) != n_samples
+            valid.ndim != 1
+            or valid.dtype.kind not in "iu"
+            or valid.size != n_samples
         ):
             problems.append(
                 f"valid_time_samples 必须是长度 {n_samples} 的一维整数数组",
@@ -605,15 +610,21 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
             values = np.asarray(hf[key][:])
             if values.ndim != 1 or values.size != iq_shape[0]:
                 problems.append(f"{key} 必须是长度 {iq_shape[0]} 的一维数组")
-            elif not np.isfinite(values).all() or np.any(values <= 0):
+            elif (
+                values.dtype.kind not in "iuf"
+                or not np.isfinite(values).all()
+                or np.any(values <= 0)
+            ):
                 problems.append(f"{key} 必须全部为有限正数")
 
     for key in ("x_grid", "z_grid"):
         if key in hf:
-            grid = np.asarray(hf[key][:], dtype=np.float64)
-            if grid.ndim != 1 or grid.size < MIN_DATA_POINTS:
+            grid = np.asarray(hf[key][:])
+            if grid.dtype.kind not in "iuf":
+                problems.append(f"{key} 必须是数值数组")
+            elif grid.ndim != 1 or grid.size < MIN_DATA_POINTS:
                 problems.append(f"{key} 必须是至少含 2 点的一维数组")
-            elif not np.all(np.isfinite(grid)) or not np.all(np.diff(grid) > 0):
+            elif not np.isfinite(grid).all() or not np.all(np.diff(grid) > 0):
                 problems.append(f"{key} 必须全部有限且严格递增")
 
     for key in ("fs", "c", "fc", "pitch"):
@@ -622,24 +633,11 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
             if value is None or not np.isfinite(value) or value <= 0:
                 problems.append(f"{key} 必须是有限正数")
 
-    if "all_envdb_norm" in hf and hf["all_envdb_norm"].size:
-        gt_min = float(np.min(hf["all_envdb_norm"][:]))
-        gt_max = float(np.max(hf["all_envdb_norm"][:]))
-        if (
-            not np.isfinite(gt_min)
-            or not np.isfinite(gt_max)
-            or gt_min < -1e-3
-            or gt_max > 1.0 + 1e-3
-        ):
-            problems.append(
-                f"all_envdb_norm 必须位于 [0,1]，实际范围 [{gt_min:g},{gt_max:g}]"
-            )
-
     if "config_yaml" in hf:
         value = decode_value(hf["config_yaml"][()])
         try:
             config = yaml.safe_load(value) or {}
-        except yaml.YAMLError as exc:
+        except (AttributeError, TypeError, yaml.YAMLError) as exc:
             problems.append(f"config_yaml 不是合法 YAML: {exc}")
         else:
             if not isinstance(config, dict):
@@ -716,21 +714,37 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
                             problems.append(
                                 f"source_samples[{index}].path_roles 未准确记录路径用途",
                             )
-                convention = config.get("path_convention", {}) or {}
-                if not isinstance(convention, dict):
-                    problems.append("config_yaml.path_convention 必须是字典")
-                    convention = {}
+                convention = _config_mapping(
+                    config,
+                    "path_convention",
+                    "config_yaml.path_convention",
+                    problems,
+                )
                 if convention.get("type") != "relative":
                     problems.append("config_yaml.path_convention.type 应为 relative")
                 if convention.get("base") != "PICMUS_ROOT":
                     problems.append("config_yaml.path_convention.base 应为 PICMUS_ROOT")
 
+    gt_min = np.inf
+    gt_max = -np.inf
     for key in ("all_multi_I", "all_multi_Q", "all_envdb_norm"):
-        if key in hf and hf[key].shape:
+        if key in hf and hf[key].shape and hf[key].dtype.kind in "iuf":
             for sample_idx in range(hf[key].shape[0]):
                 arr = np.asarray(hf[key][sample_idx])
-                if not np.isfinite(arr).all():
+                finite_mask = np.isfinite(arr)
+                if not finite_mask.all():
                     problems.append(f"{key} 第 {sample_idx} 帧包含 NaN/Inf")
+                if key == "all_envdb_norm" and arr.size and finite_mask.any():
+                    finite = arr[finite_mask]
+                    gt_min = min(gt_min, float(np.min(finite)))
+                    gt_max = max(gt_max, float(np.max(finite)))
+
+    if np.isfinite(gt_min) and (
+        gt_min < -1e-3 or gt_max > 1.0 + 1e-3
+    ):
+        problems.append(
+            f"all_envdb_norm 必须位于 [0,1]，实际范围 [{gt_min:g},{gt_max:g}]"
+        )
 
     return ("通过" if not problems else "失败"), problems
 
@@ -793,10 +807,7 @@ def inspect_file(path: Path) -> bool:
             print_table(summary_rows, ("项目", "值"))
 
             field_rows = []
-            keys = sorted(
-                hf.keys(),
-                key=lambda key: (PREFERRED_FIELD_ORDER.get(key, 10_000), key),
-            )
+            keys = hf.keys()
             for key in keys:
                 ds = hf[key]
                 if not isinstance(ds, h5py.Dataset):
