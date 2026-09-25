@@ -19,24 +19,25 @@ import numpy as np
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
-from tools.run_wizard_cn import (
-    ALGORITHMS,
-    ExitCommandError,
-    append_run_log,
-    ask_choice,
-    ask_text,
-    ask_yes_no,
-    choose_h5,
-    choose_sample,
-    inspect_h5,
-    load_base_config,
-    print_title,
-    relative_to_root,
-    run_steps,
-)
+try:
+    from . import run_wizard_cn as wizard
+except ImportError:
+    import run_wizard_cn as wizard
+
+ALGORITHMS = wizard.ALGORITHMS
+ExitCommandError = wizard.ExitCommandError
+append_run_log = wizard.append_run_log
+ask_choice = wizard.ask_choice
+ask_text = wizard.ask_text
+ask_yes_no = wizard.ask_yes_no
+choose_h5 = wizard.choose_h5
+choose_sample = wizard.choose_sample
+inspect_h5 = wizard.inspect_h5
+load_base_config = wizard.load_base_config
+print_title = wizard.print_title
+relative_to_root = wizard.relative_to_root
+run_steps = wizard.run_steps
 
 GLOBAL_PARAM_DESCRIPTIONS = {
     "select_angles": "角度选择。center=中心角,all=全部角度,也可以填 1/3/11 等数量。",
@@ -181,23 +182,40 @@ def validate_values(param_name, default_value, values):
         return values
 
     if isinstance(default_value, (int, float)) and not isinstance(default_value, bool):
-        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values):
+        if not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in values
+        ):
             raise ValueError("这个参数是数值量,只能填数字。")
         if not all(math.isfinite(float(value)) for value in values):
             raise ValueError("数值必须是有限值。")
-        if param_name in {"f_number", "dr"} and not all(float(value) > 0 for value in values):
+        if param_name in {"f_number", "dr"} and not all(
+            float(value) > 0 for value in values
+        ):
             raise ValueError(f"{param_name} 必须大于 0。")
-        if param_name in {"tgc_alpha", "mv_dl", "gcf_power"} and not all(float(value) >= 0 for value in values):
+        if param_name in {"tgc_alpha", "mv_dl", "gcf_power"} and not all(
+            float(value) >= 0 for value in values
+        ):
             raise ValueError(f"{param_name} 必须大于等于 0。")
-        if param_name == "subarray_ratio" and not all(0 < float(value) <= 1 for value in values):
+        if param_name == "subarray_ratio" and not all(
+            0 < float(value) <= 1 for value in values
+        ):
             raise ValueError("subarray_ratio 必须位于 (0,1]。")
-        if param_name in {"eig_threshold", "delta_max"} and not all(0 <= float(value) <= 1 for value in values):
+        if param_name in {"eig_threshold", "delta_max"} and not all(
+            0 <= float(value) <= 1 for value in values
+        ):
             raise ValueError(f"{param_name} 必须位于 [0,1]。")
-        if param_name in {"gamma"} and not all(0 < float(value) <= 1 for value in values):
+        if param_name in {"gamma"} and not all(
+            0 < float(value) <= 1 for value in values
+        ):
             raise ValueError("gamma 必须位于 (0,1]。")
-        if param_name == "lmax_ratio" and not all(0 < float(value) <= 0.5 for value in values):
+        if param_name == "lmax_ratio" and not all(
+            0 < float(value) <= 0.5 for value in values
+        ):
             raise ValueError("lmax_ratio 必须位于 (0,0.5]。")
-        if param_name == "clip_percentile" and not all(0 < float(value) <= 100 for value in values):
+        if param_name == "clip_percentile" and not all(
+            0 < float(value) <= 100 for value in values
+        ):
             raise ValueError("clip_percentile 必须位于 (0,100]。")
         if param_name in {"num_eig", "gcf_low_bins"} and not all(
             isinstance(value, int) and value >= 0 for value in values
@@ -207,7 +225,9 @@ def validate_values(param_name, default_value, values):
             isinstance(value, int) and value >= 2 for value in values
         ):
             raise ValueError("min_subarray_len 必须是大于等于 2 的整数。")
-        if param_name == "depth_smooth_rows" and not all(isinstance(value, int) and value >= 1 for value in values):
+        if param_name == "depth_smooth_rows" and not all(
+            isinstance(value, int) and value >= 1 for value in values
+        ):
             raise ValueError("depth_smooth_rows 必须是正整数。")
         if param_name == "temporal_win" and not all(
             isinstance(value, int) and value >= 1 and value % 2 == 1 for value in values
@@ -225,8 +245,6 @@ def available_params(config, algorithm):
         params.append(("global", name, value, GLOBAL_PARAM_DESCRIPTIONS.get(name, "")))
     method_params = (config.get("algorithm_params", {}) or {}).get(algorithm, {}) or {}
     for name, value in method_params.items():
-        if name == "baseline_mv":
-            continue
         params.append(
             ("algorithm", name, value, ALGORITHM_PARAM_DESCRIPTIONS.get(name, "")),
         )
@@ -278,7 +296,9 @@ def choose_values(param_name, default_value):
             return default_values
 
     list_only = (
-        param_name == "select_angles" or param_name in CATEGORICAL_PARAM_CHOICES or isinstance(default_value, bool)
+        param_name == "select_angles"
+        or param_name in CATEGORICAL_PARAM_CHOICES
+        or isinstance(default_value, bool)
     )
     while True:
         mode = (
@@ -330,7 +350,9 @@ def build_config(
     if scope == "global":
         config.setdefault("params", {})[param_name] = value
     else:
-        config.setdefault("algorithm_params", {}).setdefault(algorithm, {})[param_name] = value
+        config.setdefault("algorithm_params", {}).setdefault(algorithm, {})[
+            param_name
+        ] = value
     return config
 
 
@@ -365,7 +387,9 @@ def can_reuse_flat_result(config_path, scene_dir, algorithm):
 def run_one(config_path, scene_id, output_root, keep_existing):
     """Execute run one."""
     scene_dir = Path(output_root) / scene_id
-    algorithm = (yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}).get(
+    algorithm = (
+        yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    ).get(
         "algorithms",
         [""],
     )[0]
@@ -385,13 +409,14 @@ def run_one(config_path, scene_id, output_root, keep_existing):
     ]
     # 消融统一在根目录完成一次多方法评估,子目录只负责重建。
     cmd.append("--no_evaluate")
-    cmd.append("--no_individual_images")
     if keep_existing:
         cmd.append("--keep_existing")
 
     scene_dir.mkdir(parents=True, exist_ok=True)
     log_path = scene_dir / "run.log"
-    command_text = " ".join(('"' + str(part) + '"') if " " in str(part) else str(part) for part in cmd)
+    command_text = " ".join(
+        ('"' + str(part) + '"') if " " in str(part) else str(part) for part in cmd
+    )
     with open(log_path, "w", encoding="utf-8") as log_file:
         log_file.write(command_text + "\n\n")
         log_file.flush()
@@ -434,7 +459,11 @@ def flatten_ablation_result(scene_dir, algorithm):
     def backup_existing(path: Path) -> None:
         nonlocal backup_root
         if backup_root is None:
-            backup_root = scene_dir / "_flatten_backup" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            backup_root = (
+                scene_dir
+                / "_flatten_backup"
+                / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            )
         _backup_flatten_target(path, backup_root)
 
     for source in method_dir.iterdir():
@@ -443,6 +472,13 @@ def flatten_ablation_result(scene_dir, algorithm):
             backup_existing(target)
         shutil.move(str(source), str(target))
     method_dir.rmdir()
+    individual_dir = scene_dir / "individual_images"
+    gt_source = individual_dir / "ground_truth.png"
+    if gt_source.exists():
+        target = scene_dir / "ground_truth.png"
+        if target.exists():
+            backup_existing(target)
+        shutil.move(str(gt_source), str(target))
     for name in ("comparison.npy", "comparison.png", "run_params.json", "run.log"):
         path = scene_dir / name
         if path.exists():
@@ -548,7 +584,7 @@ def save_ablation_overview(rows, out_dir, algorithm, param_name):
     return path
 
 
-def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt):
+def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt, dr):
     """Execute run ablation evaluation."""
     if not has_gt:
         return None
@@ -557,6 +593,8 @@ def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt):
         return None
     valid_rows = [row for row in rows if row["status"] == "ok"]
     if not valid_rows:
+        return None
+    if any(row["parameter"] == "dr" for row in valid_rows):
         return None
     method_ids = [f"ablation_{row['index']:02d}" for row in valid_rows]
     method_labels = [f"{row['parameter']}={row['value']}" for row in valid_rows]
@@ -571,6 +609,8 @@ def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt):
         str(h5_path),
         "--h5_sample_idx",
         str(sample_idx),
+        "--dr",
+        str(dr),
         "--methods",
         ",".join(method_ids),
         "--method_labels",
@@ -612,14 +652,21 @@ def collect_ablation_individual_images(rows, out_dir, algorithm, param_name):
         source = method_output_path(scene_dir, algorithm, "png")
         if not source.exists():
             continue
-        filename = f"{row['index']:02d}_{param_name}_{safe_name(row['value'])}_{algorithm}.png"
+        filename = (
+            f"{row['index']:02d}_{param_name}_{safe_name(row['value'])}_{algorithm}.png"
+        )
         shutil.copy2(source, output_dir / filename)
         copied += 1
 
-        gt_source = scene_dir / "individual_images" / "ground_truth.png"
-        if not copied_gt and gt_source.exists():
-            shutil.copy2(gt_source, output_dir / "ground_truth.png")
-            copied_gt = True
+        if not copied_gt:
+            for gt_source in (
+                scene_dir / "ground_truth.png",
+                scene_dir / "individual_images" / "ground_truth.png",
+            ):
+                if gt_source.exists():
+                    shutil.copy2(gt_source, output_dir / "ground_truth.png")
+                    copied_gt = True
+                    break
     return output_dir if copied else None
 
 
@@ -667,7 +714,14 @@ def main():
 
     def step_evaluate():
         """Execute step evaluate."""
-        state["evaluate"] = state["has_gt"] and not state["in_vivo"]
+        state["dr"] = float((state["config"].get("params") or {}).get("dr", 60.0))
+        if state["param_name"] == "dr":
+            state["evaluate"] = False
+            print("指标: 跳过。dr 只影响显示动态范围,不对不同 dr 使用统一评估口径。")
+        else:
+            state["evaluate"] = state["has_gt"] and not state["in_vivo"]
+        if state["param_name"] == "dr":
+            return
         if state["in_vivo"]:
             print("指标: 活体样本自动跳过。")
         else:
@@ -799,6 +853,7 @@ def main():
             state["h5_path"],
             state["sample_idx"],
             state["has_gt"],
+            state["dr"],
         )
     individual_dir = collect_ablation_individual_images(
         rows,

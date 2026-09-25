@@ -40,7 +40,11 @@ def main():
     args = parse_args()
     config = load_comparison_config(resolve_path(args.config))
     all_scenes = scene_ids(config)
-    scenes = all_scenes if args.only == "all" else [item.strip() for item in args.only.split(",") if item.strip()]
+    scenes = (
+        all_scenes
+        if args.only == "all"
+        else [item.strip() for item in args.only.split(",") if item.strip()]
+    )
     if not scenes or len(scenes) != len(set(scenes)):
         raise ValueError("--only 必须包含非空且不重复的场景 id")
     unknown = [scene for scene in scenes if scene not in all_scenes]

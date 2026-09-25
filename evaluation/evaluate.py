@@ -109,11 +109,20 @@ def load_method_names(args, comparison_path, n_panels, has_gt):
             raise FileNotFoundError(f"缺少当前格式的 run_params.json: {params_path}")
         with open(params_path, encoding="utf-8") as f:
             params = json.load(f)
+        if not isinstance(params, dict):
+            raise ValueError(f"run_params.json 顶层必须是对象: {params_path}")
         model_map = params.get("models")
         if not isinstance(model_map, dict) or not model_map:
             raise ValueError(f"run_params.json 缺少当前格式的 models 字典: {params_path}")
         model_names = list(model_map)
-        skip_baselines = bool((params.get("evaluation") or {}).get("skip_baselines", False))
+        evaluation = params.get("evaluation")
+        if evaluation is None:
+            evaluation = {}
+        if not isinstance(evaluation, dict):
+            raise ValueError(f"run_params.json evaluation 必须是对象: {params_path}")
+        skip_baselines = evaluation.get("skip_baselines", False)
+        if not isinstance(skip_baselines, bool):
+            raise ValueError(f"run_params.json evaluation.skip_baselines 必须是布尔值: {params_path}")
         baseline_names = [] if skip_baselines else ["DAS", "MV"]
         names = [*baseline_names, *model_names]
         n_methods = n_panels - 1 if has_gt else n_panels
@@ -181,6 +190,11 @@ def read_sample_meta(h5_path, sample_idx):
             raise IndexError(f"sample index {sample_idx} is outside [0, {n_samples - 1}]")
         has_gt = "all_envdb_norm" in hf and 0 <= sample_idx < hf["all_envdb_norm"].shape[0]
         config = h5_embedded_config(hf)
+        dataset_meta = config.get("dataset", {})
+        if dataset_meta is None:
+            dataset_meta = {}
+        if not isinstance(dataset_meta, dict):
+            raise ValueError("config_yaml.dataset must be a mapping")
         source_samples = config.get("source_samples", [])
         if isinstance(source_samples, list):
             if not 0 <= sample_idx < len(source_samples):
@@ -188,7 +202,6 @@ def read_sample_meta(h5_path, sample_idx):
             sample_config = source_samples[sample_idx]
             if not isinstance(sample_config, dict):
                 raise ValueError(f"source_samples[{sample_idx}] must be a mapping")
-            dataset_meta = config.get("dataset") or {}
             return {
                 "has_gt": has_gt,
                 "sample_name": str(sample_config.get("id") or sample_config.get("acquisition_id") or ""),
@@ -207,7 +220,6 @@ def read_sample_meta(h5_path, sample_idx):
             sample_name = hf[id_dataset][sample_idx]
             if isinstance(sample_name, bytes):
                 sample_name = sample_name.decode("utf-8")
-            dataset_meta = config.get("dataset") or {}
             phantom_mode = str(source_samples.get("phantom_mode") or dataset_meta.get("phantom_mode", ""))
             phantom_source = str(source_samples.get("phantom_source") or dataset_meta.get("phantom_source", ""))
             return {
@@ -228,14 +240,22 @@ def picmus_distortion_z_offset_mm(h5_path, source):
         if "config_yaml" not in hf:
             return PICMUS_OFFICIAL_Z_CORRECTION_MM
         config = h5_embedded_config(hf)
-    evaluation = config.get("evaluation") or {}
+    evaluation = config.get("evaluation")
+    if evaluation is None:
+        evaluation = {}
+    if not isinstance(evaluation, dict):
+        raise ValueError("config_yaml.evaluation must be a mapping")
     configured = evaluation.get("picmus_distortion_z_offset_mm")
     if configured is not None:
         value = float(configured)
         if not np.isfinite(value):
             raise ValueError("evaluation.picmus_distortion_z_offset_mm 必须是有限数")
         return value
-    provenance = config.get("provenance") or {}
+    provenance = config.get("provenance")
+    if provenance is None:
+        provenance = {}
+    if not isinstance(provenance, dict):
+        raise ValueError("config_yaml.provenance must be a mapping")
     source_kind = str(provenance.get("source_kind") or "").strip().lower()
     if source_kind == "synthetic_rf_from_picmus_phantom":
         return 0.0
@@ -487,19 +507,12 @@ def standard_contrast_score(
     padding=1.0,
 ):
     """Execute standard contrast score."""
-    if lateral_resolution_mm is None or not np.isfinite(lateral_resolution_mm) or lateral_resolution_mm <= 0:
+    masks = _contrast_roi_masks(x_mm, z_mm, roi, lateral_resolution_mm, padding)
+    if masks is None:
         return np.nan
-    x = x_mm[None, :]
-    z = z_mm[:, None]
-    radius = roi["diameter_mm"] / 2.0
-    rin = radius - padding * lateral_resolution_mm
-    rout1 = radius + padding * lateral_resolution_mm
-    rout2 = 1.2 * math.sqrt(rin**2 + rout1**2)
-    if rin <= 0 or rout2 <= rout1:
-        return np.nan
-    dist2 = (x - roi["x_mm"]) ** 2 + (z - roi["z_mm"]) ** 2
-    inside = db_img[dist2 <= rin**2]
-    outside = db_img[(dist2 >= rout1**2) & (dist2 <= rout2**2)]
+    inside_mask, outside_mask = masks
+    inside = db_img[inside_mask]
+    outside = db_img[outside_mask]
     if inside.size < MIN_ROI_SAMPLES or outside.size < MIN_ROI_SAMPLES:
         return np.nan
     # Match MATLAB var() in the official PICMUS evaluator (sample variance, N-1).
@@ -517,19 +530,12 @@ def standard_contrast_score(
 
 def contrast_roi_metrics(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padding=1.0):
     """Execute contrast roi metrics."""
-    if lateral_resolution_mm is None or not np.isfinite(lateral_resolution_mm) or lateral_resolution_mm <= 0:
+    masks = _contrast_roi_masks(x_mm, z_mm, roi, lateral_resolution_mm, padding)
+    if masks is None:
         return None
-    x = x_mm[None, :]
-    z = z_mm[:, None]
-    radius = roi["diameter_mm"] / 2.0
-    rin = radius - padding * lateral_resolution_mm
-    rout1 = radius + padding * lateral_resolution_mm
-    rout2 = 1.2 * math.sqrt(max(rin**2 + rout1**2, 0.0))
-    if rin <= 0 or rout2 <= rout1:
-        return None
-    dist2 = (x - roi["x_mm"]) ** 2 + (z - roi["z_mm"]) ** 2
-    inside_db = db_img[dist2 <= rin**2]
-    outside_db = db_img[(dist2 >= rout1**2) & (dist2 <= rout2**2)]
+    inside_mask, outside_mask = masks
+    inside_db = db_img[inside_mask]
+    outside_db = db_img[outside_mask]
     inside_db = inside_db[np.isfinite(inside_db)]
     outside_db = outside_db[np.isfinite(outside_db)]
     if inside_db.size < MIN_ROI_SAMPLES or outside_db.size < MIN_ROI_SAMPLES:
@@ -565,6 +571,26 @@ def contrast_roi_metrics(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padding
         "gCNR": float(gcnr),
         "cyst_residual_dB": float(residual_db),
     }
+
+
+def _contrast_roi_masks(x_mm, z_mm, roi, lateral_resolution_mm, padding):
+    if lateral_resolution_mm is None or not np.isfinite(lateral_resolution_mm) or lateral_resolution_mm <= 0:
+        return None
+    radius = roi["diameter_mm"] / 2.0
+    inner_radius = radius - padding * lateral_resolution_mm
+    outer_inner_radius = radius + padding * lateral_resolution_mm
+    outer_radius = 1.2 * math.sqrt(inner_radius**2 + outer_inner_radius**2)
+    if inner_radius <= 0 or outer_radius <= outer_inner_radius:
+        return None
+    distance_squared = (
+        (x_mm[None, :] - roi["x_mm"]) ** 2
+        + (z_mm[:, None] - roi["z_mm"]) ** 2
+    )
+    return (
+        distance_squared <= inner_radius**2,
+        (distance_squared >= outer_inner_radius**2)
+        & (distance_squared <= outer_radius**2),
+    )
 
 
 def standard_speckle_quality(
@@ -739,7 +765,6 @@ def target_resolution(
         "islr_lateral_db": float(islr_lateral_db),
         "islr_db": float(islr_db),
         "distortion_mm": float(peak_offset),
-        "distortion_pass": np.nan,
     }
 
 

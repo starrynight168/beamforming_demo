@@ -281,6 +281,8 @@ def infer_repeat_references(metrics_dir, reference_mode):
                 params = json.load(file)
         except (OSError, json.JSONDecodeError):
             params = {}
+        if not isinstance(params, dict):
+            return True
         if isinstance(params.get("models"), dict):
             return True
         if isinstance(params.get("algorithms"), list):
@@ -345,6 +347,15 @@ def remove_paged_plot_files(path):
     output = Path(path)
     for stale_path in output.parent.glob(f"{output.stem}_page*{output.suffix}"):
         stale_path.unlink(missing_ok=True)
+
+
+def remove_profile_outputs(metrics_dir):
+    metrics_dir = Path(metrics_dir)
+    for stem in ("roi_targets", "cyst_profile", "point_profile"):
+        path = metrics_dir / f"{stem}.png"
+        path.unlink(missing_ok=True)
+        remove_paged_plot_files(path)
+    (metrics_dir / "profile_selection.json").unlink(missing_ok=True)
 
 
 def save_bar_plot(
@@ -768,10 +779,6 @@ def save_lateral_profile_plot(
     profile_target_index=None,
 ):
     """Save lateral profile plot."""
-    for stem in ("cyst_profile", "point_profile"):
-        base_path = Path(out_dir) / f"{stem}.png"
-        base_path.unlink(missing_ok=True)
-        remove_paged_plot_files(base_path)
     method_pages = paginate_profile_methods(methods, repeat_references=repeat_references)
     page_count = len(method_pages)
     center_x_mm = float((x_mm[0] + x_mm[-1]) / 2.0)
@@ -790,6 +797,10 @@ def save_lateral_profile_plot(
         center_x_mm,
         center_z_mm,
     )
+    for stem in ("cyst_profile", "point_profile"):
+        base_path = Path(out_dir) / f"{stem}.png"
+        base_path.unlink(missing_ok=True)
+        remove_paged_plot_files(base_path)
     for page_idx, page_methods in enumerate(method_pages, start=1):
         profile_styles = build_profile_styles(methods, page_methods)
         page_suffix = "" if page_idx == 1 else f"_page{page_idx}"
@@ -962,6 +973,8 @@ def main():
     if os.path.exists(meta_path):
         with open(meta_path, encoding="utf-8") as file:
             meta = json.load(file)
+        if not isinstance(meta, dict):
+            raise ValueError(f"evaluation_meta.json 顶层必须是对象: {meta_path}")
     dr = float(meta.get("dr", 60.0) if args.dr is None else args.dr)
     if not np.isfinite(dr) or dr <= 0:
         raise ValueError("dr 必须是有限正数")
@@ -1101,6 +1114,8 @@ def main():
             profile_roi_index=selected_roi_position + 1 if selected_roi_position is not None else None,
             profile_target_index=selected_target_position + 1 if selected_target_position is not None else None,
         )
+    else:
+        remove_profile_outputs(metrics_dir)
 
     print(f"Saved plots in: {metrics_dir}")
 

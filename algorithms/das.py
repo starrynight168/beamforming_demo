@@ -1,7 +1,7 @@
 """Provide Python utilities for das."""
 
 import argparse
-import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -19,11 +19,9 @@ from algorithms.common import (
     print_physical_summary,
     resolve_project_path,
     run_beamformer,
-    save_comparison_figure,
-    save_figure,
+    save_algorithm_result,
     time_start_tensor,
     validate_db_output,
-    write_params,
 )
 
 # ================= 命令行参数配置 =================
@@ -45,12 +43,9 @@ parser.add_argument(
 args = None
 
 METHOD_NAME = "das"
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-H5_PATH = None
-OUTPUT_DIR = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -74,7 +69,10 @@ class DASBeamformerIQ:
         )
         x_mesh, z_mesh = torch.meshgrid(self.x_grid, self.z_grid, indexing="xy")
         self.x_mesh, self.z_mesh = x_mesh, z_mesh
-        self.drs = torch.sqrt((x_mesh[..., None] - self.ep) ** 2 + z_mesh[..., None] ** 2) * self.sc
+        self.drs = (
+            torch.sqrt((x_mesh[..., None] - self.ep) ** 2 + z_mesh[..., None] ** 2)
+            * self.sc
+        )
 
         if args.aperture_mode == "geometry":
             dx = x_mesh[..., None] - self.ep
@@ -127,8 +125,12 @@ class DASBeamformerIQ:
 
         t_starts_t = time_start_tensor(t_starts, n_a, fs, device)
 
-        i_output = torch.zeros((self.height, self.width), dtype=torch.float32, device=device)
-        q_output = torch.zeros((self.height, self.width), dtype=torch.float32, device=device)
+        i_output = torch.zeros(
+            (self.height, self.width), dtype=torch.float32, device=device
+        )
+        q_output = torch.zeros(
+            (self.height, self.width), dtype=torch.float32, device=device
+        )
         ch = self.ch
         row_block = self.height if args.row_block <= 0 else max(1, args.row_block)
 
@@ -141,8 +143,12 @@ class DASBeamformerIQ:
             tx_z = z_block * self.sc
             tx_x = x_block * self.sc
 
-            i_block = torch.zeros((z1 - z0, self.width), dtype=torch.float32, device=device)
-            q_block = torch.zeros((z1 - z0, self.width), dtype=torch.float32, device=device)
+            i_block = torch.zeros(
+                (z1 - z0, self.width), dtype=torch.float32, device=device
+            )
+            q_block = torch.zeros(
+                (z1 - z0, self.width), dtype=torch.float32, device=device
+            )
 
             phi_rx = 2.0 * np.pi * self.fc * (drs_b / fs)
             cos_rx = torch.cos(phi_rx)
@@ -186,34 +192,38 @@ class DASBeamformerIQ:
 # ================= 主程序 =================
 def main():
     """Run the command-line workflow."""
-    global args, H5_PATH, OUTPUT_DIR
+    global args
     args = parser.parse_args()
-    H5_PATH = resolve_project_path(args.h5_path, PROJECT_ROOT)
-    OUTPUT_DIR = os.path.join(args.output_dir, METHOD_NAME)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    h5_path = resolve_project_path(args.h5_path, PROJECT_ROOT)
+    output_dir = f"{args.output_dir}/{METHOD_NAME}"
 
     input_data = prepare_beamforming_input(
-        H5_PATH,
+        h5_path,
         args.h5_sample_idx,
         args.select_angles,
     )
     sample = input_data.sample
     selected_angles = input_data.selected_angles
-    c, fc, fs, pitch, n_elem = sample.c, sample.fc, sample.fs, sample.pitch, sample.n_elem
+    c, fc, fs, pitch, n_elem = (
+        sample.c,
+        sample.fc,
+        sample.fs,
+        sample.pitch,
+        sample.n_elem,
+    )
     z_grid, x_grid = sample.z_grid, sample.x_grid
     i_sub, q_sub, t0_sub = input_data.i_data, input_data.q_data, input_data.t0
     angles_all = sample.angles
-    gt_data, has_gt = sample.gt_data, sample.has_gt
+    has_gt = sample.has_gt
     height, width = len(z_grid), len(x_grid)
     dz, dx = z_grid[1] - z_grid[0], x_grid[1] - x_grid[0]
     depth_min, depth_max = z_grid[0], z_grid[-1]
-    extent_mm = input_data.extent_mm
 
     print_physical_summary(
         method_name=METHOD_NAME,
-        h5_path=H5_PATH,
+        h5_path=h5_path,
         sample_idx=args.h5_sample_idx,
-        output_dir=OUTPUT_DIR,
+        output_dir=output_dir,
         device=device,
         c=c,
         fc=fc,
@@ -279,34 +289,18 @@ def main():
 
     out_name = METHOD_NAME
 
-    np.save(os.path.join(OUTPUT_DIR, f"{out_name}.npy"), das_db)
-
-    save_figure(
+    title = f"{title_params} | {args.aperture_mode}"
+    method_dir = save_algorithm_result(
         das_db,
-        extent_mm,
-        os.path.join(OUTPUT_DIR, f"{out_name}.png"),
-        f"{title_params} | {args.aperture_mode}",
-        dr=args.dr,
-        method_name=METHOD_NAME,
+        input_data,
+        args,
+        METHOD_NAME,
+        title,
+        dt,
     )
 
-    if has_gt and args.save_gt:
-        save_comparison_figure(
-            das_db,
-            gt_data,
-            extent_mm,
-            os.path.join(OUTPUT_DIR, f"{out_name}_comparison.png"),
-            f"{title_params} | {args.aperture_mode}",
-            dr=args.dr,
-        )
-
-    params = vars(args).copy()
-    params["method"] = METHOD_NAME
-    params["runtime_sec"] = float(dt)
-    write_params(os.path.join(OUTPUT_DIR, "params.json"), params)
-
     print(f"  GPU Time: {dt:.2f}s | Saved -> {out_name}")
-    print(f"\nDone | Output: {OUTPUT_DIR}")
+    print(f"\nDone | Output: {method_dir}")
 
 
 if __name__ == "__main__":

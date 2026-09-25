@@ -1,7 +1,7 @@
 """Provide Python utilities for gcfmv."""
 
 import argparse
-import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -9,23 +9,20 @@ import torch
 from algorithms.common import (
     add_common_arguments,
     add_io_arguments,
-    dynamic_aperture_channel_count,
+    build_row_dynamic_geometry,
     envelope_to_db,
     interpolate_channel_samples,
     nonnegative_float,
     nonnegative_int,
-    optional_aperture_window_1d,
     prepare_beamforming_input,
     print_physical_summary,
     positive_odd_int,
     resolve_project_path,
     run_beamformer,
-    save_comparison_figure,
-    save_figure,
+    save_algorithm_result,
     time_start_tensor,
     unit_interval_float,
     validate_db_output,
-    write_params,
 )
 
 # ================= 命令行参数配置 =================
@@ -70,12 +67,9 @@ add_io_arguments(parser)
 args = None
 
 METHOD_NAME = "gcfmv"
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-H5_PATH = None
-OUTPUT_DIR = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -102,70 +96,27 @@ class RowDynamicMVBeamformerIQ:
         temporal_win=1,
     ):
         """Initialize the instance."""
-        self.height, self.width, self.N = len(z_grid), len(x_grid), n_elem
-        self.x_grid = torch.from_numpy(x_grid).float().to(device)
-        self.z_grid = torch.from_numpy(z_grid).float().to(device)
+        geometry = build_row_dynamic_geometry(
+            z_grid,
+            x_grid,
+            n_elem,
+            pitch,
+            c,
+            fc,
+            fs,
+            args.f_number,
+            args.dynamic_aperture,
+            args.window,
+            subarray_ratio,
+            temporal_win,
+            device,
+        )
+        self.__dict__.update(geometry)
         self.angles_rad = torch.from_numpy(angles_rad).float().to(device)
-        self.pitch, self.fc, self.fs, self.sc = pitch, float(fc), fs, fs / c
         self.dl_factor = mv_dl
         self.use_fbss = fbss
         self.subarray_ratio = subarray_ratio
         self.temporal_win = temporal_win
-
-        # 预计算每个横向像素对应的最近阵元索引
-        lateral_channel = (torch.arange(self.N, device=device).float() - (self.N - 1) / 2.0) * self.pitch
-        self.c_idx = torch.argmin(
-            torch.abs(self.x_grid.unsqueeze(1) - lateral_channel.unsqueeze(0)),
-            dim=1,
-        )
-        x_mesh, z_mesh = torch.meshgrid(self.x_grid, self.z_grid, indexing="xy")
-        self.x_mesh, self.z_mesh = x_mesh, z_mesh
-        self.drs = torch.sqrt((x_mesh[..., None] - lateral_channel) ** 2 + z_mesh[..., None] ** 2) * self.sc
-        self.ch = torch.arange(self.N, device=device).view(1, self.N, 1)
-        self.row_cache = self._build_row_cache()
-
-    def _aperture_window(self, k):
-        """Execute  aperture window."""
-        return optional_aperture_window_1d(k, args.window, device)
-
-    def _build_row_cache(self):
-        """Execute  build row cache."""
-        cache = []
-        for hz in range(self.height):
-            depth = float(self.z_grid[hz].item())
-            k = dynamic_aperture_channel_count(
-                depth,
-                args.f_number,
-                self.pitch,
-                self.N,
-                args.dynamic_aperture,
-            )
-            subarray_len = min(max(int(k * self.subarray_ratio), 2), k)
-            m = k - subarray_len + 1
-            idx_start = torch.clamp(self.c_idx - k // 2, 0, self.N - k)
-            ch_idx = idx_start.unsqueeze(1) + torch.arange(k, device=device).unsqueeze(
-                0,
-            )
-            cache.append(
-                {
-                    "aperture_size": k,
-                    "subarray_size": subarray_len,
-                    "subarray_count": m,
-                    "ch_idx_t": ch_idx.unsqueeze(-1).expand(-1, -1, self.temporal_win),
-                    "window": self._aperture_window(k),
-                    "eye": torch.eye(
-                        subarray_len,
-                        dtype=torch.complex64,
-                        device=device,
-                    ).unsqueeze(0),
-                    "ones": torch.ones(
-                        (self.width, subarray_len, 1),
-                        dtype=torch.complex64,
-                        device=device,
-                    ),
-                },
-            )
-        return cache
 
     def __call__(self, i_data, q_data, selected_angles, t_starts, fs):
         """Run the callable operation."""
@@ -182,8 +133,12 @@ class RowDynamicMVBeamformerIQ:
         t_starts_t = time_start_tensor(t_starts, n_a, fs, device)
         max_sample = float(n_s - 2)
 
-        i_beam_sum = torch.zeros((self.height, self.width), dtype=torch.float32, device=device)
-        q_beam_sum = torch.zeros((self.height, self.width), dtype=torch.float32, device=device)
+        i_beam_sum = torch.zeros(
+            (self.height, self.width), dtype=torch.float32, device=device
+        )
+        q_beam_sum = torch.zeros(
+            (self.height, self.width), dtype=torch.float32, device=device
+        )
 
         # 1. 预计算接收端相位旋转因子 (全网格 3D)
         phi_rx_global = 2.0 * np.pi * self.fc * (self.drs / fs)
@@ -195,7 +150,10 @@ class RowDynamicMVBeamformerIQ:
             q_angle = q_tensor[i]
 
             for hz in range(self.height):
-                tx_row = self.z_mesh[hz] * self.sc * cos_a[i] + self.x_mesh[hz] * self.sc * sin_a[i]
+                tx_row = (
+                    self.z_mesh[hz] * self.sc * cos_a[i]
+                    + self.x_mesh[hz] * self.sc * sin_a[i]
+                )
                 sample_no_t0 = tx_row.unsqueeze(-1) + self.drs[hz]
                 sample_center = sample_no_t0 - t_starts_t[i]
                 sample = sample_center.unsqueeze(-1) + offsets_f
@@ -224,7 +182,9 @@ class RowDynamicMVBeamformerIQ:
                     row["subarray_count"],
                 )
 
-                x_active = torch.gather(x_flat, 1, row["ch_idx_t"])  # [width, aperture_size, T]
+                x_active = torch.gather(
+                    x_flat, 1, row["ch_idx_t"]
+                )  # [width, aperture_size, T]
                 if row["window"] is not None:
                     x_active = x_active * row["window"].view(1, aperture_size, 1)
 
@@ -251,7 +211,10 @@ class RowDynamicMVBeamformerIQ:
                 # ========== 对角加载 ==========
                 trace = covariance.diagonal(dim1=-2, dim2=-1).real.sum(-1)  # [width]
                 covariance_loaded = (
-                    covariance + (self.dl_factor / subarray_size) * trace.view(self.width, 1, 1) * row["eye"]
+                    covariance
+                    + (self.dl_factor / subarray_size)
+                    * trace.view(self.width, 1, 1)
+                    * row["eye"]
                 )
 
                 # ========== 标准 MVDR 求解 ==========
@@ -276,7 +239,9 @@ class RowDynamicMVBeamformerIQ:
                     :,
                     t0,
                 ]  # [width, subarray_size, subarray_count]
-                x_mean = x_subarray_center.mean(dim=2).unsqueeze(-1)  # [width, subarray_size, 1]
+                x_mean = x_subarray_center.mean(dim=2).unsqueeze(
+                    -1
+                )  # [width, subarray_size, 1]
                 y_row_rx = torch.matmul(w.mH, x_mean)  # [width, 1, 1]
                 if args.gcf_power > 0:
                     spatial_spectrum = torch.fft.fftshift(
@@ -285,7 +250,9 @@ class RowDynamicMVBeamformerIQ:
                     )
                     power_spectrum = torch.abs(spatial_spectrum).square()
                     center = subarray_size // 2
-                    low_bins = max(0, min(args.gcf_low_bins, center, subarray_size - center - 1))
+                    low_bins = max(
+                        0, min(args.gcf_low_bins, center, subarray_size - center - 1)
+                    )
                     low_energy = power_spectrum[
                         :,
                         center - low_bins : center + low_bins + 1,
@@ -319,35 +286,39 @@ class RowDynamicMVBeamformerIQ:
 # ================= 主程序 =================
 def main():
     """Run the command-line workflow."""
-    global args, H5_PATH, OUTPUT_DIR
+    global args
     args = parser.parse_args()
-    H5_PATH = resolve_project_path(args.h5_path, PROJECT_ROOT)
-    OUTPUT_DIR = os.path.join(args.output_dir, METHOD_NAME)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    h5_path = resolve_project_path(args.h5_path, PROJECT_ROOT)
+    output_dir = f"{args.output_dir}/{METHOD_NAME}"
 
     input_data = prepare_beamforming_input(
-        H5_PATH,
+        h5_path,
         args.h5_sample_idx,
         args.select_angles,
     )
     sample = input_data.sample
-    c, fc, fs, pitch, n_elem = sample.c, sample.fc, sample.fs, sample.pitch, sample.n_elem
+    c, fc, fs, pitch, n_elem = (
+        sample.c,
+        sample.fc,
+        sample.fs,
+        sample.pitch,
+        sample.n_elem,
+    )
     angles_all, z_grid, x_grid = sample.angles, sample.z_grid, sample.x_grid
     selected_angles = input_data.selected_angles
     i_sub, q_sub, t0_sub = input_data.i_data, input_data.q_data, input_data.t0
-    gt_data, has_gt = sample.gt_data, sample.has_gt
+    has_gt = sample.has_gt
     height, width = len(z_grid), len(x_grid)
     dz = z_grid[1] - z_grid[0]
     dx = x_grid[1] - x_grid[0]
     depth_min = z_grid[0]
     depth_max = z_grid[-1]
-    extent_mm = input_data.extent_mm
 
     print_physical_summary(
         method_name=METHOD_NAME,
-        h5_path=H5_PATH,
+        h5_path=h5_path,
         sample_idx=args.h5_sample_idx,
-        output_dir=OUTPUT_DIR,
+        output_dir=output_dir,
         device=device,
         c=c,
         fc=fc,
@@ -448,34 +419,17 @@ def main():
 
     out_name = METHOD_NAME
 
-    np.save(os.path.join(OUTPUT_DIR, f"{out_name}.npy"), mv_db)
-
-    save_figure(
+    method_dir = save_algorithm_result(
         mv_db,
-        extent_mm,
-        os.path.join(OUTPUT_DIR, f"{out_name}.png"),
+        input_data,
+        args,
+        METHOD_NAME,
         title_params,
-        dr=args.dr,
-        method_name=METHOD_NAME,
+        dt,
     )
 
-    if has_gt and args.save_gt:
-        save_comparison_figure(
-            mv_db,
-            gt_data,
-            extent_mm,
-            os.path.join(OUTPUT_DIR, f"{out_name}_comparison.png"),
-            title_params,
-            dr=args.dr,
-        )
-
-    params = vars(args).copy()
-    params["method"] = METHOD_NAME
-    params["runtime_sec"] = float(dt)
-    write_params(os.path.join(OUTPUT_DIR, "params.json"), params)
-
     print(f"  GPU Time: {dt:.2f}s | Saved -> {out_name}")
-    print(f"\nDone | Output: {OUTPUT_DIR}")
+    print(f"\nDone | Output: {method_dir}")
 
 
 if __name__ == "__main__":

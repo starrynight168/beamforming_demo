@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 import h5py
+import numpy as np
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,7 +37,7 @@ ALGORITHMS = {
     "mv": "MV:自适应波束合成,速度较慢",
     "esbmv": "ESBMV:MV 的特征空间版本,速度较慢",
     "gcfmv": "GCF-MV:带相干因子的 MV",
-    "cmsaw": "CMSAW:基于 MV 的加权方法,会先调用 MV",
+    "cmsaw": "CMSAW:基于 MV 相位的内存加权方法",
     "fdmas": "F-DMAS:非线性延迟乘加方法",
 }
 
@@ -220,7 +221,9 @@ def ask_algorithm_param(algorithm, name, default):
                 return raw
             return validate_algorithm_param(name, value)
         except (TypeError, ValueError) as exc:
-            detail = str(exc) or ("请输入整数。" if isinstance(default, int) else "请输入合法数字。")
+            detail = str(exc) or (
+                "请输入整数。" if isinstance(default, int) else "请输入合法数字。"
+            )
             print(detail)
 
 
@@ -342,11 +345,16 @@ def inspect_h5(path):
         missing = sorted(required - set(hf.keys()))
         if missing:
             raise ValueError(f"不是当前 pack_data 格式,缺少字段:{', '.join(missing)}")
-        if hf["all_multi_I"].shape != hf["all_multi_Q"].shape or hf["all_multi_I"].ndim != 4:
+        if (
+            hf["all_multi_I"].shape != hf["all_multi_Q"].shape
+            or hf["all_multi_I"].ndim != 4
+        ):
             raise ValueError("all_multi_I/all_multi_Q 必须是形状一致的 [N,A,T,C] 数组")
         n, a, t, c = hf["all_multi_I"].shape
         if min(n, a, c) < 1 or t < 2:
-            raise ValueError("all_multi_I/all_multi_Q 的样本、角度、通道必须非空，时间维至少为 2")
+            raise ValueError(
+                "all_multi_I/all_multi_Q 的样本、角度、通道必须非空，时间维至少为 2"
+            )
         valid_time_dataset = hf["valid_time_samples"]
         if valid_time_dataset.ndim != 1 or valid_time_dataset.dtype.kind not in "iu":
             raise ValueError("valid_time_samples 必须是一维整数数组")
@@ -359,12 +367,39 @@ def inspect_h5(path):
             raise ValueError("time_start_vector 必须为 [N,A]")
         if hf["angles"].shape != (a,):
             raise ValueError("angles 必须与 IQ 角度维度一致")
+        for name in ("z_grid", "x_grid"):
+            values = np.asarray(hf[name][:], dtype=np.float32)
+            if (
+                values.ndim != 1
+                or values.size < 2
+                or not np.isfinite(values).all()
+                or not np.all(np.diff(values) > 0)
+            ):
+                raise ValueError(f"{name} 必须是一维有限严格递增坐标")
+        if (
+            not np.isfinite(hf["angles"][:]).all()
+            or not np.isfinite(hf["time_start_vector"][:]).all()
+        ):
+            raise ValueError("angles/time_start_vector 必须为有限数值")
+        scalar_values = {}
+        for name in ("c", "fc", "fs", "pitch"):
+            value = float(hf[name][()])
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} 必须是有限正数")
+            scalar_values[name] = value
+        if int(hf["num_channels"][()]) != c:
+            raise ValueError("num_channels 必须与 IQ 通道维度一致")
         gt = "有" if "all_envdb_norm" in hf else "无"
+        if gt == "有" and hf["all_envdb_norm"].shape != (
+            n,
+            a,
+            hf["z_grid"].size,
+            hf["x_grid"].size,
+        ):
+            raise ValueError("all_envdb_norm 必须与样本、角度和网格维度一致")
         angles = hf["angles"].shape[0]
-        fs = float(hf["fs"][()])
-        fc = float(hf["fc"][()])
-        if not math.isfinite(fs) or fs <= 0 or not math.isfinite(fc) or fc <= 0:
-            raise ValueError("fs/fc 必须是有限正数")
+        fs = scalar_values["fs"]
+        fc = scalar_values["fc"]
         raw_config = hf["config_yaml"][()]
         if isinstance(raw_config, bytes):
             raw_config = raw_config.decode("utf-8", errors="replace")
@@ -373,9 +408,13 @@ def inspect_h5(path):
         if isinstance(samples, list):
             if len(samples) != n:
                 raise ValueError("config_yaml.source_samples 数量必须与 H5 样本数一致")
-            names = [str(sample.get("id", f"sample_{idx}")) for idx, sample in enumerate(samples)]
+            names = [
+                str(sample.get("id", f"sample_{idx}"))
+                for idx, sample in enumerate(samples)
+            ]
             in_vivo = [
-                sample.get("phantom_mode") == "in_vivo" or sample.get("phantom_source") == "in_vivo"
+                sample.get("phantom_mode") == "in_vivo"
+                or sample.get("phantom_source") == "in_vivo"
                 for sample in samples
             ]
         elif (
@@ -386,7 +425,10 @@ def inspect_h5(path):
             id_dataset = str(samples.get("acquisition_id_dataset", "/acquisition_id"))
             if id_dataset not in hf or hf[id_dataset].shape != (n,):
                 raise ValueError("EPFL 紧凑样本元数据缺少有效 acquisition_id 标签")
-            names = [str(value.decode("utf-8") if isinstance(value, bytes) else value) for value in hf[id_dataset][:]]
+            names = [
+                str(value.decode("utf-8") if isinstance(value, bytes) else value)
+                for value in hf[id_dataset][:]
+            ]
             dataset_id = str((config.get("dataset") or {}).get("id", "")).lower()
             is_in_vivo = "invivo" in dataset_id or "volunteer" in dataset_id
             in_vivo = [is_in_vivo] * n
@@ -417,7 +459,14 @@ def choose_h5():
             try:
                 info = inspect_h5(path)
                 desc = f"{rel}  | 样本 {info['n']},角度 {info['a']},T={info['t']},通道={info['c']},GT={info['gt']}"
-            except (OSError, KeyError, RuntimeError, TypeError, ValueError, yaml.YAMLError) as exc:
+            except (
+                OSError,
+                KeyError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+                yaml.YAMLError,
+            ) as exc:
                 desc = f"{rel}  | 无法读取:{exc}"
             options.append((str(path), desc))
         options.append(("manual", "手动输入 H5 路径"))
@@ -467,7 +516,11 @@ def choose_sample(path, teaching=True):
         raw = ask_text("请选择样本", default="0")
         if raw.isdigit() and 0 <= int(raw) < info["n"]:
             return int(raw)
-        matched = [(idx, name) for idx, name in enumerate(info["names"]) if raw.lower() in name.lower()]
+        matched = [
+            (idx, name)
+            for idx, name in enumerate(info["names"])
+            if raw.lower() in name.lower()
+        ]
         if len(matched) == 1:
             idx, name = matched[0]
             print(f"已匹配: {idx}: {name}")
@@ -596,7 +649,7 @@ def main():
         selected_params = {}
         for algorithm in state["algorithms"]:
             defaults = deepcopy(base_params.get(algorithm, {}) or {})
-            editable = [name for name in defaults if name != "baseline_mv"]
+            editable = list(defaults)
             if not editable:
                 print(f"\n[{algorithm}] 没有独有的可调参数。")
                 selected_params[algorithm] = defaults
@@ -812,7 +865,9 @@ def main():
         )
         config["scenes"][0]["id"] = run_id
         for algorithm, method_params in state["algorithm_params"].items():
-            config.setdefault("algorithm_params", {})[algorithm] = deepcopy(method_params)
+            config.setdefault("algorithm_params", {})[algorithm] = deepcopy(
+                method_params
+            )
         config_path = make_temp_config_path(state["output_root"], run_id)
         cmd = [
             sys.executable,
@@ -842,8 +897,7 @@ def main():
         print("方法专属参数:")
         for algorithm in state["algorithms"]:
             method_params = state["algorithm_params"].get(algorithm, {})
-            visible = {key: value for key, value in method_params.items() if key != "baseline_mv"}
-            print(f"  {algorithm}: {visible or '无'}")
+            print(f"  {algorithm}: {method_params or '无'}")
         print(f"角度选择: {state['select_angles']}")
         print(f"F-Number: {state['f_number']}")
         print(f"动态范围: {state['dr']} dB")
@@ -912,7 +966,8 @@ def main():
             "sample_idx": int(state["sample_idx"]),
             "algorithms": state["algorithms"],
             "algorithm_params": {
-                algorithm: state["algorithm_params"].get(algorithm, {}) for algorithm in state["algorithms"]
+                algorithm: state["algorithm_params"].get(algorithm, {})
+                for algorithm in state["algorithms"]
             },
             "params": {
                 "select_angles": state["select_angles"],

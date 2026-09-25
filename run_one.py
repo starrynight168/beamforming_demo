@@ -29,6 +29,8 @@ EVALUATION_SCENE_IDS = frozenset(
         "experiments_resolution_distorsion",
     }
 )
+
+
 def parse_args():
     """Parse args."""
     parser = argparse.ArgumentParser(
@@ -86,7 +88,9 @@ def find_scene(config, scene_id):
 def scene_ids(config):
     """Return validated scene ids."""
     scenes = config.get("scenes")
-    if not isinstance(scenes, list) or not all(isinstance(scene, dict) for scene in scenes):
+    if not isinstance(scenes, list) or not all(
+        isinstance(scene, dict) for scene in scenes
+    ):
         raise ValueError("config.scenes 必须是场景字典列表")
     ids = [scene.get("id") for scene in scenes]
     if (
@@ -187,13 +191,20 @@ def load_grid_and_gt(h5_path, sample_idx, has_gt):
         if has_gt and "all_envdb_norm" in hf:
             gt = hf["all_envdb_norm"][sample_idx].astype(np.float32)
     for name, grid in (("x_grid", x_grid), ("z_grid", z_grid)):
-        if grid.ndim != 1 or grid.size < 2 or not np.isfinite(grid).all() or not np.all(np.diff(grid) > 0):
+        if (
+            grid.ndim != 1
+            or grid.size < 2
+            or not np.isfinite(grid).all()
+            or not np.all(np.diff(grid) > 0)
+        ):
             raise ValueError(f"{name} 必须是至少含两个点的有限严格递增一维网格")
     if gt is not None and gt.ndim == 3:
         if gt.shape[0] != 1:
             raise ValueError(f"GT 三维形状必须为 [1,H,W]，实际 {gt.shape}")
         gt = gt[0]
-    if gt is not None and (gt.shape != (z_grid.size, x_grid.size) or not np.isfinite(gt).all()):
+    if gt is not None and (
+        gt.shape != (z_grid.size, x_grid.size) or not np.isfinite(gt).all()
+    ):
         raise ValueError(f"GT 形状或数值非法: {gt.shape}")
     extent_mm = [
         x_grid[0] * 1000,
@@ -209,7 +220,9 @@ def scene_has_gt(scene):
     h5_path = resolve_path(scene["h5_path"])
     sample_idx = int(scene["sample_idx"])
     with h5py.File(h5_path, "r") as hf:
-        available = "all_envdb_norm" in hf and 0 <= sample_idx < hf["all_envdb_norm"].shape[0]
+        available = (
+            "all_envdb_norm" in hf and 0 <= sample_idx < hf["all_envdb_norm"].shape[0]
+        )
     return available
 
 
@@ -228,12 +241,20 @@ def save_comparison(images, titles, extent_mm, output_path, dr, _cleanup_pages=T
     n_images = len(images)
     max_images_per_page = MAX_COMPARISON_IMAGES_PER_PAGE
     if _cleanup_pages:
-        for stale in output_path.parent.glob(f"{output_path.stem}_page*{output_path.suffix}"):
+        for stale in output_path.parent.glob(
+            f"{output_path.stem}_page*{output_path.suffix}"
+        ):
             stale.unlink(missing_ok=True)
     if n_images > max_images_per_page:
-        for page_idx, start in enumerate(range(0, n_images, max_images_per_page), start=1):
-            page_path = output_path if page_idx == 1 else output_path.with_name(
-                f"{output_path.stem}_page{page_idx}{output_path.suffix}"
+        for page_idx, start in enumerate(
+            range(0, n_images, max_images_per_page), start=1
+        ):
+            page_path = (
+                output_path
+                if page_idx == 1
+                else output_path.with_name(
+                    f"{output_path.stem}_page{page_idx}{output_path.suffix}"
+                )
             )
             save_comparison(
                 images[start : start + max_images_per_page],
@@ -332,7 +353,8 @@ def can_reuse_existing(scene_dir, config, scene, method, args):
     actual = {
         "scene": previous.get("scene"),
         "params": previous.get("params", {}) or {},
-        "method_params": (previous.get("algorithm_params", {}) or {}).get(method, {}) or {},
+        "method_params": (previous.get("algorithm_params", {}) or {}).get(method, {})
+        or {},
         "extra_algorithm_args": previous.get("extra_algorithm_args", []),
     }
     if actual != expected:
@@ -391,7 +413,11 @@ def main():
     args = parse_args()
     config = load_config(resolve_path(args.config))
     scene = find_scene(config, args.scene)
-    methods = [m.strip().lower() for m in (args.algorithms or ",".join(config["algorithms"])).split(",") if m.strip()]
+    methods = [
+        m.strip().lower()
+        for m in (args.algorithms or ",".join(config["algorithms"])).split(",")
+        if m.strip()
+    ]
     if not methods:
         raise ValueError("至少需要选择一个算法")
     if len(methods) != len(set(methods)):
@@ -471,9 +497,13 @@ def main():
     run_params = {
         "scene": scene,
         "algorithms": methods,
-        "algorithm_labels": {method: algorithm_label(config, method) for method in methods},
+        "algorithm_labels": {
+            method: algorithm_label(config, method) for method in methods
+        },
         "params": params,
-        "algorithm_params": {method: algorithm_params(config, method) for method in methods},
+        "algorithm_params": {
+            method: algorithm_params(config, method) for method in methods
+        },
         "extra_algorithm_args": args.extra_algorithm_args,
         "runtime_sec": time.time() - start_all,
         "output": {"methods": ",".join(methods)},

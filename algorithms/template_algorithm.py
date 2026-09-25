@@ -10,9 +10,8 @@ run_all.py expect, so keep them intact:
 
 Reusable pieces live in algorithms/common.py: input loading and angle selection
 (prepare_beamforming_input), device handling and GPU timing (run_beamformer),
-envelope-to-dB conversion (envelope_to_db), figure output (save_figure) and the
-parameter record (write_params). Use them instead of re-implementing the
-boilerplate.
+envelope-to-dB conversion (envelope_to_db), and standard artifact output
+(save_algorithm_result). Use them instead of re-implementing the boilerplate.
 
 To use this method as an H5 pack-time teacher as well, expose one uniquely named
 *BeamformerIQ class whose __call__(i_data, q_data, selected_angles, t_starts, fs)
@@ -21,18 +20,15 @@ contract.
 """
 
 import argparse
-import os
-
-import numpy as np
+from pathlib import Path
 
 from algorithms.common import (
     add_common_arguments,
     add_io_arguments,
     prepare_beamforming_input,
     resolve_project_path,
-    save_figure,
+    save_algorithm_result,
     validate_db_output,
-    write_params,
 )
 
 METHOD_NAME = "template_algorithm"
@@ -91,38 +87,21 @@ def beamform(input_data, args):
 
 def save_outputs(image_db, input_data, args):
     """Write the image, the figure and the parameter record."""
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    method_dir = os.path.join(
-        resolve_project_path(args.output_dir, project_root),
-        METHOD_NAME,
-    )
-    os.makedirs(method_dir, exist_ok=True)
-
-    np.save(
-        os.path.join(method_dir, f"{METHOD_NAME}.npy"),
-        image_db.astype(np.float32),
-    )
-    save_figure(
+    return save_algorithm_result(
         image_db,
-        input_data.extent_mm,
-        os.path.join(method_dir, f"{METHOD_NAME}.png"),
+        input_data,
+        args,
         METHOD_NAME,
-        dr=args.dr,
-        method_name=METHOD_NAME,
+        METHOD_NAME,
+        0.0,
     )
-    write_params(
-        os.path.join(method_dir, "params.json"),
-        {**vars(args), "method": METHOD_NAME},
-    )
-    return method_dir
 
 
 def main():
     """Run the command-line workflow."""
     args = parse_args()
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     input_data = prepare_beamforming_input(
-        resolve_project_path(args.h5_path, project_root),
+        resolve_project_path(args.h5_path, Path(__file__).resolve().parents[1]),
         args.h5_sample_idx,
         args.select_angles,
     )

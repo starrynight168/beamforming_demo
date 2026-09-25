@@ -1,11 +1,7 @@
 """Provide Python utilities for cmsaw."""
 
 import argparse
-import json
-import os
-import subprocess
-import sys
-import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -15,18 +11,17 @@ from algorithms.common import (
     add_io_arguments,
     aperture_window_1d,
     dynamic_aperture_channel_count,
+    envelope_to_db,
     interpolate_multi_angle_channel_samples,
-    load_from_h5,
     nonnegative_float,
-    parse_selected_angles,
+    prepare_beamforming_input,
     print_physical_summary,
     positive_odd_int,
     resolve_project_path,
-    save_comparison_figure,
-    save_figure,
+    run_beamformer,
+    save_algorithm_result,
     unit_interval_float,
     validate_db_output,
-    write_params,
 )
 
 # ================= 命令行参数配置 =================
@@ -35,39 +30,33 @@ parser = argparse.ArgumentParser(
 )
 add_common_arguments(parser, select_help="角度选择: center, 0,1,2(逗号分隔)")
 
-# ---- MV参数(用于自动生成基线) ----
+# ---- MV参数(用于相位基线) ----
 parser.add_argument(
     "--mv_dl",
     type=nonnegative_float,
     default=0.0,
-    help="MV 对角加载系数(自动生成基线用)",
+    help="MV 对角加载系数",
 )
 parser.add_argument(
     "--subarray_ratio",
     type=unit_interval_float,
     default=0.25,
-    help="MV 子阵列比例(自动生成基线用)",
+    help="MV 子阵列比例",
 )
 parser.add_argument(
     "--temporal_win",
     type=positive_odd_int,
     default=9,
-    help="MV 时间平均窗口(自动生成基线用)",
+    help="MV 时间平均窗口",
 )
 parser.add_argument(
     "--fbss",
     action="store_true",
     default=True,
-    help="MV 启用FBSS(自动生成基线用)",
+    help="MV 启用FBSS",
 )
 parser.add_argument("--no_fbss", dest="fbss", action="store_false", help="MV 禁用FBSS")
 # ---- CMSAW 核心参数 ----
-parser.add_argument(
-    "--baseline_mv",
-    type=str,
-    default="mv.npy",
-    help="MV基线结果文件路径",
-)
 parser.add_argument(
     "--lmax_ratio",
     type=float,
@@ -95,13 +84,7 @@ args = None
 
 METHOD_NAME = "cmsaw"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-
-
-H5_PATH = None
-BASE_OUTPUT_DIR = None
-OUTPUT_DIR = None
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def validate_cmsaw_params(
@@ -125,126 +108,6 @@ def validate_cmsaw_params(
         raise ValueError("depth_smooth_rows must be at least 1")
 
 
-def ensure_mv_baseline(baseline_path):
-    """验证 MV 基线参数;默认基线缺失或过期时自动重新生成。."""
-    managed_baseline = not os.path.isabs(baseline_path) and baseline_path == "mv.npy"
-    baseline_output_dir = os.path.join(OUTPUT_DIR, "_mv_baseline") if managed_baseline else BASE_OUTPUT_DIR
-    if not os.path.isabs(baseline_path):
-        full_path = (
-            os.path.join(baseline_output_dir, "mv", "mv.npy")
-            if managed_baseline
-            else os.path.join(BASE_OUTPUT_DIR, baseline_path)
-        )
-    else:
-        full_path = baseline_path
-
-    expected = {
-        "h5_path": os.path.normcase(os.path.abspath(H5_PATH)),
-        "h5_sample_idx": int(args.h5_sample_idx),
-        "select_angles": str(args.select_angles),
-        "f_number": float(args.f_number),
-        "dr": float(args.dr),
-        "dynamic_aperture": bool(args.dynamic_aperture),
-        "tgc": bool(args.tgc),
-        "tgc_alpha": float(args.tgc_alpha),
-        "window": args.window,
-        "interp": args.interp,
-        "mv_dl": float(args.mv_dl),
-        "fbss": bool(args.fbss),
-        "subarray_ratio": float(args.subarray_ratio),
-        "temporal_win": int(args.temporal_win),
-    }
-
-    def baseline_matches():
-        """Execute baseline matches."""
-        params_path = os.path.join(os.path.dirname(full_path), "params.json")
-        if not os.path.exists(full_path) or not os.path.exists(params_path):
-            return False, "缺少基线文件或 params.json"
-        try:
-            with open(params_path, encoding="utf-8") as file:
-                actual = json.load(file)
-        except (OSError, ValueError) as exc:
-            return False, f"无法读取 params.json: {exc}"
-        actual = {key: actual.get(key) for key in expected}
-        if actual.get("h5_path") is not None:
-            actual["h5_path"] = os.path.normcase(os.path.abspath(actual["h5_path"]))
-        if managed_baseline and actual == expected:
-            baseline_mtime = os.path.getmtime(full_path)
-            dependencies = [H5_PATH, os.path.join(SCRIPT_DIR, "mv.py")]
-            dependencies.append(os.path.join(SCRIPT_DIR, "common.py"))
-            if any(os.path.getmtime(path) > baseline_mtime for path in dependencies):
-                return False, "输入数据或 MV 源码比基线更新"
-        return (actual == expected, "参数一致" if actual == expected else "参数不一致")
-
-    matches, reason = baseline_matches()
-    if matches:
-        print(f"MV基线已存在且参数一致: {full_path}")
-        return full_path
-    if not managed_baseline:
-        raise ValueError(f"自定义 MV 基线不可用({reason}): {full_path}")
-
-    print(f"MV基线需要生成({reason}): {full_path}")
-
-    mv_script = os.path.join(SCRIPT_DIR, "mv.py")
-    if not os.path.exists(mv_script):
-        raise FileNotFoundError(f"找不到mv.py: {mv_script},请确保mv.py在相同目录下")
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "algorithms.mv",
-        "--h5_path",
-        H5_PATH,
-        "--h5_sample_idx",
-        str(args.h5_sample_idx),
-        "--select_angles",
-        args.select_angles,
-        "--f_number",
-        str(args.f_number),
-        "--dr",
-        str(args.dr),
-        "--output_dir",
-        baseline_output_dir,
-    ]
-
-    if args.dynamic_aperture:
-        cmd.append("--dynamic_aperture")
-    else:
-        cmd.append("--no_dynamic_aperture")
-
-    cmd.extend(["--window", args.window])
-    cmd.extend(["--interp", args.interp])
-
-    # MV参数
-    cmd.extend(["--mv_dl", str(args.mv_dl)])
-    cmd.extend(["--subarray_ratio", str(args.subarray_ratio)])
-    cmd.extend(["--temporal_win", str(args.temporal_win)])
-    if args.fbss:
-        cmd.append("--fbss")
-    else:
-        cmd.append("--no_fbss")
-
-    if args.tgc:
-        cmd.append("--tgc")
-        cmd.extend(["--tgc_alpha", str(args.tgc_alpha)])
-    else:
-        cmd.append("--no_tgc")
-
-    print(f"执行: {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=PROJECT_ROOT, capture_output=True, text=True, check=False)
-
-    if result.returncode != 0:
-        print(f"MV生成失败: {result.stderr}")
-        raise RuntimeError("自动生成MV基线失败")
-
-    print(result.stdout)
-    matches, reason = baseline_matches()
-    if not matches:
-        raise RuntimeError(f"MV基线生成后校验失败: {reason}")
-    print("MV基线生成并校验完成")
-    return full_path
-
-
 def delayed_iq(sample, angle_idx):
     """Execute delayed iq."""
     i_data = torch.from_numpy(sample["I"][angle_idx]).to(device)
@@ -256,7 +119,9 @@ def delayed_iq(sample, angle_idx):
     n_angles, n_samples, n_channels = i_data.shape
 
     z_mesh, x_mesh = torch.meshgrid(z, x, indexing="ij")
-    elements = (torch.arange(n_channels, device=device) - (n_channels - 1) / 2.0) * sample["pitch"]
+    elements = (
+        torch.arange(n_channels, device=device) - (n_channels - 1) / 2.0
+    ) * sample["pitch"]
     receive = torch.sqrt((x_mesh[..., None] - elements) ** 2 + z_mesh[..., None] ** 2)
     transmit = z_mesh[None, ..., None] * torch.cos(angles)[:, None, None, None]
     transmit += x_mesh[None, ..., None] * torch.sin(angles)[:, None, None, None]
@@ -311,7 +176,9 @@ def cmsaw_weight_from_delayed_data(
     z_grid = np.asarray(z_grid, dtype=np.float32)
     x_grid = np.asarray(x_grid, dtype=np.float32)
     x_t = torch.from_numpy(x_grid).to(data_device)
-    element_x = (torch.arange(n_channels, device=data_device) - (n_channels - 1) / 2.0) * pitch
+    element_x = (
+        torch.arange(n_channels, device=data_device) - (n_channels - 1) / 2.0
+    ) * pitch
     centers = torch.argmin(torch.abs(x_t[:, None] - element_x[None]), dim=1)
 
     row_cache = []
@@ -342,7 +209,9 @@ def cmsaw_weight_from_delayed_data(
             k_rows.append(k)
 
         sigma_prime = torch.pow(sigma + 1e-12, -1.0 / 3.0)
-        sigma_prime = (sigma_prime - sigma_prime.min()) / (sigma_prime.max() - sigma_prime.min() + 1e-12)
+        sigma_prime = (sigma_prime - sigma_prime.min()) / (
+            sigma_prime.max() - sigma_prime.min() + 1e-12
+        )
         weight = torch.zeros_like(sigma)
         length_map = torch.zeros(
             (height, width),
@@ -381,7 +250,10 @@ def cmsaw_weight_from_delayed_data(
                 exchange = torch.flip(eye, dims=(0,))
                 transpose = covariance.transpose(-2, -1)
                 rotary = 0.25 * (
-                    covariance + exchange @ transpose + exchange @ covariance @ exchange + transpose @ exchange
+                    covariance
+                    + exchange @ transpose
+                    + exchange @ covariance @ exchange
+                    + transpose @ exchange
                 )
                 diagonal = torch.diag_embed(
                     torch.diagonal(rotary, dim1=-2, dim2=-1),
@@ -389,10 +261,16 @@ def cmsaw_weight_from_delayed_data(
                 matrix = torch.abs(
                     rotary - delta[columns, None, None] * diagonal,
                 )
-                weight[iz, columns] = matrix.mean(dim=(-2, -1)) / (matrix.std(dim=(-2, -1), unbiased=False) + 1e-12)
+                weight[iz, columns] = matrix.mean(dim=(-2, -1)) / (
+                    matrix.std(dim=(-2, -1), unbiased=False) + 1e-12
+                )
 
         if depth_smooth_rows > 1:
-            rows = depth_smooth_rows + 1 if depth_smooth_rows % 2 == 0 else depth_smooth_rows
+            rows = (
+                depth_smooth_rows + 1
+                if depth_smooth_rows % 2 == 0
+                else depth_smooth_rows
+            )
             if rows > height:
                 raise ValueError(
                     f"depth_smooth_rows={depth_smooth_rows} 超过图像深度 {height}",
@@ -500,24 +378,8 @@ class CMSAWBeamformerIQ:
             subarray_ratio=subarray_ratio,
             temporal_win=temporal_win,
         )
-
-    def _weight_from_delayed_data(self, data):
-        """Execute  weight from delayed data."""
-        return cmsaw_weight_from_delayed_data(
-            data,
-            self.z_grid,
-            self.x_grid,
-            self.pitch,
-            args.f_number,
-            args.dynamic_aperture,
-            args.window,
-            self.lmax_ratio,
-            self.min_subarray_len,
-            self.delta_max,
-            self.gamma,
-            self.clip_percentile,
-            self.depth_smooth_rows,
-        )
+        self.last_weight = None
+        self.last_lengths = None
 
     def __call__(self, i_data, q_data, selected_angles, t_starts, fs):
         """Run the callable operation."""
@@ -538,24 +400,41 @@ class CMSAWBeamformerIQ:
             "pitch": self.pitch,
         }
         angle_weights = []
+        angle_lengths = []
         for angle_idx in range(len(selected_angles)):
             data = delayed_iq(sample, np.array([angle_idx]))
-            angle_weights.append(self._weight_from_delayed_data(data))
+            angle_weight, angle_length = cmsaw_weight_from_delayed_data(
+                data,
+                self.z_grid,
+                self.x_grid,
+                self.pitch,
+                args.f_number,
+                args.dynamic_aperture,
+                args.window,
+                self.lmax_ratio,
+                self.min_subarray_len,
+                self.delta_max,
+                self.gamma,
+                self.clip_percentile,
+                self.depth_smooth_rows,
+                return_lengths=True,
+            )
+            angle_weights.append(angle_weight)
+            angle_lengths.append(angle_length[0])
         weight = torch.stack(angle_weights, dim=0).mean(dim=0)
-        weight = weight.cpu().numpy().astype(np.float32)
-        return i_mv * weight, q_mv * weight
+        self.last_weight = weight.detach()
+        self.last_lengths = torch.stack(angle_lengths, dim=0).detach()
+        weight_np = weight.cpu().numpy().astype(np.float32)
+        return i_mv * weight_np, q_mv * weight_np
 
 
 # ================= 主程序 =================
 def main():
     """Run the command-line workflow."""
-    global args, H5_PATH, BASE_OUTPUT_DIR, OUTPUT_DIR
+    global args
     args = parser.parse_args()
-    H5_PATH = resolve_project_path(args.h5_path, PROJECT_ROOT)
-    BASE_OUTPUT_DIR = args.output_dir
-    OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, METHOD_NAME)
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    h5_path = resolve_project_path(args.h5_path, PROJECT_ROOT)
+    output_dir = Path(args.output_dir) / METHOD_NAME
 
     validate_cmsaw_params(
         args.lmax_ratio,
@@ -567,54 +446,32 @@ def main():
         args.depth_smooth_rows,
     )
 
-    # ========== 自动生成MV基线 ==========
-    baseline_path = ensure_mv_baseline(args.baseline_mv)
-
-    # 加载H5数据
-    (
-        c,
-        fc,
-        fs,
-        pitch,
-        n_elem,
-        angles_all,
-        t0_all,
-        z_grid,
-        x_grid,
-        i_data,
-        q_data,
-        gt_data,
-        has_gt,
-    ) = load_from_h5(
-        H5_PATH,
+    input_data = prepare_beamforming_input(
+        h5_path,
         args.h5_sample_idx,
-    )
-
-    selected_indices, selected_angles = parse_selected_angles(
-        angles_all,
         args.select_angles,
     )
-    t0_sub = t0_all[selected_indices] if isinstance(t0_all, (np.ndarray, list)) else t0_all
+    sample = input_data.sample
+    c, fc, fs, pitch, n_elem = (
+        sample.c,
+        sample.fc,
+        sample.fs,
+        sample.pitch,
+        sample.n_elem,
+    )
+    angles_all, z_grid, x_grid = sample.angles, sample.z_grid, sample.x_grid
+    selected_angles = input_data.selected_angles
+    i_sub, q_sub, t0_sub = input_data.i_data, input_data.q_data, input_data.t0
+    has_gt = sample.has_gt
 
     height, width = len(z_grid), len(x_grid)
     dz, dx = z_grid[1] - z_grid[0], x_grid[1] - x_grid[0]
     depth_min, depth_max = z_grid[0], z_grid[-1]
-    extent_mm = [
-        x_grid[0] * 1000,
-        x_grid[-1] * 1000,
-        z_grid[-1] * 1000,
-        z_grid[0] * 1000,
-    ]
-
-    # 加载MV基线
-    baseline = np.load(baseline_path).astype(np.float32)
-    baseline = validate_db_output(baseline, (height, width), "CMSAW MV baseline")
-
     print_physical_summary(
         method_name=METHOD_NAME,
-        h5_path=H5_PATH,
+        h5_path=h5_path,
         sample_idx=args.h5_sample_idx,
-        output_dir=OUTPUT_DIR,
+        output_dir=output_dir,
         device=device,
         c=c,
         fc=fc,
@@ -632,7 +489,7 @@ def main():
         selected_angles=selected_angles,
         has_gt=has_gt,
         parameters=[
-            ("MV baseline", baseline_path),
+            ("MV phase", "in-memory MV"),
             ("F-Number", args.f_number),
             ("Aperture", "Dynamic" if args.dynamic_aperture else "Fixed Full"),
             ("FBSS", "Enabled" if args.fbss else "Disabled"),
@@ -653,64 +510,44 @@ def main():
         ],
     )
 
-    # 准备数据
-    sample = {
-        "I": i_data,
-        "Q": q_data,
-        "t0": t0_all,
-        "z": z_grid,
-        "x": x_grid,
-        "angles": angles_all,
-        "fs": fs,
-        "c": c,
-        "fc": fc,
-        "pitch": pitch,
-    }
-
-    print(f"Processing CMSAW (Lmax={args.lmax_ratio}aperture_size, gamma={args.gamma})...")
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    t1 = time.time()
-
+    print(
+        f"Processing CMSAW (Lmax={args.lmax_ratio}aperture_size, gamma={args.gamma})..."
+    )
+    mv_bf = CMSAWBeamformerIQ(
+        z_grid,
+        x_grid,
+        n_elem,
+        pitch,
+        c,
+        fc,
+        fs,
+        t0_sub,
+        selected_angles,
+        mv_dl=args.mv_dl,
+        fbss=args.fbss,
+        subarray_ratio=args.subarray_ratio,
+        temporal_win=args.temporal_win,
+        lmax_ratio=args.lmax_ratio,
+        min_subarray_len=args.min_subarray_len,
+        delta_max=args.delta_max,
+        gamma=args.gamma,
+        clip_percentile=args.clip_percentile,
+        depth_smooth_rows=args.depth_smooth_rows,
+    )
     with torch.no_grad():
-        angle_weights = []
-        angle_lengths = []
-        for angle_number, selected_index in enumerate(selected_indices, 1):
-            print(
-                f"  CMSAW angle {angle_number}/{len(selected_indices)} ({np.degrees(angles_all[selected_index]):.1f}°)",
-            )
-            data = delayed_iq(sample, np.array([selected_index]))
-            angle_weight, angle_length = cmsaw_weight_from_delayed_data(
-                data,
-                z_grid,
-                x_grid,
-                pitch,
-                args.f_number,
-                args.dynamic_aperture,
-                args.window,
-                args.lmax_ratio,
-                args.min_subarray_len,
-                args.delta_max,
-                args.gamma,
-                args.clip_percentile,
-                args.depth_smooth_rows,
-                return_lengths=True,
-            )
-            angle_weights.append(angle_weight)
-            angle_lengths.append(angle_length[0])
-        weight = torch.stack(angle_weights, dim=0).mean(dim=0)
-        dynamic_l = torch.stack(angle_lengths, dim=0)
-        baseline_env_sq = torch.from_numpy(np.power(10.0, baseline / 10.0)).to(device)
-        output_env_sq = baseline_env_sq * (weight**2)
-        output_env_sq /= output_env_sq.max() + 1e-24
-        output = (10.0 * torch.log10(output_env_sq + 1e-24)).cpu().numpy().astype(np.float32)
-        output = validate_db_output(output, (height, width), METHOD_NAME)
-
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    dt = time.time() - t1
-
-    weight_np = weight.cpu().numpy().astype(np.float32)
+        i_out, q_out, dt = run_beamformer(
+            mv_bf,
+            i_sub,
+            q_sub,
+            selected_angles,
+            t0_sub,
+            fs,
+            device,
+        )
+    output = envelope_to_db(i_out, q_out, z_grid, fc, args.tgc, args.tgc_alpha)
+    output = validate_db_output(output, (height, width), METHOD_NAME)
+    weight_np = mv_bf.last_weight.cpu().numpy().astype(np.float32)
+    dynamic_l_np = mv_bf.last_lengths.cpu().numpy()
 
     # ========== 生成图标题(所有参数简写) ==========
     title_parts = [
@@ -736,44 +573,23 @@ def main():
 
     out_name = METHOD_NAME
 
-    np.save(os.path.join(OUTPUT_DIR, f"{out_name}.npy"), output)
-    np.save(os.path.join(OUTPUT_DIR, f"{out_name}_weight.npy"), weight_np)
-    dynamic_l_np = dynamic_l.cpu().numpy()
-    np.save(
-        os.path.join(OUTPUT_DIR, f"{out_name}_subarray_length.npy"),
-        dynamic_l_np,
-    )
-
-    save_figure(
+    method_dir = save_algorithm_result(
         output,
-        extent_mm,
-        os.path.join(OUTPUT_DIR, f"{out_name}.png"),
+        input_data,
+        args,
+        METHOD_NAME,
         title_params,
-        dr=args.dr,
-        method_name=METHOD_NAME,
+        dt,
+        extra_arrays={"weight": weight_np, "subarray_length": dynamic_l_np},
+        extra_params={
+            "method_dir": str(Path(args.output_dir) / METHOD_NAME),
+            "mv_phase_source": "in_memory",
+        },
     )
-
-    if has_gt and args.save_gt:
-        save_comparison_figure(
-            output,
-            gt_data,
-            extent_mm,
-            os.path.join(OUTPUT_DIR, f"{out_name}_comparison.png"),
-            title_params,
-            dr=args.dr,
-        )
-
-    params = vars(args).copy()
-    params["method"] = METHOD_NAME
-    params["output_dir"] = args.output_dir
-    params["method_dir"] = OUTPUT_DIR
-    params["mv_baseline"] = baseline_path
-    params["runtime_sec"] = dt
-    write_params(os.path.join(OUTPUT_DIR, "params.json"), params)
 
     print(f"  Weight p1/p50/p99 = {np.percentile(weight_np, [1, 50, 99])}")
     print(f"  GPU Time: {dt:.2f}s | Saved -> {out_name}")
-    print(f"\nDone | Output: {OUTPUT_DIR}")
+    print(f"\nDone | Output: {method_dir}")
 
 
 if __name__ == "__main__":

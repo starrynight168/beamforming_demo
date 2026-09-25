@@ -1,7 +1,7 @@
 """Provide Python utilities for fdmas."""
 
 import argparse
-import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -17,11 +17,9 @@ from algorithms.common import (
     print_physical_summary,
     resolve_project_path,
     run_beamformer,
-    save_comparison_figure,
-    save_figure,
+    save_algorithm_result,
     time_start_tensor,
     validate_db_output,
-    write_params,
 )
 
 # ================= 命令行参数配置 =================
@@ -39,12 +37,9 @@ parser.add_argument(
 args = None
 
 METHOD_NAME = "fdmas"
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-H5_PATH = None
-OUTPUT_DIR = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -68,9 +63,14 @@ class FDMASBeamformerIQ:
         )
         x_mesh, z_mesh = torch.meshgrid(self.x_grid, self.z_grid, indexing="xy")
         self.x_mesh, self.z_mesh = x_mesh, z_mesh
-        self.drs = torch.sqrt((x_mesh[..., None] - self.ep) ** 2 + z_mesh[..., None] ** 2) * self.sc
+        self.drs = (
+            torch.sqrt((x_mesh[..., None] - self.ep) ** 2 + z_mesh[..., None] ** 2)
+            * self.sc
+        )
 
-        win = torch.zeros((self.height, self.width, self.N), dtype=torch.float32, device=device)
+        win = torch.zeros(
+            (self.height, self.width, self.N), dtype=torch.float32, device=device
+        )
         centers = torch.argmin(
             torch.abs(self.x_grid[:, None] - self.ep[None, :]),
             dim=1,
@@ -85,7 +85,9 @@ class FDMASBeamformerIQ:
             )
             starts = torch.clamp(centers - k // 2, 0, n_elem - k)
             channels = starts[:, None] + torch.arange(k, device=device)[None, :]
-            row_window = aperture_window_1d(k, args.window, device).expand(self.width, -1)
+            row_window = aperture_window_1d(k, args.window, device).expand(
+                self.width, -1
+            )
             win[iz].scatter_(1, channels, row_window)
         self.window = win / (win.sum(-1, keepdim=True) + 1e-9)
         self.ch = torch.arange(n_elem, device=device).view(1, 1, -1)
@@ -113,7 +115,9 @@ class FDMASBeamformerIQ:
 
         t_starts_t = time_start_tensor(t_starts, n_a, fs, device)
 
-        beam_out = torch.zeros((self.height, self.width), dtype=torch.complex64, device=device)
+        beam_out = torch.zeros(
+            (self.height, self.width), dtype=torch.complex64, device=device
+        )
         ch = self.ch
         row_block = self.height if args.row_block <= 0 else max(1, args.row_block)
 
@@ -176,33 +180,37 @@ class FDMASBeamformerIQ:
 # ================= 主程序 =================
 def main():
     """Run the command-line workflow."""
-    global args, H5_PATH, OUTPUT_DIR
+    global args
     args = parser.parse_args()
-    H5_PATH = resolve_project_path(args.h5_path, PROJECT_ROOT)
-    OUTPUT_DIR = os.path.join(args.output_dir, METHOD_NAME)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    h5_path = resolve_project_path(args.h5_path, PROJECT_ROOT)
+    output_dir = f"{args.output_dir}/{METHOD_NAME}"
 
     input_data = prepare_beamforming_input(
-        H5_PATH,
+        h5_path,
         args.h5_sample_idx,
         args.select_angles,
     )
     sample = input_data.sample
-    c, fc, fs, pitch, n_elem = sample.c, sample.fc, sample.fs, sample.pitch, sample.n_elem
+    c, fc, fs, pitch, n_elem = (
+        sample.c,
+        sample.fc,
+        sample.fs,
+        sample.pitch,
+        sample.n_elem,
+    )
     angles_all, z_grid, x_grid = sample.angles, sample.z_grid, sample.x_grid
     selected_angles = input_data.selected_angles
     i_sub, q_sub, t0_sub = input_data.i_data, input_data.q_data, input_data.t0
-    gt_data, has_gt = sample.gt_data, sample.has_gt
+    has_gt = sample.has_gt
     height, width = len(z_grid), len(x_grid)
     dz, dx = z_grid[1] - z_grid[0], x_grid[1] - x_grid[0]
     depth_min, depth_max = z_grid[0], z_grid[-1]
-    extent_mm = input_data.extent_mm
 
     print_physical_summary(
         method_name=METHOD_NAME,
-        h5_path=H5_PATH,
+        h5_path=h5_path,
         sample_idx=args.h5_sample_idx,
-        output_dir=OUTPUT_DIR,
+        output_dir=output_dir,
         device=device,
         c=c,
         fc=fc,
@@ -277,34 +285,17 @@ def main():
 
     out_name = METHOD_NAME
 
-    np.save(os.path.join(OUTPUT_DIR, f"{out_name}.npy"), fdmas_db)
-
-    save_figure(
+    method_dir = save_algorithm_result(
         fdmas_db,
-        extent_mm,
-        os.path.join(OUTPUT_DIR, f"{out_name}.png"),
+        input_data,
+        args,
+        METHOD_NAME,
         title_params,
-        dr=args.dr,
-        method_name=METHOD_NAME,
+        dt,
     )
 
-    if has_gt and args.save_gt:
-        save_comparison_figure(
-            fdmas_db,
-            gt_data,
-            extent_mm,
-            os.path.join(OUTPUT_DIR, f"{out_name}_comparison.png"),
-            title_params,
-            dr=args.dr,
-        )
-
-    params = vars(args).copy()
-    params["method"] = METHOD_NAME
-    params["runtime_sec"] = float(dt)
-    write_params(os.path.join(OUTPUT_DIR, "params.json"), params)
-
     print(f"  GPU Time: {dt:.2f}s | Saved -> {out_name}")
-    print(f"\nDone | Output: {OUTPUT_DIR}")
+    print(f"\nDone | Output: {method_dir}")
 
 
 if __name__ == "__main__":

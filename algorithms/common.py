@@ -223,7 +223,10 @@ def load_from_h5(h5_path, sample_idx=0):
         q_all = hf["all_multi_Q"]
         if i_all.shape != q_all.shape or i_all.ndim != 4:
             raise ValueError("all_multi_I/all_multi_Q 必须是形状一致的 [N,A,T,C] 数组")
-        if min(i_all.shape[0], i_all.shape[1], i_all.shape[3]) < 1 or i_all.shape[2] < 2:
+        if (
+            min(i_all.shape[0], i_all.shape[1], i_all.shape[3]) < 1
+            or i_all.shape[2] < 2
+        ):
             raise ValueError("IQ 的样本、角度、通道维必须非空，时间维至少为 2")
         if not 0 <= sample_idx < i_all.shape[0]:
             raise IndexError(
@@ -350,7 +353,9 @@ def envelope_to_db(i_output, q_output, z_grid, fc, tgc_enabled, tgc_alpha):
     envelope_sq = (i_output**2 + q_output**2) * (tgc[:, None] ** 2)
     peak = float(np.max(envelope_sq))
     if not np.isfinite(peak) or peak <= 0:
-        raise ValueError(f"beamformer envelope peak must be finite and positive, got {peak}")
+        raise ValueError(
+            f"beamformer envelope peak must be finite and positive, got {peak}"
+        )
     return 10.0 * np.log10(envelope_sq / peak + 1e-24)
 
 
@@ -362,6 +367,47 @@ def run_beamformer(beamformer, i_data, q_data, selected_angles, t0, fs, device):
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     return i_output, q_output, time.perf_counter() - start
+
+
+def save_algorithm_result(
+    image_db,
+    input_data,
+    args,
+    method_name,
+    title,
+    runtime_sec,
+    extra_arrays=None,
+    extra_params=None,
+):
+    """Save the standard algorithm artifacts and return the method directory."""
+    method_dir = Path(args.output_dir) / method_name
+    method_dir.mkdir(parents=True, exist_ok=True)
+    image_path = method_dir / f"{method_name}.npy"
+    np.save(image_path, np.asarray(image_db, dtype=np.float32))
+    save_figure(
+        image_db,
+        input_data.extent_mm,
+        method_dir / f"{method_name}.png",
+        title,
+        dr=args.dr,
+        method_name=method_name,
+    )
+    sample = input_data.sample
+    if sample.has_gt and args.save_gt:
+        save_comparison_figure(
+            image_db,
+            sample.gt_data,
+            input_data.extent_mm,
+            method_dir / f"{method_name}_comparison.png",
+            title,
+            dr=args.dr,
+        )
+    for suffix, values in (extra_arrays or {}).items():
+        np.save(method_dir / f"{method_name}_{suffix}.npy", np.asarray(values))
+    params = {**vars(args), "method": method_name, "runtime_sec": float(runtime_sec)}
+    params.update(extra_params or {})
+    write_params(method_dir / "params.json", params)
+    return method_dir
 
 
 def format_method_name(method_name):
@@ -423,8 +469,12 @@ def print_physical_summary(
     print(
         f"  Transducer   : {n_elem}ch, fc={fc / 1e6:.1f}MHz, λ={wavelength * 1e3:.3f}mm, pitch={pitch * 1e3:.3f}mm",
     )
-    print(f"  Sampling     : fs={fs / 1e6:.1f}MHz, {len(angles)} angles, t0={t0_value * 1e6:.3f}μs")
-    print(f"  Grid         : {height}x{width}, dz={dz * 1e3:.4f}mm, dx={dx * 1e3:.4f}mm")
+    print(
+        f"  Sampling     : fs={fs / 1e6:.1f}MHz, {len(angles)} angles, t0={t0_value * 1e6:.3f}μs"
+    )
+    print(
+        f"  Grid         : {height}x{width}, dz={dz * 1e3:.4f}mm, dx={dx * 1e3:.4f}mm"
+    )
     print(
         f"  FOV          : {fov_depth:.1f}mm x {fov_lateral:.1f}mm "
         f"(depth {depth_min * 1e3:.1f}~{depth_max * 1e3:.1f}mm)",
@@ -533,7 +583,9 @@ def aperture_window_from_dx(dx, half_a, window_type, tukey_alpha=0.25, kaiser_be
     if window_type == "tukey":
         win = torch.ones_like(x_norm)
         transition = (x_norm > (1.0 - tukey_alpha)) & (x_norm <= 1.0)
-        val = 0.5 * (1.0 + torch.cos(torch.pi * (x_norm - (1.0 - tukey_alpha)) / tukey_alpha))
+        val = 0.5 * (
+            1.0 + torch.cos(torch.pi * (x_norm - (1.0 - tukey_alpha)) / tukey_alpha)
+        )
         win[transition] = val[transition]
         win[x_norm > 1.0] = 0.0
         return win
@@ -543,7 +595,11 @@ def aperture_window_from_dx(dx, half_a, window_type, tukey_alpha=0.25, kaiser_be
     elif window_type == "hamming":
         win = 0.54 + 0.46 * torch.cos(torch.pi * x_norm)
     elif window_type == "blackman":
-        win = 0.42 + 0.5 * torch.cos(torch.pi * x_norm) + 0.08 * torch.cos(2.0 * torch.pi * x_norm)
+        win = (
+            0.42
+            + 0.5 * torch.cos(torch.pi * x_norm)
+            + 0.08 * torch.cos(2.0 * torch.pi * x_norm)
+        )
     elif window_type == "kaiser":
         beta = torch.as_tensor(kaiser_beta, dtype=dx.dtype, device=dx.device)
         arg = beta * torch.sqrt(torch.clamp(1.0 - x_norm.square(), min=0.0))
@@ -570,14 +626,18 @@ def aperture_window_1d(
     if window_type == "tukey":
         win = torch.ones_like(x)
         edge = ax > 1.0 - tukey_alpha
-        win[edge] = 0.5 * (1.0 + torch.cos(torch.pi * (ax[edge] - (1.0 - tukey_alpha)) / tukey_alpha))
+        win[edge] = 0.5 * (
+            1.0 + torch.cos(torch.pi * (ax[edge] - (1.0 - tukey_alpha)) / tukey_alpha)
+        )
         return win
     if window_type == "hann":
         return 0.5 * (1.0 + torch.cos(torch.pi * x))
     if window_type == "hamming":
         return 0.54 + 0.46 * torch.cos(torch.pi * x)
     if window_type == "blackman":
-        return 0.42 + 0.5 * torch.cos(torch.pi * x) + 0.08 * torch.cos(2.0 * torch.pi * x)
+        return (
+            0.42 + 0.5 * torch.cos(torch.pi * x) + 0.08 * torch.cos(2.0 * torch.pi * x)
+        )
     if window_type == "kaiser":
         beta = torch.as_tensor(kaiser_beta, dtype=dtype, device=device)
         arg = beta * torch.sqrt(torch.clamp(1.0 - ax.square(), min=0.0))
@@ -589,6 +649,93 @@ def optional_aperture_window_1d(k, window_type, device, dtype=torch.float32):
     if window_type == "rect":
         return None
     return aperture_window_1d(k, window_type, device, dtype=dtype)
+
+
+def build_row_dynamic_geometry(
+    z_grid,
+    x_grid,
+    n_elem,
+    pitch,
+    c,
+    fc,
+    fs,
+    f_number,
+    dynamic_aperture,
+    window,
+    subarray_ratio,
+    temporal_win,
+    device,
+):
+    """Build shared geometry and row caches for MV-family beamformers."""
+    height, width, n_channels = len(z_grid), len(x_grid), n_elem
+    x_tensor = torch.from_numpy(x_grid).float().to(device)
+    z_tensor = torch.from_numpy(z_grid).float().to(device)
+    lateral_channel = (
+        torch.arange(n_channels, device=device).float() - (n_channels - 1) / 2.0
+    ) * pitch
+    c_idx = torch.argmin(
+        torch.abs(x_tensor.unsqueeze(1) - lateral_channel.unsqueeze(0)),
+        dim=1,
+    )
+    x_mesh, z_mesh = torch.meshgrid(x_tensor, z_tensor, indexing="xy")
+    drs = torch.sqrt(
+        (x_mesh[..., None] - lateral_channel) ** 2 + z_mesh[..., None] ** 2
+    ) * (fs / c)
+    ch = torch.arange(n_channels, device=device).view(1, n_channels, 1)
+    row_cache = []
+    for hz in range(height):
+        depth = float(z_tensor[hz].item())
+        aperture_size = dynamic_aperture_channel_count(
+            depth,
+            f_number,
+            pitch,
+            n_channels,
+            dynamic_aperture,
+        )
+        subarray_size = min(max(int(aperture_size * subarray_ratio), 2), aperture_size)
+        subarray_count = aperture_size - subarray_size + 1
+        idx_start = torch.clamp(
+            c_idx - aperture_size // 2, 0, n_channels - aperture_size
+        )
+        ch_idx = idx_start.unsqueeze(1) + torch.arange(
+            aperture_size, device=device
+        ).unsqueeze(0)
+        row_cache.append(
+            {
+                "aperture_size": aperture_size,
+                "subarray_size": subarray_size,
+                "subarray_count": subarray_count,
+                "ch_idx_t": ch_idx.unsqueeze(-1).expand(-1, -1, temporal_win),
+                "window": optional_aperture_window_1d(aperture_size, window, device),
+                "eye": torch.eye(
+                    subarray_size,
+                    dtype=torch.complex64,
+                    device=device,
+                ).unsqueeze(0),
+                "ones": torch.ones(
+                    (width, subarray_size, 1),
+                    dtype=torch.complex64,
+                    device=device,
+                ),
+            },
+        )
+    return {
+        "height": height,
+        "width": width,
+        "N": n_channels,
+        "x_grid": x_tensor,
+        "z_grid": z_tensor,
+        "pitch": pitch,
+        "fc": float(fc),
+        "fs": fs,
+        "sc": fs / c,
+        "c_idx": c_idx,
+        "x_mesh": x_mesh,
+        "z_mesh": z_mesh,
+        "drs": drs,
+        "ch": ch,
+        "row_cache": row_cache,
+    }
 
 
 def _lagrange_weight(frac, offset, offsets):
@@ -735,7 +882,9 @@ def save_comparison_figure(
     grid = GridSpec(1, 3, width_ratios=[1, 1, 0.05], figure=fig)
 
     gt_axis = fig.add_subplot(grid[0, 0])
-    gt_axis.imshow(gt_norm, cmap="gray", vmin=0, vmax=1, extent=extent_mm, aspect="equal")
+    gt_axis.imshow(
+        gt_norm, cmap="gray", vmin=0, vmax=1, extent=extent_mm, aspect="equal"
+    )
     gt_axis.set_title("Ground Truth", fontsize=12, pad=10)
     gt_axis.set_xlabel("Lateral (mm)")
     gt_axis.set_ylabel("Depth (mm)")
@@ -749,7 +898,9 @@ def save_comparison_figure(
         extent=extent_mm,
         aspect="equal",
     )
-    image_axis.set_title(f"{format_method_name(method_name)}\n{title_str}", fontsize=9, pad=10)
+    image_axis.set_title(
+        f"{format_method_name(method_name)}\n{title_str}", fontsize=9, pad=10
+    )
     image_axis.set_xlabel("Lateral (mm)")
     image_axis.set_ylabel("Depth (mm)")
     add_scale_bar(image_axis, extent_mm)
@@ -762,7 +913,9 @@ def save_comparison_figure(
     plt.close(fig)
 
 
-def save_figure(image_db, extent_mm, out_path, title_str, dr=60.0, method_name="Beamforming"):
+def save_figure(
+    image_db, extent_mm, out_path, title_str, dr=60.0, method_name="Beamforming"
+):
     vmin, vmax = db_display_range(dr)
     fig, axis = plt.subplots(figsize=(6, 8), dpi=300)
     image_handle = axis.imshow(
@@ -775,7 +928,9 @@ def save_figure(image_db, extent_mm, out_path, title_str, dr=60.0, method_name="
     )
     axis.set_xlabel("Lateral (mm)")
     axis.set_ylabel("Depth (mm)")
-    axis.set_title(f"{format_method_name(method_name)}\n{title_str}", fontsize=9, pad=15)
+    axis.set_title(
+        f"{format_method_name(method_name)}\n{title_str}", fontsize=9, pad=15
+    )
     colorbar = fig.colorbar(image_handle, ax=axis, fraction=0.046, pad=0.04)
     colorbar.set_label("Amplitude (dB)")
     add_scale_bar(axis, extent_mm)
@@ -785,4 +940,6 @@ def save_figure(image_db, extent_mm, out_path, title_str, dr=60.0, method_name="
 
 
 def write_params(path, params):
-    Path(path).write_text(json.dumps(params, ensure_ascii=False, indent=2), encoding="utf-8")
+    Path(path).write_text(
+        json.dumps(params, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
