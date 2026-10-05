@@ -415,7 +415,7 @@ def inspect_h5(path):
             if not all(isinstance(sample, dict) for sample in samples):
                 raise ValueError("config_yaml.source_samples 必须是对象列表")
             names = [
-                str(sample.get("id", f"sample_{idx}"))
+                str(sample.get("id") or sample.get("acquisition_id") or f"sample_{idx}")
                 for idx, sample in enumerate(samples)
             ]
             in_vivo = [
@@ -824,13 +824,14 @@ def main():
         info = inspect_h5(state["h5_path"])
         has_gt_default = info["gt"] == "有"
         state["in_vivo"] = info["in_vivo"][state["sample_idx"]]
+        sample_name = info["names"][state["sample_idx"]]
         explain(state["teaching"], "gt")
         state["has_gt"] = has_gt_default
         state["evaluate"] = sample_can_be_evaluated(info, state["sample_idx"])
         if state["in_vivo"]:
             print("活体样本:保留重建与对比图,自动跳过评估指标。")
         elif has_gt_default and not state["evaluate"]:
-            print("当前样本不在标准评估场景中:保留重建与对比图,自动跳过评估指标。")
+            print(f"样本 {sample_name} 不在受控指标场景中:保留 GT 对比,跳过指标。")
         else:
             print(
                 f"GT: {'H5 中存在,将自动加入对比并计算指标' if has_gt_default else 'H5 中不存在,将跳过对比和指标'}",

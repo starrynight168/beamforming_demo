@@ -217,7 +217,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                     "dataset": {"id": "simulation"},
                     "source_samples": [
                         {
-                            "id": "simulation_contrast_speckle",
+                            "acquisition_id": "simulation_contrast_speckle",
                             "phantom_mode": "simulation",
                             "phantom_source": "PICMUS",
                         }
