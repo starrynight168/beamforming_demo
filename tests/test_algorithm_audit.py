@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import h5py
@@ -10,6 +11,7 @@ import numpy as np
 import torch
 import yaml
 
+from algorithms import das
 from algorithms.cmsaw import validate_cmsaw_params
 from algorithms.common import (
     aperture_window_1d,
@@ -17,11 +19,13 @@ from algorithms.common import (
     interpolate_channel_samples,
     parse_selected_angles,
     result_cache_signature,
+    save_algorithm_result,
 )
 from run_one import can_reuse_existing
 from tools.run_ablation_cn import (
     can_reuse_flat_result,
     numeric_range_values,
+    run_ablation_evaluation,
     validate_values,
 )
 from tools.run_wizard_cn import (
@@ -162,6 +166,9 @@ class AlgorithmAuditTests(unittest.TestCase):
 
     def test_ablation_values_reject_duplicates_after_normalization(self):
         with self.assertRaisesRegex(ValueError, "重复"):
+            validate_values("fbss", True, [True, True])
+        self.assertEqual(validate_values("fbss", True, [True, False]), [True, False])
+        with self.assertRaisesRegex(ValueError, "重复"):
             validate_values("f_number", 1.5, [1, 1.0])
         with self.assertRaisesRegex(ValueError, "重复"):
             validate_values("window", "rect", ["hann", "HANN"])
@@ -169,6 +176,64 @@ class AlgorithmAuditTests(unittest.TestCase):
             validate_values("depth_smooth_rows", 1, [2, 3])
         self.assertEqual(validate_values("depth_smooth_rows", 1, [1, 3]), [1, 3])
         self.assertEqual(validate_values("f_number", 1.5, [1, 2]), [1, 2])
+
+    def test_saved_cache_signature_cannot_be_overridden_by_extra_params(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            h5_path = root / "input.h5"
+            h5_path.write_bytes(b"input")
+            args = argparse.Namespace(
+                h5_path=str(h5_path), output_dir=str(root), dr=60.0, save_gt=False
+            )
+            input_data = SimpleNamespace(
+                extent_mm=(0, 1, 1, 0), sample=SimpleNamespace(has_gt=False)
+            )
+            with patch("algorithms.common.save_figure"):
+                output = save_algorithm_result(
+                    np.zeros((2, 2)), input_data, args, "das", "DAS", 0.0,
+                    extra_params={"cache_signature": "stale"},
+                )
+            params = json.loads((output / "params.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                params["cache_signature"], result_cache_signature(h5_path, "das", vars(args))
+            )
+
+    def test_das_keeps_last_sample_and_zeros_out_of_range_output(self):
+        angles = np.array([0.0], dtype=np.float32)
+        i_data = np.zeros((1, 5, 1), dtype=np.float32)
+        i_data[0, -1, 0] = 7.0
+        q_data = np.zeros_like(i_data)
+        for aperture in ("geometry", "centered"):
+            for interpolation in ("nearest", "linear", "cubic", "quintic", "farrow", "sinc"):
+                with self.subTest(aperture=aperture, interpolation=interpolation):
+                    args = argparse.Namespace(
+                        aperture_mode=aperture, dynamic_aperture=False, f_number=1.5,
+                        window="rect", row_block=1, interp=interpolation,
+                    )
+                    with (
+                        patch.object(das, "args", args, create=True),
+                        patch.object(das, "device", torch.device("cpu")),
+                    ):
+                        beamformer = das.DASBeamformerIQ(
+                            np.array([1.5, 2.0, 2.5]), np.array([0.0]),
+                            1, 1.0, 1.0, 0.0, 1.0, np.zeros(1), angles,
+                        )
+                        i_output, q_output = beamformer(
+                            i_data, q_data, angles, np.zeros(1), 1.0
+                        )
+                    np.testing.assert_allclose(i_output[:, 0], [0.0, 7.0, 0.0], atol=1e-6)
+                    np.testing.assert_allclose(q_output, 0.0, atol=1e-6)
+
+    def test_dr_ablation_skips_metric_subprocesses(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            np.save(root / "ablation_comparison.npy", np.zeros((2, 2, 2)))
+            rows = [{"status": "ok", "parameter": "dr", "value": 40, "index": 1}]
+            with patch("tools.run_ablation_cn.subprocess.run") as run:
+                result = run_ablation_evaluation(rows, root, root / "input.h5", 0, True, 60)
+            self.assertIsNone(result)
+            run.assert_not_called()
+            self.assertFalse((root / "metrics").exists())
 
     def test_numeric_range_rejects_nonfinite_and_nonadvancing_steps(self):
         with patch("tools.run_ablation_cn.ask_text", side_effect=["0", "1", "inf"]):

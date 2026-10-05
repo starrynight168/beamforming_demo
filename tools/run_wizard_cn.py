@@ -60,7 +60,7 @@ ALGORITHM_PARAM_HELP = {
     "delta_max": "CMSAW 权重变化上限,范围 [0, 1]",
     "gamma": "CMSAW 权重曲线强度,范围 (0, 1]",
     "clip_percentile": "CMSAW 裁剪百分位,范围 (0, 100]",
-    "depth_smooth_rows": "CMSAW 深度平滑行数,必须为正整数",
+    "depth_smooth_rows": "CMSAW 深度平滑行数,必须为正奇数",
 }
 
 HELP_TEXT = {

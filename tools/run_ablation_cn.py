@@ -204,7 +204,7 @@ def validate_values(param_name, default_value, values):
     if isinstance(default_value, bool):
         if not all(isinstance(value, bool) for value in values):
             raise ValueError("这个参数是开关量,只能填 true/false 或 是/否。")
-        return values
+        return reject_duplicates(values)
 
     if isinstance(default_value, (int, float)) and not isinstance(default_value, bool):
         if not all(
