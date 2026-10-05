@@ -75,7 +75,7 @@ class SpeedOfSoundEvaluator:
 
     def __init__(
         self,
-        h5_path="data/invivo_15002.h5",
+        h5_path,
         sample_idx=0,
         mv_dl=0.0,
         fbss=True,
@@ -629,9 +629,7 @@ def main():
         description="Speed of Sound Ablation & Optimization for Single-angle MV",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
-        "--h5_path", default="data/invivo_15002.h5", help="Path to in-vivo H5 dataset"
-    )
+    parser.add_argument("--h5_path", required=True, help="Path to in-vivo H5 dataset")
     parser.add_argument(
         "--sample_idx", type=nonnegative_int, default=0, help="H5 sample index"
     )
