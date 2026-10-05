@@ -56,7 +56,6 @@ algorithm_params:
     fbss: true
     subarray_ratio: 0.25
     temporal_win: 9
-    baseline_mv: mv.npy
     lmax_ratio: 0.5
     min_subarray_len: 2
     delta_max: 1.0
