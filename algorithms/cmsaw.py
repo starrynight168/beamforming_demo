@@ -74,7 +74,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--depth_smooth_rows",
-    type=positive_odd_int,
+    type=int,
     default=1,
     help="深度平滑行数 (1=禁用)",
 )
@@ -104,8 +104,8 @@ def validate_cmsaw_params(
         )
     if temporal_win < 1 or temporal_win % 2 == 0:
         raise ValueError("temporal_win must be a positive odd integer")
-    if depth_smooth_rows < 1 or depth_smooth_rows % 2 == 0:
-        raise ValueError("depth_smooth_rows must be a positive odd integer")
+    if depth_smooth_rows < 1:
+        raise ValueError("depth_smooth_rows must be at least 1")
 
 
 def delayed_iq(sample, angle_idx):
@@ -266,7 +266,11 @@ def cmsaw_weight_from_delayed_data(
                 )
 
         if depth_smooth_rows > 1:
-            rows = depth_smooth_rows
+            rows = (
+                depth_smooth_rows + 1
+                if depth_smooth_rows % 2 == 0
+                else depth_smooth_rows
+            )
             if rows > height:
                 raise ValueError(
                     f"depth_smooth_rows={depth_smooth_rows} 超过图像深度 {height}",

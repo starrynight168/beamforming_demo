@@ -75,7 +75,7 @@ class SpeedOfSoundEvaluator:
 
     def __init__(
         self,
-        h5_path="data/in_vivo.h5",
+        h5_path="data/invivo_15002.h5",
         sample_idx=0,
         mv_dl=0.0,
         fbss=True,

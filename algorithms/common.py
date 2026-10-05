@@ -405,11 +405,15 @@ def save_algorithm_result(
         )
     for suffix, values in (extra_arrays or {}).items():
         np.save(method_dir / f"{method_name}_{suffix}.npy", np.asarray(values))
-    params = {**vars(args), "method": method_name, "runtime_sec": float(runtime_sec)}
+    params = {
+        **vars(args),
+        "method": method_name,
+        "runtime_sec": float(runtime_sec),
+        "cache_signature": result_cache_signature(
+            args.h5_path, method_name, vars(args)
+        ),
+    }
     params.update(extra_params or {})
-    params["cache_signature"] = result_cache_signature(
-        args.h5_path, method_name, vars(args)
-    )
     write_params(method_dir / "params.json", params)
     return method_dir
 
@@ -592,11 +596,7 @@ def aperture_window_from_dx(dx, half_a, window_type, tukey_alpha=0.25, kaiser_be
         )
         win[transition] = val[transition]
         win[x_norm > 1.0] = 0.0
-        return torch.where(
-            in_aperture.sum(-1, keepdim=True) <= 2,
-            in_aperture,
-            win,
-        )
+        return win
 
     if window_type == "hann":
         win = 0.5 * (1.0 + torch.cos(torch.pi * x_norm))
@@ -614,12 +614,7 @@ def aperture_window_from_dx(dx, half_a, window_type, tukey_alpha=0.25, kaiser_be
         win = torch.i0(arg) / torch.i0(beta)
     else:
         raise ValueError(f"Unsupported window type: {window_type}")
-    weighted = win * in_aperture
-    return torch.where(
-        in_aperture.sum(-1, keepdim=True) <= 2,
-        in_aperture,
-        weighted,
-    )
+    return win * in_aperture
 
 
 def aperture_window_1d(
@@ -960,43 +955,43 @@ def write_params(path, params):
 
 def result_cache_signature(h5_path, method_name, parameters=None):
     input_path = Path(h5_path).resolve(strict=True)
-    input_stat = input_path.stat()
+    stat = input_path.stat()
+    algorithm_path = Path(__file__).with_name(f"{method_name}.py")
+    source_paths = (algorithm_path, Path(__file__))
     sources = {}
-    source_paths = (Path(__file__).with_name(f"{method_name}.py"), Path(__file__))
     for source_path in source_paths:
-        sources[str(source_path.resolve())] = hashlib.sha256(
-            source_path.read_bytes()
-        ).hexdigest()
-
-    dependencies = {}
+        digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        sources[str(source_path.resolve())] = digest
+    dependent_files = {}
     for name, value in (parameters or {}).items():
         normalized_name = str(name).lower().replace("-", "_")
-        if normalized_name == "h5_path" or not any(
+        if normalized_name == "h5_path":
+            continue
+        if not any(
             token in normalized_name
             for token in ("_path", "_file", "config", "checkpoint", "weights")
         ):
             continue
         if not isinstance(value, (str, Path)):
             continue
-        path = Path(value)
-        if not path.is_absolute():
-            path = PROJECT_ROOT / path
-        path = path.resolve()
-        if path.is_file():
-            stat = path.stat()
-            dependencies[str(path)] = {
-                "size": stat.st_size,
-                "mtime_ns": stat.st_mtime_ns,
-                "file_id": getattr(stat, "st_ino", None),
+        dependency = Path(value)
+        if not dependency.is_absolute():
+            dependency = PROJECT_ROOT / dependency
+        dependency = dependency.resolve()
+        if dependency.is_file():
+            dependency_stat = dependency.stat()
+            dependent_files[str(dependency)] = {
+                "size": dependency_stat.st_size,
+                "mtime_ns": dependency_stat.st_mtime_ns,
+                "file_id": getattr(dependency_stat, "st_ino", None),
             }
-
     return {
         "input": {
             "path": str(input_path),
-            "size": input_stat.st_size,
-            "mtime_ns": input_stat.st_mtime_ns,
-            "file_id": getattr(input_stat, "st_ino", None),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "file_id": getattr(stat, "st_ino", None),
         },
         "sources": sources,
-        "dependencies": dependencies,
+        "dependent_files": dependent_files,
     }

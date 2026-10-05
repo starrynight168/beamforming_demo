@@ -135,8 +135,6 @@ def numeric_range_values():
     start = float(ask_text("起始值"))
     stop = float(ask_text("结束值"))
     step = float(ask_text("步长"))
-    if not all(math.isfinite(value) for value in (start, stop, step)):
-        raise ValueError("起始值、结束值和步长必须是有限数。")
     if step == 0:
         raise ValueError("步长不能为 0。")
     values = []
@@ -145,17 +143,11 @@ def numeric_range_values():
     if step > 0:
         while cur <= stop + eps:
             values.append(round(cur, 10))
-            next_value = cur + step
-            if next_value == cur:
-                raise ValueError("步长小于当前数值精度,无法推进范围。")
-            cur = next_value
+            cur += step
     else:
         while cur >= stop - eps:
             values.append(round(cur, 10))
-            next_value = cur + step
-            if next_value == cur:
-                raise ValueError("步长小于当前数值精度,无法推进范围。")
-            cur = next_value
+            cur += step
     if not values:
         raise ValueError("范围没有生成任何值,请检查起始/结束/步长。")
     return values
@@ -163,19 +155,6 @@ def numeric_range_values():
 
 def validate_values(param_name, default_value, values):
     """Validate values."""
-    def reject_duplicates(values):
-        keys = [
-            ("number", float(value))
-            if isinstance(value, (int, float)) and not isinstance(value, bool)
-            else ("text", value.lower())
-            if isinstance(value, str)
-            else ("value", value)
-            for value in values
-        ]
-        if len(keys) != len(set(keys)):
-            raise ValueError("取值列表不能包含重复值。")
-        return values
-
     if param_name in CATEGORICAL_PARAM_CHOICES:
         allowed = set(CATEGORICAL_PARAM_CHOICES[param_name])
         normalized = [str(value).lower() for value in values]
@@ -184,7 +163,7 @@ def validate_values(param_name, default_value, values):
             raise ValueError(
                 f"{param_name} 只能从 {', '.join(CATEGORICAL_PARAM_CHOICES[param_name])} 里选。",
             )
-        return reject_duplicates(normalized)
+        return normalized
 
     if param_name == "select_angles":
         for value in values:
@@ -199,7 +178,7 @@ def validate_values(param_name, default_value, values):
             raise ValueError(
                 "select_angles 只能填 center/all 或整数角度数,例如 center,all,1,3,11。",
             )
-        return reject_duplicates(values)
+        return values
 
     if isinstance(default_value, bool):
         if not all(isinstance(value, bool) for value in values):
@@ -251,17 +230,16 @@ def validate_values(param_name, default_value, values):
         ):
             raise ValueError("min_subarray_len 必须是大于等于 2 的整数。")
         if param_name == "depth_smooth_rows" and not all(
-            isinstance(value, int) and value >= 1 and value % 2 == 1
-            for value in values
+            isinstance(value, int) and value >= 1 for value in values
         ):
-            raise ValueError("depth_smooth_rows 必须是正奇数。")
+            raise ValueError("depth_smooth_rows 必须是正整数。")
         if param_name == "temporal_win" and not all(
             isinstance(value, int) and value >= 1 and value % 2 == 1 for value in values
         ):
             raise ValueError("temporal_win 必须是正奇数。")
-        return reject_duplicates(values)
+        return values
 
-    return reject_duplicates(values)
+    return values
 
 
 def available_params(config, algorithm):
@@ -745,9 +723,6 @@ def main():
         info = inspect_h5(state["h5_path"])
         state["has_gt"] = info["gt"] == "有"
         state["in_vivo"] = info["in_vivo"][state["sample_idx"]]
-        state["can_evaluate"] = wizard.sample_can_be_evaluated(
-            info, state["sample_idx"]
-        )
 
     def step_evaluate():
         """Execute step evaluate."""
@@ -756,13 +731,11 @@ def main():
             state["evaluate"] = False
             print("指标: 跳过。dr 只影响显示动态范围,不对不同 dr 使用统一评估口径。")
         else:
-            state["evaluate"] = state["can_evaluate"]
+            state["evaluate"] = state["has_gt"] and not state["in_vivo"]
         if state["param_name"] == "dr":
             return
         if state["in_vivo"]:
             print("指标: 活体样本自动跳过。")
-        elif state["has_gt"] and not state["evaluate"]:
-            print("指标: 当前样本不在标准评估场景中,自动跳过。")
         else:
             print(
                 f"指标: {'H5 中存在 GT,将自动计算' if state['has_gt'] else 'H5 中不存在 GT,将跳过'}",

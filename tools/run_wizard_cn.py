@@ -14,11 +14,12 @@ import numpy as np
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from evaluation.constants import CONTROLLED_SCENES
+
+DATA_DIR = ROOT / "data"
 
 
 def parse_args():
@@ -174,8 +175,8 @@ def validate_algorithm_param(name, value):
         raise ValueError("必须是非负整数。")
     if name == "min_subarray_len" and value < 2:
         raise ValueError("必须是大于等于 2 的整数。")
-    if name == "depth_smooth_rows" and (value < 1 or value % 2 == 0):
-        raise ValueError("必须是正奇数。")
+    if name == "depth_smooth_rows" and value < 1:
+        raise ValueError("必须是正整数。")
     if name == "temporal_win" and (value < 1 or value % 2 != 1):
         raise ValueError("必须是正奇数。")
     if name in {"mv_dl", "gcf_power"} and value < 0:
@@ -405,15 +406,11 @@ def inspect_h5(path):
         raw_config = hf["config_yaml"][()]
         if isinstance(raw_config, bytes):
             raw_config = raw_config.decode("utf-8", errors="replace")
-        config = yaml.safe_load(raw_config)
-        if not isinstance(config, dict):
-            raise ValueError("config_yaml 顶层必须是映射")
+        config = yaml.safe_load(raw_config) or {}
         samples = config.get("source_samples", [])
         if isinstance(samples, list):
             if len(samples) != n:
                 raise ValueError("config_yaml.source_samples 数量必须与 H5 样本数一致")
-            if not all(isinstance(sample, dict) for sample in samples):
-                raise ValueError("config_yaml.source_samples 必须是对象列表")
             names = [
                 str(sample.get("id") or sample.get("acquisition_id") or f"sample_{idx}")
                 for idx, sample in enumerate(samples)

@@ -143,7 +143,7 @@ class FDMASBeamformerIQ:
             for i in range(n_a):
                 tx_samples = tx_z * cos_a[i] + tx_x * sin_a[i]
                 sample = tx_samples.unsqueeze(-1) + drs_b - t_starts_t[i]
-                valid = (sample >= 0) & (sample <= max_sample)
+                valid = (sample >= 0) & (sample < n_s - 1)
                 sample.clamp_(0.0, max_sample)
                 i_angle = i_tensor[i]
                 q_angle = q_tensor[i]
