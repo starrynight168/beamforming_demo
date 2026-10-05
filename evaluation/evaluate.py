@@ -16,6 +16,11 @@ import yaml
 from scipy.ndimage import convolve, gaussian_filter
 from scipy.stats import kstest
 
+try:
+    from .constants import CONTROLLED_SCENES
+except ImportError:
+    from constants import CONTROLLED_SCENES
+
 EPSILON = 1e-9
 PASS_THRESHOLD = 0.5
 MIN_PROFILE_POINTS = 2
@@ -35,14 +40,6 @@ except ImportError:
     peak_signal_noise_ratio = None
 
 
-CONTROLLED_SCENES = frozenset(
-    {
-        "simulation_contrast_speckle",
-        "simulation_resolution_distorsion",
-        "experiments_contrast_speckle",
-        "experiments_resolution_distorsion",
-    }
-)
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, os.pardir))
 PICMUS_ROOT = os.path.join(PROJECT_ROOT, "data", "PICMUS")

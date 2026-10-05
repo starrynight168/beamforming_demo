@@ -16,19 +16,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
-from algorithms.common import add_scale_bar, merge_common_params
+from algorithms.common import (
+    add_scale_bar,
+    merge_common_params,
+    result_cache_signature,
+)
+from evaluation.constants import CONTROLLED_SCENES
 
 ROOT = Path(__file__).resolve().parent
 
 MAX_COMPARISON_IMAGES_PER_PAGE = 8
-EVALUATION_SCENE_IDS = frozenset(
-    {
-        "simulation_contrast_speckle",
-        "simulation_resolution_distorsion",
-        "experiments_contrast_speckle",
-        "experiments_resolution_distorsion",
-    }
-)
 
 
 def parse_args():
@@ -228,7 +225,9 @@ def scene_has_gt(scene):
 
 def scene_is_non_controlled(scene):
     """Return whether a scene is outside the four controlled metric scenes."""
-    return str(scene.get("id", "")) not in EVALUATION_SCENE_IDS
+    return not scene.get("allow_evaluation", False) and str(
+        scene.get("id", "")
+    ) not in CONTROLLED_SCENES
 
 
 def gt_norm_to_db(gt, dr):
@@ -349,6 +348,9 @@ def can_reuse_existing(scene_dir, config, scene, method, args):
         "params": merge_common_params(config),
         "method_params": algorithm_params(config, method),
         "extra_algorithm_args": args.extra_algorithm_args,
+        "cache_signature": result_cache_signature(
+            resolve_path(scene["h5_path"]), method, algorithm_params(config, method)
+        ),
     }
     actual = {
         "scene": previous.get("scene"),
@@ -356,6 +358,7 @@ def can_reuse_existing(scene_dir, config, scene, method, args):
         "method_params": (previous.get("algorithm_params", {}) or {}).get(method, {})
         or {},
         "extra_algorithm_args": previous.get("extra_algorithm_args", []),
+        "cache_signature": (previous.get("cache_signatures", {}) or {}).get(method),
     }
     if actual != expected:
         return False, "旧结果参数与当前配置不一致"
@@ -505,6 +508,14 @@ def main():
             method: algorithm_params(config, method) for method in methods
         },
         "extra_algorithm_args": args.extra_algorithm_args,
+        "cache_signatures": {
+            method: result_cache_signature(
+                resolve_path(scene["h5_path"]),
+                method,
+                algorithm_params(config, method),
+            )
+            for method in methods
+        },
         "runtime_sec": time.time() - start_all,
         "output": {"methods": ",".join(methods)},
     }

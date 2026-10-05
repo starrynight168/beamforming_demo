@@ -10,6 +10,7 @@ from data.check_data import decode_compact_sequence, display_width, run_checks, 
 from data.pack_data import (
     compact_sequence_config,
     das_reference_from_iq,
+    pad_and_concat,
     pack_dataset,
     process_scene,
     validate_grid,
@@ -35,6 +36,17 @@ class DataUtilityTests(unittest.TestCase):
         for values in ([0, 0], [0, np.nan], [[0, 1]]):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 validate_grid(values, "x")
+
+    def test_pad_and_concat_pads_only_time_axis(self) -> None:
+        first = np.ones((1, 2, 3, 4), dtype=np.float32)
+        second = np.full((1, 2, 5, 4), 2.0, dtype=np.float32)
+
+        result = pad_and_concat([{"I": first}, {"I": second}], "I")
+
+        self.assertEqual(result.shape, (2, 2, 5, 4))
+        self.assertTrue(np.all(result[0, :, :3, :] == 1.0))
+        self.assertTrue(np.all(result[0, :, 3:, :] == 0.0))
+        self.assertTrue(np.all(result[1] == 2.0))
 
     def test_das_interpolation_branches(self) -> None:
         rng = np.random.default_rng(7)
@@ -79,7 +91,7 @@ class DataUtilityTests(unittest.TestCase):
         i_data = np.zeros((1, 20, 1), dtype=np.float32)
         q_data = np.zeros_like(i_data)
         i_data[0, -1, 0] = 1.0
-        z_grid = np.array([17.5, 18.75]) * 1540.0 / (2.0 * 20e6)
+        z_grid = np.array([17.5, 19.0]) * 1540.0 / (2.0 * 20e6)
 
         for interpolation in ("nearest", "linear", "cubic"):
             with self.subTest(interpolation=interpolation):
@@ -92,11 +104,12 @@ class DataUtilityTests(unittest.TestCase):
                     0.0003,
                     [0.0],
                     [0.0],
-                    [-1e-6, 1e-6],
+                    [0.0, 1e-4],
                     z_grid,
                     interp=interpolation,
                 )
-                self.assertGreater(float(np.max(image)), 0.0)
+                self.assertAlmostEqual(float(image[0, 0, 1, 0]), 1.0, places=5)
+                self.assertAlmostEqual(float(image[0, 0, 1, 1]), 0.0, places=5)
 
 
 class DataPipelineTests(unittest.TestCase):

@@ -271,10 +271,10 @@ def das_reference_from_iq(
                     i_center = i_angle[idx, ch]
                     q_center = q_angle[idx, ch]
                 elif interp == "cubic":
-                    valid = (sample >= 0) & (sample < n_times - 1)
+                    valid = (sample >= 0) & (sample <= n_times - 1)
                     idx0 = sample_safe.floor().long()
-                    frac = sample_safe - idx0.float()
                     idx0 = idx0.clamp(0, n_times - 2)
+                    frac = sample_safe - idx0.float()
                     frac2 = frac * frac
                     frac3 = frac2 * frac
                     c_m1 = -0.5 * frac3 + frac2 - 0.5 * frac
@@ -298,10 +298,10 @@ def das_reference_from_iq(
                         + q_angle[idx_2, ch] * c_2
                     )
                 else:
-                    valid = (sample >= 0) & (sample < n_times - 1)
+                    valid = (sample >= 0) & (sample <= n_times - 1)
                     idx0 = sample_safe.floor().long()
-                    frac = sample_safe - idx0.float()
                     idx0 = idx0.clamp(0, n_times - 2)
+                    frac = sample_safe - idx0.float()
                     i_center = (
                         i_angle[idx0, ch] * (1.0 - frac) + i_angle[idx0 + 1, ch] * frac
                     )
@@ -473,18 +473,16 @@ def process_scene(scene, source_root, row_block=24):
 def pad_and_concat(items, key):
     """Execute pad and concat."""
     arrays = [item[key] for item in items]
-    max_a = max(arr.shape[1] for arr in arrays)
     max_t = max(arr.shape[2] for arr in arrays)
-    max_c = max(arr.shape[3] for arr in arrays)
     padded = []
     for arr in arrays:
-        pad_cfg = (
-            (0, 0),
-            (0, max_a - arr.shape[1]),
-            (0, max_t - arr.shape[2]),
-            (0, max_c - arr.shape[3]),
+        padded.append(
+            np.pad(
+                arr,
+                ((0, 0), (0, 0), (0, max_t - arr.shape[2]), (0, 0)),
+                mode="constant",
+            ),
         )
-        padded.append(np.pad(arr, pad_cfg, mode="constant"))
     return np.concatenate(padded, axis=0)
 
 

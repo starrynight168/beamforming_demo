@@ -117,7 +117,7 @@ class RowDynamicMVBeamformerIQ:
         cos_a = torch.from_numpy(np.cos(selected_angles).astype(np.float32)).to(device)
         sin_a = torch.from_numpy(np.sin(selected_angles).astype(np.float32)).to(device)
         t_starts_t = time_start_tensor(t_starts, n_a, fs, device)
-        max_sample = float(n_s - 2)
+        max_sample = float(n_s - 1)
 
         i_beam_sum = torch.zeros(
             (self.height, self.width), dtype=torch.float32, device=device
@@ -143,7 +143,7 @@ class RowDynamicMVBeamformerIQ:
                 sample_no_t0 = tx_row.unsqueeze(-1) + self.drs[hz]
                 sample_center = sample_no_t0 - t_starts_t[i]
                 sample = sample_center.unsqueeze(-1) + offsets_f
-                valid_mask = ((sample >= 0) & (sample < n_s - 1)).float()
+                valid_mask = ((sample >= 0) & (sample <= max_sample)).float()
                 sample.clamp_(0.0, max_sample)
 
                 i_samples, q_samples = interpolate_channel_samples(

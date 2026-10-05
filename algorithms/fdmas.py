@@ -106,7 +106,7 @@ class FDMASBeamformerIQ:
         """Run the callable operation."""
         n_a = i_data.shape[0]
         n_s = i_data.shape[1]
-        max_sample = float(n_s - 2)
+        max_sample = float(n_s - 1)
 
         i_tensor = torch.from_numpy(i_data.astype(np.float32)).to(device)
         q_tensor = torch.from_numpy(q_data.astype(np.float32)).to(device)
@@ -143,7 +143,7 @@ class FDMASBeamformerIQ:
             for i in range(n_a):
                 tx_samples = tx_z * cos_a[i] + tx_x * sin_a[i]
                 sample = tx_samples.unsqueeze(-1) + drs_b - t_starts_t[i]
-                valid = (sample >= 0) & (sample < n_s - 1)
+                valid = (sample >= 0) & (sample <= max_sample)
                 sample.clamp_(0.0, max_sample)
                 i_angle = i_tensor[i]
                 q_angle = q_tensor[i]

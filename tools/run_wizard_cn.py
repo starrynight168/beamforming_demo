@@ -15,6 +15,10 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from evaluation.constants import CONTROLLED_SCENES
 
 
 def parse_args():
@@ -170,8 +174,8 @@ def validate_algorithm_param(name, value):
         raise ValueError("必须是非负整数。")
     if name == "min_subarray_len" and value < 2:
         raise ValueError("必须是大于等于 2 的整数。")
-    if name == "depth_smooth_rows" and value < 1:
-        raise ValueError("必须是正整数。")
+    if name == "depth_smooth_rows" and (value < 1 or value % 2 == 0):
+        raise ValueError("必须是正奇数。")
     if name == "temporal_win" and (value < 1 or value % 2 != 1):
         raise ValueError("必须是正奇数。")
     if name in {"mv_dl", "gcf_power"} and value < 0:
@@ -390,24 +394,26 @@ def inspect_h5(path):
         if int(hf["num_channels"][()]) != c:
             raise ValueError("num_channels 必须与 IQ 通道维度一致")
         gt = "有" if "all_envdb_norm" in hf else "无"
-        if gt == "有" and hf["all_envdb_norm"].shape != (
-            n,
-            a,
-            hf["z_grid"].size,
-            hf["x_grid"].size,
+        if gt == "有" and hf["all_envdb_norm"].shape not in (
+            (n, 1, hf["z_grid"].size, hf["x_grid"].size),
+            (n, hf["z_grid"].size, hf["x_grid"].size),
         ):
-            raise ValueError("all_envdb_norm 必须与样本、角度和网格维度一致")
+            raise ValueError("all_envdb_norm 必须为 [N,1,H,W] 或 [N,H,W]")
         angles = hf["angles"].shape[0]
         fs = scalar_values["fs"]
         fc = scalar_values["fc"]
         raw_config = hf["config_yaml"][()]
         if isinstance(raw_config, bytes):
             raw_config = raw_config.decode("utf-8", errors="replace")
-        config = yaml.safe_load(raw_config) or {}
+        config = yaml.safe_load(raw_config)
+        if not isinstance(config, dict):
+            raise ValueError("config_yaml 顶层必须是映射")
         samples = config.get("source_samples", [])
         if isinstance(samples, list):
             if len(samples) != n:
                 raise ValueError("config_yaml.source_samples 数量必须与 H5 样本数一致")
+            if not all(isinstance(sample, dict) for sample in samples):
+                raise ValueError("config_yaml.source_samples 必须是对象列表")
             names = [
                 str(sample.get("id", f"sample_{idx}"))
                 for idx, sample in enumerate(samples)
@@ -447,6 +453,14 @@ def inspect_h5(path):
         "valid_time": valid_time,
         "in_vivo": in_vivo,
     }
+
+
+def sample_can_be_evaluated(info, sample_idx):
+    return (
+        info["gt"] == "有"
+        and not info["in_vivo"][sample_idx]
+        and info["names"][sample_idx] in CONTROLLED_SCENES
+    )
 
 
 def choose_h5():
@@ -812,9 +826,11 @@ def main():
         state["in_vivo"] = info["in_vivo"][state["sample_idx"]]
         explain(state["teaching"], "gt")
         state["has_gt"] = has_gt_default
-        state["evaluate"] = has_gt_default and not state["in_vivo"]
+        state["evaluate"] = sample_can_be_evaluated(info, state["sample_idx"])
         if state["in_vivo"]:
             print("活体样本:保留重建与对比图,自动跳过评估指标。")
+        elif has_gt_default and not state["evaluate"]:
+            print("当前样本不在标准评估场景中:保留重建与对比图,自动跳过评估指标。")
         else:
             print(
                 f"GT: {'H5 中存在,将自动加入对比并计算指标' if has_gt_default else 'H5 中不存在,将跳过对比和指标'}",
@@ -864,6 +880,7 @@ def main():
             params,
         )
         config["scenes"][0]["id"] = run_id
+        config["scenes"][0]["allow_evaluation"] = bool(state["evaluate"])
         for algorithm, method_params in state["algorithm_params"].items():
             config.setdefault("algorithm_params", {})[algorithm] = deepcopy(
                 method_params
