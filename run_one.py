@@ -349,9 +349,7 @@ def can_reuse_existing(scene_dir, config, scene, method, args):
         "method_params": algorithm_params(config, method),
         "extra_algorithm_args": args.extra_algorithm_args,
         "cache_signature": result_cache_signature(
-            resolve_path(scene["h5_path"]),
-            method,
-            algorithm_params(config, method),
+            resolve_path(scene["h5_path"]), method, algorithm_params(config, method)
         ),
     }
     actual = {

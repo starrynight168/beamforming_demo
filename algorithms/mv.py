@@ -143,7 +143,7 @@ class RowDynamicMVBeamformerIQ:
                 sample_no_t0 = tx_row.unsqueeze(-1) + self.drs[hz]
                 sample_center = sample_no_t0 - t_starts_t[i]
                 sample = sample_center.unsqueeze(-1) + offsets_f
-                valid_mask = ((sample >= 0) & (sample < n_s - 1)).float()
+                valid_mask = ((sample >= 0) & (sample <= max_sample)).float()
                 sample.clamp_(0.0, max_sample)
 
                 i_samples, q_samples = interpolate_channel_samples(
