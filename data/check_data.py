@@ -696,6 +696,28 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
                                 problems.append(
                                     f"source_samples[{index}].{key} 必须是相对路径",
                                 )
+                        mode = sample.get("phantom_mode")
+                        source = sample.get("phantom_source")
+                        if (
+                            mode in ("contrast_speckle", "resolution_distorsion")
+                            and source in ("simulation", "experiments")
+                        ):
+                            phantom_path = sample.get("phantom_path")
+                            if (
+                                not isinstance(phantom_path, str)
+                                or not phantom_path.strip()
+                            ):
+                                problems.append(
+                                    f"source_samples[{index}].phantom_path 必须是非空字符串"
+                                )
+                            elif not (DATA_DIR / "PICMUS" / phantom_path).is_file():
+                                problems.append(
+                                    f"source_samples[{index}].phantom_path 模体文件不存在: {phantom_path}"
+                                )
+                        elif (mode, source) != ("in_vivo", "in_vivo"):
+                            problems.append(
+                                f"source_samples[{index}] 不支持的模体组合: mode={mode}, source={source}"
+                            )
                         expected_path_roles = {
                             "iq_path": "read_input",
                             "scan_path": "read_input",

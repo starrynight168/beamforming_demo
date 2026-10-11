@@ -1,17 +1,23 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import h5py
 import numpy as np
 import yaml
 
-from data.check_data import decode_compact_sequence, display_width, run_checks, shorten_text
+from data.check_data import (
+    decode_compact_sequence,
+    display_width,
+    run_checks,
+    shorten_text,
+)
 from data.pack_data import (
     compact_sequence_config,
     das_reference_from_iq,
-    pad_and_concat,
     pack_dataset,
+    pad_and_concat,
     process_scene,
     validate_grid,
 )
@@ -163,6 +169,9 @@ class DataPipelineTests(unittest.TestCase):
             data.create_dataset("imag", data=rng.normal(size=(1, 3, 3)))
 
         common = {"scan": "scan.h5", "phantom": ""}
+        (root / "PICMUS").mkdir()
+        with h5py.File(root / "PICMUS" / "phantom.h5", "w"):
+            pass
         return [
             {
                 **common,
@@ -170,6 +179,7 @@ class DataPipelineTests(unittest.TestCase):
                 "name": "simulation_contrast_speckle",
                 "mode": "contrast_speckle",
                 "source": "simulation",
+                "phantom": "phantom.h5",
                 "gt": "gt.h5",
             },
             {
@@ -183,7 +193,9 @@ class DataPipelineTests(unittest.TestCase):
         ]
 
     def test_pack_and_check_both_ground_truth_sources(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "data.check_data.DATA_DIR", Path(directory)
+        ):
             root = Path(directory)
             scenes = self._write_sources(root)
             output = root / "packed.h5"
@@ -264,6 +276,65 @@ class DataPipelineTests(unittest.TestCase):
                 ]
             with self.assertRaisesRegex(ValueError, "不是均匀线阵"):
                 process_scene(scenes[1], root)
+
+    def test_check_phantom_combinations_and_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "data.check_data.DATA_DIR", Path(directory)
+        ):
+            root = Path(directory)
+            output = root / "packed.h5"
+            pack_dataset(
+                self._write_sources(root),
+                output,
+                root,
+                row_block=2,
+                save_gt_images_enabled=False,
+            )
+            with h5py.File(output, "r+") as handle:
+                config = yaml.safe_load(handle["config_yaml"][()])
+                sample = config["source_samples"][0]
+                for source in ("simulation", "experiments"):
+                    for mode in ("contrast_speckle", "resolution_distorsion"):
+                        with self.subTest(mode=mode, source=source):
+                            sample.update(phantom_mode=mode, phantom_source=source)
+                            handle["config_yaml"][()] = yaml.safe_dump(
+                                config, sort_keys=False
+                            )
+                            status, problems = run_checks(handle)
+                            self.assertEqual(status, "通过", problems)
+
+                sample.update(
+                    phantom_mode="contrast_speckle", phantom_source="simulation"
+                )
+                valid_sample = sample.copy()
+                cases = (
+                    ("phantom_mode", "", "不支持的模体组合"),
+                    ("phantom_mode", "in_vivo", "不支持的模体组合"),
+                    ("phantom_mode", "unknown", "不支持的模体组合"),
+                    ("phantom_source", "", "不支持的模体组合"),
+                    ("phantom_source", "in_vivo", "不支持的模体组合"),
+                    ("phantom_path", "", "phantom_path 必须是非空字符串"),
+                    ("phantom_path", None, "phantom_path 必须是非空字符串"),
+                    ("phantom_path", " ", "phantom_path 必须是非空字符串"),
+                    ("phantom_path", "missing.h5", "模体文件不存在"),
+                    ("phantom_path", ".", "模体文件不存在"),
+                    (
+                        "phantom_path",
+                        str(root / "PICMUS" / "phantom.h5"),
+                        "必须是相对路径",
+                    ),
+                )
+                for field, value, message in cases:
+                    with self.subTest(field=field, value=value):
+                        config["source_samples"][0] = {**valid_sample, field: value}
+                        handle["config_yaml"][()] = yaml.safe_dump(
+                            config, sort_keys=False
+                        )
+                        status, problems = run_checks(handle)
+                        self.assertEqual(status, "失败")
+                        self.assertTrue(
+                            any(message in problem for problem in problems), problems
+                        )
 
 
 if __name__ == "__main__":
