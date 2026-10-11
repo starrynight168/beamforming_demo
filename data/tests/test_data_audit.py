@@ -24,6 +24,16 @@ class DataUtilityTests(unittest.TestCase):
 
         np.testing.assert_array_equal(decode_compact_sequence(encoded), values)
         np.testing.assert_array_equal(decode_compact_sequence([1, 3]), [1, 3])
+        for count in ("12", True, 12.0, 0):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                decode_compact_sequence(
+                    {
+                        "encoding": "arithmetic_sequence",
+                        "start": 0,
+                        "step": 1,
+                        "count": count,
+                    }
+                )
 
     def test_short_text_respects_display_width(self) -> None:
         result = shorten_text("数据" * 80, limit=24)
@@ -192,9 +202,28 @@ class DataPipelineTests(unittest.TestCase):
                     config["generation"]["ground_truth"],
                 )
 
-            config["dataset"] = []
-            config["h5_schema"]["units"]["c"] = "cm/s"
             with h5py.File(output, "r+") as handle:
+                for key in (
+                    "source_sampling_frequency_hz",
+                    "packed_sampling_frequency_hz",
+                ):
+                    for invalid_value in ("20000000", True):
+                        with self.subTest(field=key, value=invalid_value):
+                            bad_config = yaml.safe_load(yaml.safe_dump(config))
+                            bad_config["generation"]["input_iq"][key] = invalid_value
+                            handle["config_yaml"][()] = yaml.safe_dump(
+                                bad_config,
+                                sort_keys=False,
+                            )
+                            status, problems = run_checks(handle)
+                            self.assertEqual(status, "失败")
+                            self.assertIn(
+                                "input_iq 的 source/packed sampling frequency 必须是数值",
+                                problems,
+                            )
+
+                config["dataset"] = []
+                config["h5_schema"]["units"]["c"] = "cm/s"
                 handle["config_yaml"][()] = yaml.safe_dump(config, sort_keys=False)
                 status, problems = run_checks(handle)
                 self.assertEqual(status, "失败")

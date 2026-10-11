@@ -223,9 +223,9 @@ def decode_compact_sequence(value) -> np.ndarray:
     if not isinstance(value, dict) or value.get("encoding") != "arithmetic_sequence":
         raise ValueError("必须是数组或 arithmetic_sequence")
     count_raw = value["count"]
-    count = int(count_raw)
-    if float(count_raw) != count or count < 1:
+    if type(count_raw) is not int or count_raw < 1:
         raise ValueError("count 必须是正整数")
+    count = count_raw
     start = np.asarray(value["start"])
     step = np.asarray(value["step"])
     if (
@@ -354,38 +354,36 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
     root_fs = scalar_float(hf, "fs")
     if type(decimation) is not int or decimation < 1:
         problems.append(f"input_iq.decimation_factor 非法: {decimation}")
+    elif type(source_fs) not in (int, float) or type(packed_fs) not in (int, float):
+        problems.append("input_iq 的 source/packed sampling frequency 必须是数值")
     else:
-        try:
-            source_fs_value = float(source_fs)
-            packed_fs_value = float(packed_fs)
-        except (TypeError, ValueError):
-            problems.append("input_iq 的 source/packed sampling frequency 必须是数值")
-        else:
-            if not all(
-                np.isfinite(value) and value > 0
-                for value in (source_fs_value, packed_fs_value)
-            ):
-                problems.append(
-                    "input_iq 的 source/packed sampling frequency 必须是有限正数"
-                )
-            elif not np.isclose(
-                source_fs_value / decimation, packed_fs_value, rtol=1e-5, atol=1.0
-            ):
-                problems.append(
-                    "input_iq source_sampling_frequency_hz/decimation_factor 与 packed fs 不一致"
-                )
-            elif root_fs is None or not np.isclose(
-                packed_fs_value, root_fs, rtol=1e-5, atol=1.0
-            ):
-                problems.append(
-                    "input_iq.packed_sampling_frequency_hz 与根数据集 fs 不一致"
-                )
-            elif type(reference_fs) in (int, float) and not np.isclose(
-                float(reference_fs), source_fs_value, rtol=1e-5, atol=1.0
-            ):
-                problems.append(
-                    "ground_truth.reference_sampling_frequency_hz 应与 input_iq.source_sampling_frequency_hz 一致"
-                )
+        source_fs_value = source_fs
+        packed_fs_value = packed_fs
+        if not all(
+            np.isfinite(value) and value > 0
+            for value in (source_fs_value, packed_fs_value)
+        ):
+            problems.append(
+                "input_iq 的 source/packed sampling frequency 必须是有限正数"
+            )
+        elif not np.isclose(
+            source_fs_value / decimation, packed_fs_value, rtol=1e-5, atol=1.0
+        ):
+            problems.append(
+                "input_iq source_sampling_frequency_hz/decimation_factor 与 packed fs 不一致"
+            )
+        elif root_fs is None or not np.isclose(
+            packed_fs_value, root_fs, rtol=1e-5, atol=1.0
+        ):
+            problems.append(
+                "input_iq.packed_sampling_frequency_hz 与根数据集 fs 不一致"
+            )
+        elif type(reference_fs) in (int, float) and not np.isclose(
+            reference_fs, source_fs_value, rtol=1e-5, atol=1.0
+        ):
+            problems.append(
+                "ground_truth.reference_sampling_frequency_hz 应与 input_iq.source_sampling_frequency_hz 一致"
+            )
     try:
         all_angles = decode_compact_sequence(
             input_iq.get("all_steering_angles_rad", [])
