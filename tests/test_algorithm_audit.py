@@ -248,7 +248,7 @@ class AlgorithmAuditTests(unittest.TestCase):
             rows = [{"status": "ok", "parameter": "dr", "value": 40, "index": 1}]
             with patch("tools.run_ablation_cn.subprocess.run") as run:
                 result = run_ablation_evaluation(
-                    rows, root, root / "input.h5", 0, True, 60, root / "config.yaml"
+                    rows, root, root / "input.h5", 0, True, 60
                 )
             self.assertIsNone(result)
             run.assert_not_called()
@@ -302,8 +302,8 @@ class AlgorithmAuditTests(unittest.TestCase):
                     "source_samples": [
                         {
                             "acquisition_id": "simulation_contrast_speckle",
-                            "phantom_mode": "contrast_speckle",
-                            "phantom_source": "simulation",
+                            "phantom_mode": "in_vitro",
+                            "phantom_source": "in_vitro",
                         }
                     ],
                 }
@@ -327,11 +327,8 @@ class AlgorithmAuditTests(unittest.TestCase):
                     )
 
                 info = inspect_h5(h5_path)
-                config = {"scenes": [{
-                    "id": "custom", "h5_path": str(h5_path), "sample_idx": 0,
-                    "allow_evaluation": True,
-                }]}
-                self.assertTrue(sample_can_be_evaluated(info, 0, config, h5_path))
+                self.assertEqual(info["gt"], "有")
+                self.assertFalse(sample_can_be_evaluated(h5_path, 0))
 
 
 if __name__ == "__main__":

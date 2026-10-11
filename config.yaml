@@ -69,29 +69,23 @@ scenes:
   - id: simulation_contrast_speckle
     h5_path: data/simulation.h5
     sample_idx: 0
-    allow_evaluation: true
 
   - id: simulation_resolution_distorsion
     h5_path: data/simulation.h5
     sample_idx: 1
-    allow_evaluation: true
 
   - id: experiments_contrast_speckle
     h5_path: data/experiments.h5
     sample_idx: 0
-    allow_evaluation: true
 
   - id: experiments_resolution_distorsion
     h5_path: data/experiments.h5
     sample_idx: 1
-    allow_evaluation: true
 
   - id: carotid_cross
     h5_path: data/in_vivo.h5
     sample_idx: 0
-    allow_evaluation: false
 
   - id: carotid_long
     h5_path: data/in_vivo.h5
     sample_idx: 1
-    allow_evaluation: false

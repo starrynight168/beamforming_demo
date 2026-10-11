@@ -170,9 +170,9 @@ python tools/run_ablation_cn.py
 
 ## 评估指标体系说明
 
-根目录 `config.yaml` 的 `scenes` 条目通过 `allow_evaluation: true/false` 控制评估，省略时关闭。运行向导和评估入口按 `h5_path` 与 `sample_idx` 匹配配置，不依赖场景或 H5 样本名称；同一 H5 样本只能配置一次，相对路径以项目根目录为基准。
+所有入口按 H5 的 `phantom_mode`、`phantom_source` 和 `phantom_path` 自动判断 PICMUS 评估资格，不依赖场景或样本名称。对应模体的 ROI、点目标顺序和分辨率参数须与官方定义一致，坐标网格须完整覆盖评估区域。明确的非 PICMUS 类型自动跳过；声明为 PICMUS 但文件或参数缺失时直接报错，不借用默认模体，也不从 GT 猜 ROI 或目标。
 
-`evaluation/evaluate.py --config path/to/config.yaml` 可使用指定配置，默认读取根目录 `config.yaml`。单次运行传递实际配置，消融统一评估使用向导读取的根配置。评估类型默认读取 H5 的 `phantom_mode` 和 `phantom_source`；字段缺失时必须显式指定对应 CLI 参数。支持 `contrast_speckle` / `resolution_distorsion` 和 `simulation` / `experiments`，活体数据不支持模体指标。
+YAML 场景不再配置 `allow_evaluation`；`run_one.py --no_evaluate` 可主动关闭评估，旧开关字段会明确报错。评估入口不读取根目录 YAML。H5 相对模体路径以本项目 `data/PICMUS` 为基准；显式 CLI 参数可补充缺失的类型或模体路径，但类型不得与 H5 元数据冲突，模体文件仍须通过官方定义校验。
 
 本工程内置的评估计算核心（`evaluation/evaluate.py`）在四个 controlled phantom 场景中对齐 PICMUS 挑战赛官方 MATLAB 算法语义：
 - **对比度 (Contrast)**: 基于官方同心环形 ROI 划定，并且方差计算使用样本方差（$N-1$ 自由度），保障与 MATLAB 的 `var()` 结果完全一致；

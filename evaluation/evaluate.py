@@ -14,7 +14,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import yaml
-from scipy.ndimage import convolve, gaussian_filter
+from scipy.ndimage import gaussian_filter
 from scipy.stats import kstest
 
 EPSILON = 1e-9
@@ -41,41 +41,11 @@ PROJECT_ROOT = os.path.abspath(os.path.join(HERE, os.pardir))
 PICMUS_ROOT = os.path.join(PROJECT_ROOT, "data", "PICMUS")
 
 
-def scene_evaluation_enabled(scene):
-    enabled = scene.get("allow_evaluation", False)
-    if not isinstance(enabled, bool):
-        raise ValueError("scene.allow_evaluation 必须是布尔值")
-    return enabled
-
-
-def sample_evaluation_enabled(config, h5_path, sample_idx):
-    if not isinstance(config, dict) or not isinstance(config.get("scenes"), list):
-        raise ValueError("config.scenes 必须是场景字典列表")
-    target_path = Path(resolve(h5_path)).resolve()
-    matches = []
-    for scene in config["scenes"]:
-        if not isinstance(scene, dict):
-            raise ValueError("config.scenes 必须是场景字典列表")
-        path = scene.get("h5_path")
-        index = scene.get("sample_idx")
-        if not isinstance(path, str) or not path.strip():
-            raise ValueError("scene.h5_path 必须是非空路径字符串")
-        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
-            raise ValueError("scene.sample_idx 必须是非负整数")
-        enabled = scene_evaluation_enabled(scene)
-        if Path(resolve(path)).resolve() == target_path and index == sample_idx:
-            matches.append(enabled)
-    if len(matches) > 1:
-        raise ValueError("config.scenes 中同一 H5 路径和样本编号不能重复")
-    return matches[0] if matches else False
-
-
 def parse_args():
     """Parse args."""
     parser = argparse.ArgumentParser(
         description="Evaluate run_one.py comparison output.",
     )
-    parser.add_argument("--config", default=os.path.join(PROJECT_ROOT, "config.yaml"))
     parser.add_argument(
         "--comparison_npy",
         default=os.path.join("results", "comparison.npy"),
@@ -97,7 +67,7 @@ def parse_args():
     parser.add_argument(
         "--phantom_path",
         default="auto",
-        help="Phantom hdf5 for predefined ROI/targets; use 'none' to disable.",
+        help="显式指定对应的 PICMUS 模体文件；默认读取 H5 元数据。",
     )
     parser.add_argument(
         "--phantom_mode",
@@ -108,11 +78,8 @@ def parse_args():
         "--phantom_source",
         choices=["auto", "simulation", "experiments"],
         default="auto",
-        help="Phantom source; auto uses experiments for validation H5 files and simulation otherwise.",
+        help="默认读取 H5 的 phantom_source；显式值须与元数据一致。",
     )
-    parser.add_argument("--auto_roi_radius_mm", type=float, default=2.0)
-    parser.add_argument("--auto_target_count", type=int, default=20)
-    parser.add_argument("--auto_target_min_distance_mm", type=float, default=3.0)
     parser.add_argument("--fwhm_window_mm", type=float, default=1.8)
     return parser.parse_args()
 
@@ -172,23 +139,6 @@ def resolve(path):
     if os.path.isabs(path):
         return path
     return os.path.abspath(os.path.join(PROJECT_ROOT, path))
-
-
-def resolve_existing(relative_path):
-    """Execute resolve existing."""
-    if not relative_path:
-        return "none"
-    if os.path.isabs(relative_path):
-        return relative_path if os.path.exists(relative_path) else "none"
-    candidates = [
-        os.path.join(PICMUS_ROOT, relative_path),
-        os.path.join(PROJECT_ROOT, "data", relative_path),
-        os.path.join(PROJECT_ROOT, relative_path),
-    ]
-    for candidate in candidates:
-        if os.path.exists(candidate):
-            return os.path.abspath(candidate)
-    return "none"
 
 
 def h5_embedded_config(hf):
@@ -336,74 +286,6 @@ def local_ssim(image, reference, data_range=1.0, sigma=1.5):
     return float(np.mean(score))
 
 
-def disk_kernel(radius_mm, dx_mm, dz_mm):
-    """Execute disk kernel."""
-    rx = max(int(np.ceil(radius_mm / abs(dx_mm))), 1)
-    rz = max(int(np.ceil(radius_mm / abs(dz_mm))), 1)
-    yy, xx = np.mgrid[-rz : rz + 1, -rx : rx + 1]
-    kernel = ((xx * dx_mm) ** 2 + (yy * dz_mm) ** 2 <= radius_mm**2).astype(float)
-    return kernel / max(kernel.sum(), 1.0)
-
-
-def auto_dark_rois(gt_db, x_mm, z_mm, radius_mm):
-    """Execute auto dark rois."""
-    gt_env = db_to_envelope(gt_db)
-    kernel = disk_kernel(radius_mm, x_mm[1] - x_mm[0], z_mm[1] - z_mm[0])
-    local_mean = convolve(
-        gt_env,
-        kernel,
-        mode="constant",
-        cval=float(np.nanmax(gt_env)),
-    )
-    x_margin = 0.15 * (x_mm[-1] - x_mm[0])
-    z_margin = 0.15 * (z_mm[-1] - z_mm[0])
-    valid = (
-        (x_mm[None, :] >= x_mm[0] + x_margin)
-        & (x_mm[None, :] <= x_mm[-1] - x_margin)
-        & (z_mm[:, None] >= z_mm[0] + z_margin)
-        & (z_mm[:, None] <= z_mm[-1] - z_margin)
-    )
-    score = np.where(valid, local_mean, np.inf)
-    iz, ix = np.unravel_index(np.argmin(score), score.shape)
-    return [
-        {
-            "x_mm": float(x_mm[ix]),
-            "z_mm": float(z_mm[iz]),
-            "diameter_mm": 2.0 * radius_mm,
-            "source": "auto_gt_dark",
-        },
-    ]
-
-
-def auto_bright_targets(gt_db, x_mm, z_mm, max_targets, min_distance_mm):
-    """Execute auto bright targets."""
-    valid = np.isfinite(gt_db)
-    x_margin = 0.08 * (x_mm[-1] - x_mm[0])
-    z_margin = 0.08 * (z_mm[-1] - z_mm[0])
-    valid &= (
-        (x_mm[None, :] >= x_mm[0] + x_margin)
-        & (x_mm[None, :] <= x_mm[-1] - x_margin)
-        & (z_mm[:, None] >= z_mm[0] + z_margin)
-        & (z_mm[:, None] <= z_mm[-1] - z_margin)
-    )
-    score = np.where(valid, gt_db, -np.inf)
-    flat_order = np.argsort(score.ravel())[::-1]
-    targets = []
-    for flat_idx in flat_order:
-        if len(targets) >= max_targets:
-            break
-        iz, ix = np.unravel_index(flat_idx, score.shape)
-        if not np.isfinite(score[iz, ix]):
-            break
-        x = float(x_mm[ix])
-        z = float(z_mm[iz])
-        too_close = any((x - t["x_mm"]) ** 2 + (z - t["z_mm"]) ** 2 < min_distance_mm**2 for t in targets)
-        if not too_close:
-            targets.append({"x_mm": x, "z_mm": z, "source": "auto_gt_bright"})
-    targets.sort(key=lambda t: (t["z_mm"], t["x_mm"]))
-    return targets
-
-
 def read_phantom(phantom_path):
     """Read phantom."""
     out = {
@@ -413,8 +295,6 @@ def read_phantom(phantom_path):
         "lateral_resolution_mm": None,
         "axial_resolution_mm": None,
     }
-    if not phantom_path or phantom_path == "none":
-        return out
     with h5py.File(phantom_path, "r") as hf:
         base = "US/US_DATASET0000"
         if f"{base}/phantom_occlusionCenterX" in hf:
@@ -469,19 +349,7 @@ def read_phantom(phantom_path):
     return out
 
 
-def infer_source(args, meta):
-    """Execute infer source."""
-    if args.phantom_source != "auto":
-        return args.phantom_source
-    if not meta.get("phantom_source"):
-        raise ValueError("H5 缺少 phantom_source，请显式指定 --phantom_source")
-    return meta["phantom_source"]
-
-
-def default_phantom(mode, source):
-    """Execute default phantom."""
-    if mode == "in_vivo" or source == "in_vivo":
-        return "none"
+def picmus_reference_path(mode, source):
     if mode == "resolution_distorsion":
         prefix = "expe" if source == "experiments" else "simu"
         rel = os.path.join(
@@ -498,16 +366,122 @@ def default_phantom(mode, source):
             "contrast_speckle",
             f"contrast_speckle_{prefix}_phantom.hdf5",
         )
-    return resolve_existing(rel)
+    return Path(PICMUS_ROOT) / rel
 
 
-def infer_mode(args, meta):
-    """Execute infer mode."""
-    if args.phantom_mode != "auto":
-        return args.phantom_mode
-    if not meta.get("phantom_mode"):
-        raise ValueError("H5 缺少 phantom_mode，请显式指定 --phantom_mode")
-    return meta["phantom_mode"]
+def load_picmus_context(
+    h5_path,
+    sample_idx,
+    *,
+    phantom_path="auto",
+    phantom_mode="auto",
+    phantom_source="auto",
+    fwhm_window_mm=1.8,
+):
+    h5_path = resolve(h5_path)
+    meta = read_sample_meta(h5_path, sample_idx)
+    values = []
+    for name, selected in (
+        ("phantom_mode", phantom_mode),
+        ("phantom_source", phantom_source),
+    ):
+        stored = meta[name]
+        if selected != "auto" and stored and selected != stored:
+            raise ValueError(f"{name} 与 H5 元数据不一致: {selected} != {stored}")
+        value = stored if selected == "auto" else selected
+        if not value:
+            raise ValueError(f"H5 缺少 {name}，请显式指定 --{name}")
+        values.append(value)
+    mode, source = values
+    supported_mode = mode in {"contrast_speckle", "resolution_distorsion"}
+    supported_source = source in {"simulation", "experiments"}
+    if not supported_mode and not supported_source:
+        return None
+    if not supported_mode or not supported_source:
+        raise ValueError(f"不支持的 PICMUS 模体组合: mode={mode}, source={source}")
+    if phantom_path == "auto":
+        if not meta["phantom_path"]:
+            raise ValueError("PICMUS 样本缺少 phantom_path，请显式指定 --phantom_path")
+        path = Path(meta["phantom_path"])
+        if not path.is_absolute():
+            path = Path(PICMUS_ROOT) / path
+    else:
+        if not phantom_path or phantom_path == "none":
+            raise ValueError("PICMUS 评估必须提供模体文件")
+        path = Path(resolve(phantom_path))
+    phantom = read_phantom(path)
+    reference = read_phantom(picmus_reference_path(mode, source))
+    if phantom != reference:
+        raise ValueError(
+            "模体定义与对应 PICMUS 官方模体不一致，需保留 ROI 和点目标顺序"
+        )
+    x_mm, z_mm = load_grids(h5_path)
+    z_offset = picmus_distortion_z_offset_mm(h5_path, source)
+    validate_picmus_geometry(
+        phantom, mode, source, x_mm, z_mm, fwhm_window_mm, z_offset
+    )
+    return {
+        "meta": meta,
+        "mode": mode,
+        "source": source,
+        "phantom_path": str(path.resolve()),
+        "phantom": phantom,
+        "x_mm": x_mm,
+        "z_mm": z_mm,
+        "distortion_z_offset_mm": z_offset,
+    }
+
+
+def validate_picmus_geometry(phantom, mode, source, x_mm, z_mm, window_mm, z_offset_mm):
+    lateral = phantom["lateral_resolution_mm"]
+    axial = phantom["axial_resolution_mm"]
+    if any(
+        value is None or not math.isfinite(value) or value <= 0
+        for value in (lateral, axial)
+    ):
+        raise ValueError("PICMUS 模体缺少有限正数的横向或轴向分辨率")
+    if mode == "contrast_speckle":
+        counts = (
+            (SIMULATION_CONTRAST_ROIS, 4)
+            if source == "simulation"
+            else (EXPERIMENT_CONTRAST_ROIS, 3)
+        )
+        if (len(phantom["contrast_rois"]), len(phantom["speckle_rois"])) != counts:
+            raise ValueError("PICMUS 囊肿或散斑 ROI 数量不符合对应协议")
+        regions = []
+        for roi in phantom["contrast_rois"]:
+            radius = roi["diameter_mm"] / 2
+            outer = 1.2 * math.sqrt((radius - lateral) ** 2 + (radius + lateral) ** 2)
+            regions.append((roi, outer, outer))
+        regions.extend(
+            (roi, roi["psf_time_x"] * lateral, roi["psf_time_z"] * axial)
+            for roi in phantom["speckle_rois"]
+        )
+    else:
+        count = (
+            SIMULATION_RESOLUTION_TARGETS
+            if source == "simulation"
+            else EXPERIMENT_RESOLUTION_TARGETS
+        )
+        if len(phantom["resolution_targets"]) != count:
+            raise ValueError("PICMUS 点目标数量不符合对应协议")
+        regions = [
+            (target, window_mm, window_mm) for target in phantom["resolution_targets"]
+        ]
+    for region, half_x, half_z in regions:
+        x, z = region["x_mm"], region["z_mm"]
+        shifted_z = (
+            z + z_offset_mm
+            if mode == "resolution_distorsion" and source == "simulation"
+            else z
+        )
+        if not (
+            x_mm[0] <= x - half_x
+            and x + half_x <= x_mm[-1]
+            and z_mm[0] <= min(z, shifted_z) - half_z
+            and max(z, shifted_z) + half_z <= z_mm[-1]
+        ):
+            raise ValueError("H5 坐标网格未完整覆盖 PICMUS 评估区域")
 
 
 def standard_contrast_score(
@@ -1050,37 +1024,28 @@ def main():
     args = parse_args()
     positive_args = {
         "dr": args.dr,
-        "auto_roi_radius_mm": args.auto_roi_radius_mm,
-        "auto_target_min_distance_mm": args.auto_target_min_distance_mm,
         "fwhm_window_mm": args.fwhm_window_mm,
     }
     invalid = [name for name, value in positive_args.items() if not math.isfinite(value) or value <= 0]
     if invalid:
         raise ValueError(f"参数必须是有限正数: {', '.join(invalid)}")
-    if args.auto_target_count < 1:
-        raise ValueError("auto_target_count 必须大于等于 1")
     comparison_path = resolve(args.comparison_npy)
     h5_path = resolve(args.h5_path)
     out_dir = resolve(args.out_dir)
-    config_path = resolve(args.config)
-    with open(config_path, encoding="utf-8") as file:
-        config = yaml.safe_load(file)
-    if not sample_evaluation_enabled(config, h5_path, args.h5_sample_idx):
-        print(f"Evaluation disabled by {config_path}: {h5_path} sample {args.h5_sample_idx}")
+    context = load_picmus_context(
+        h5_path, args.h5_sample_idx, phantom_path=args.phantom_path,
+        phantom_mode=args.phantom_mode, phantom_source=args.phantom_source,
+        fwhm_window_mm=args.fwhm_window_mm,
+    )
+    if context is None:
+        print("Non-PICMUS sample: skipped phantom metric export.")
         return
-    meta_from_h5 = read_sample_meta(h5_path, args.h5_sample_idx)
+    meta_from_h5 = context["meta"]
     has_gt = bool(meta_from_h5.get("has_gt", False))
-    if "in_vivo" in (meta_from_h5["phantom_mode"], meta_from_h5["phantom_source"]):
-        raise ValueError("活体样本不支持模体评估")
-    mode = infer_mode(args, meta_from_h5)
-    source = infer_source(args, meta_from_h5)
-    if mode not in {"contrast_speckle", "resolution_distorsion"} or source not in {
-        "simulation", "experiments"
-    }:
-        raise ValueError(f"不支持的模体评估类型: mode={mode}, source={source}")
+    mode, source = context["mode"], context["source"]
 
     comparison = np.load(comparison_path).astype(np.float64)
-    x_mm, z_mm = load_grids(h5_path)
+    x_mm, z_mm = context["x_mm"], context["z_mm"]
     if comparison.ndim != IMAGE_STACK_DIMENSIONS or comparison.shape[0] < 1:
         raise ValueError(
             f"comparison 必须是非空 [method,z,x] 三维数组,实际为 {comparison.shape}",
@@ -1094,29 +1059,16 @@ def main():
         raise ValueError(f"comparison 包含 {bad_count} 个 NaN/Inf,拒绝生成无效指标")
     methods = load_method_names(args, comparison_path, comparison.shape[0], has_gt)
 
-    distortion_z_offset_mm = picmus_distortion_z_offset_mm(h5_path, source)
+    distortion_z_offset_mm = context["distortion_z_offset_mm"]
     os.makedirs(out_dir, exist_ok=True)
-    if args.phantom_path == "auto" and meta_from_h5.get("phantom_path"):
-        phantom_path = resolve_existing(meta_from_h5["phantom_path"])
-    else:
-        phantom_path = default_phantom(mode, source) if args.phantom_path == "auto" else resolve(args.phantom_path)
-    phantom = read_phantom(phantom_path)
+    phantom_path = context["phantom_path"]
+    phantom = context["phantom"]
     rois = phantom["contrast_rois"]
     speckle_rois = phantom["speckle_rois"]
     targets = phantom["resolution_targets"] if mode == "resolution_distorsion" else []
     lateral_resolution_mm = phantom.get("lateral_resolution_mm")
     axial_resolution_mm = phantom.get("axial_resolution_mm")
     gt_db = comparison[0] if has_gt else None
-    if not rois and mode == "contrast_speckle" and has_gt:
-        rois = auto_dark_rois(comparison[0], x_mm, z_mm, args.auto_roi_radius_mm)
-    if not targets and mode == "resolution_distorsion" and has_gt:
-        targets = auto_bright_targets(
-            comparison[0],
-            x_mm,
-            z_mm,
-            args.auto_target_count,
-            args.auto_target_min_distance_mm,
-        )
 
     resolution_label_map = None
     distortion_roi_label_map = None
@@ -1349,8 +1301,7 @@ def main():
     )
 
     meta = {
-        "config_path": config_path,
-        "allow_evaluation": True,
+        "evaluation_protocol": "picmus",
         "comparison_npy": comparison_path,
         "h5_path": h5_path,
         "h5_sample_idx": args.h5_sample_idx,

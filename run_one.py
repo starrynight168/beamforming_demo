@@ -21,7 +21,7 @@ from algorithms.common import (
     merge_common_params,
     result_cache_signature,
 )
-from evaluation.evaluate import scene_evaluation_enabled
+from evaluation.evaluate import load_picmus_context
 
 ROOT = Path(__file__).resolve().parent
 
@@ -96,8 +96,8 @@ def scene_ids(config):
         or len(ids) != len(set(ids))
     ):
         raise ValueError("config.scenes 必须包含非空且不重复的 id")
-    for scene in scenes:
-        scene_evaluation_enabled(scene)
+    if any("allow_evaluation" in scene for scene in scenes):
+        raise ValueError("scene.allow_evaluation 已移除，关闭评估请使用 --no_evaluate")
     return ids
 
 
@@ -367,8 +367,6 @@ def run_evaluation(args, config, scene, scene_dir, comparison_path, methods):
     cmd = [
         args.python_exe,
         str(ROOT / "evaluation" / "evaluate.py"),
-        "--config",
-        str(resolve_path(args.config)),
         "--comparison_npy",
         str(comparison_path),
         "--h5_path",
@@ -413,6 +411,10 @@ def main():
     args = parse_args()
     config = load_config(resolve_path(args.config))
     scene = find_scene(config, args.scene)
+    evaluation_context = (
+        load_picmus_context(resolve_path(scene["h5_path"]), scene["sample_idx"])
+        if not args.no_evaluate else None
+    )
     methods = [
         m.strip().lower()
         for m in (args.algorithms or ",".join(config["algorithms"])).split(",")
@@ -519,11 +521,10 @@ def main():
     with open(scene_dir / "run_params.json", "w", encoding="utf-8") as f:
         json.dump(run_params, f, ensure_ascii=False, indent=2)
 
-    evaluation_enabled = scene_evaluation_enabled(scene)
-    if not args.no_evaluate and has_gt and evaluation_enabled:
+    if not args.no_evaluate and has_gt and evaluation_context is not None:
         run_evaluation(args, config, scene, scene_dir, comparison_path, methods)
-    elif not args.no_evaluate and not evaluation_enabled:
-        print("Skip evaluation: disabled in scene configuration.")
+    elif not args.no_evaluate and evaluation_context is None:
+        print("Skip evaluation: non-PICMUS sample.")
     elif not args.no_evaluate:
         print("Skip evaluation: H5 没有 all_envdb_norm ground truth.")
 

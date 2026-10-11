@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from algorithms.common import result_cache_signature
+from evaluation.evaluate import load_picmus_context
 
 try:
     from . import run_wizard_cn as wizard
@@ -618,7 +619,7 @@ def save_ablation_overview(rows, out_dir, algorithm, param_name):
     return path
 
 
-def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt, dr, config_path):
+def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt, dr):
     """Execute run ablation evaluation."""
     if not has_gt:
         return None
@@ -630,6 +631,8 @@ def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt, dr, conf
         return None
     if any(row["parameter"] == "dr" for row in valid_rows):
         return None
+    if load_picmus_context(h5_path, sample_idx) is None:
+        return None
     method_ids = [f"ablation_{row['index']:02d}" for row in valid_rows]
     method_labels = [f"{row['parameter']}={row['value']}" for row in valid_rows]
     metrics_dir = out_dir / "metrics"
@@ -637,8 +640,6 @@ def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt, dr, conf
     evaluate_cmd = [
         sys.executable,
         str(ROOT / "evaluation" / "evaluate.py"),
-        "--config",
-        str(config_path),
         "--comparison_npy",
         str(comparison_path),
         "--h5_path",
@@ -748,7 +749,7 @@ def main():
         state["has_gt"] = info["gt"] == "有"
         state["in_vivo"] = info["in_vivo"][state["sample_idx"]]
         state["can_evaluate"] = wizard.sample_can_be_evaluated(
-            info, state["sample_idx"], state["config"], state["h5_path"]
+            state["h5_path"], state["sample_idx"]
         )
 
     def step_evaluate():
@@ -764,7 +765,7 @@ def main():
         if state["in_vivo"]:
             print("指标: 活体样本自动跳过。")
         elif state["has_gt"] and not state["evaluate"]:
-            print("指标: 配置未启用当前样本的评估,自动跳过。")
+            print("指标: 当前样本不属于 PICMUS 模体,自动跳过。")
         else:
             print(
                 f"指标: {'H5 中存在 GT,将自动计算' if state['has_gt'] else 'H5 中不存在 GT,将跳过'}",
@@ -895,7 +896,6 @@ def main():
             state["sample_idx"],
             state["has_gt"],
             state["dr"],
-            ROOT / "config.yaml",
         )
     individual_dir = collect_ablation_individual_images(
         rows,

@@ -1,5 +1,6 @@
 import csv
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,9 +15,11 @@ import yaml
 
 from evaluation.evaluate import (
     load_method_names,
+    load_picmus_context,
     picmus_distortion_z_offset_mm,
+    picmus_reference_path,
+    read_phantom,
     read_sample_meta,
-    sample_evaluation_enabled,
 )
 from evaluation.evaluate import (
     main as evaluate_main,
@@ -30,80 +33,201 @@ from evaluation.plot_metrics import (
 )
 
 
-def _write_scene_config(root, h5_path):
-    path = root / "config.yaml"
-    path.write_text(yaml.safe_dump({"scenes": [{
-        "id": "custom_scene", "h5_path": str(h5_path), "sample_idx": 0,
-        "allow_evaluation": True,
-    }]}), encoding="utf-8")
+def write_picmus_sample(
+    root, mode="contrast_speckle", source="simulation", has_gt=True
+):
+    path = root / "sample.h5"
+    phantom_path = (
+        str(picmus_reference_path(mode, source))
+        if source in {"simulation", "experiments"}
+        else ""
+    )
+    with h5py.File(path, "w") as handle:
+        handle["all_multi_I"] = np.zeros((1, 1, 1, 1))
+        handle["x_grid"] = np.linspace(-0.025, 0.025, 201)
+        handle["z_grid"] = np.linspace(0.005, 0.055, 201)
+        if has_gt:
+            handle["all_envdb_norm"] = np.zeros((1, 1, 201, 201))
+        handle["config_yaml"] = yaml.safe_dump(
+            {
+                "source_samples": [
+                    {
+                        "id": "renamed_sample",
+                        "phantom_mode": mode,
+                        "phantom_source": source,
+                        "phantom_path": phantom_path,
+                    }
+                ]
+            }
+        )
     return path
 
 
+def update_sample_metadata(path, **changes):
+    with h5py.File(path, "r+") as handle:
+        config = yaml.safe_load(handle["config_yaml"][()])
+        config["source_samples"][0].update(changes)
+        del handle["config_yaml"]
+        handle["config_yaml"] = yaml.safe_dump(config)
+
+
 class EvaluationInputTests(unittest.TestCase):
-    def test_disabled_scene_skips_metric_generation(self):
+    def test_non_picmus_sample_skips_without_reading_comparison(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            path = _write_scene_config(root, root / "sample.h5")
-            config = yaml.safe_load(path.read_text())
-            config["scenes"][0]["allow_evaluation"] = False
-            path.write_text(yaml.safe_dump(config), encoding="utf-8")
-            argv = ["evaluate.py", "--config", str(path),
-                    "--h5_path", str(root / "sample.h5"),
-                    "--comparison_npy", str(root / "comparison.npy"),
-                    "--out_dir", str(root / "metrics")]
+            path = write_picmus_sample(root, mode="in_vivo", source="in_vivo")
+            argv = [
+                "evaluate.py",
+                "--h5_path",
+                str(path),
+                "--comparison_npy",
+                str(root / "missing.npy"),
+                "--out_dir",
+                str(root / "metrics"),
+            ]
             with patch.object(sys, "argv", argv):
                 evaluate_main()
             self.assertFalse((root / "metrics").exists())
 
-    def test_enabled_scene_rejects_unsupported_phantom_metadata(self):
+    def test_metadata_must_define_a_consistent_protocol(self):
+        for mode, source in (
+            ("unknown", "simulation"),
+            ("contrast_speckle", "unknown"),
+            ("", "simulation"),
+            ("contrast_speckle", ""),
+        ):
+            with (
+                self.subTest(mode=mode, source=source),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = write_picmus_sample(Path(directory))
+                update_sample_metadata(path, phantom_mode=mode, phantom_source=source)
+                with self.assertRaisesRegex(ValueError, "不支持|缺少"):
+                    load_picmus_context(path, 0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_picmus_sample(
+                Path(directory), mode="in_vivo", source="in_vivo"
+            )
+            with self.assertRaisesRegex(ValueError, "不一致"):
+                load_picmus_context(
+                    path,
+                    0,
+                    phantom_mode="contrast_speckle",
+                    phantom_source="simulation",
+                )
+
+    def test_all_four_protocols_use_metadata_independent_of_sample_name(self):
+        for mode in ("contrast_speckle", "resolution_distorsion"):
+            for source in ("simulation", "experiments"):
+                with (
+                    self.subTest(mode=mode, source=source),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    path = write_picmus_sample(
+                        Path(directory), mode=mode, source=source
+                    )
+                    context = load_picmus_context(path, 0)
+                    self.assertEqual(
+                        (context["mode"], context["source"]), (mode, source)
+                    )
+                    self.assertEqual(context["meta"]["sample_name"], "renamed_sample")
+                    self.assertTrue(context["meta"]["has_gt"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_picmus_sample(
+                Path(directory), mode="in_vitro", source="in_vitro"
+            )
+            self.assertIsNone(load_picmus_context(path, 0))
+
+    def test_missing_phantom_never_uses_defaults_or_gt_detection(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            h5_path = root / "sample.h5"
-            config_path = _write_scene_config(root, h5_path)
-            for mode, source in (("in_vivo", "in_vivo"), ("unknown", "simulation"),
-                                 ("", "simulation"), ("contrast_speckle", "")):
-                with self.subTest(mode=mode, source=source):
-                    with h5py.File(h5_path, "w") as handle:
-                        handle["all_multi_I"] = np.zeros((1, 1, 1, 1))
-                        handle["config_yaml"] = yaml.safe_dump({
-                            "source_samples": [{"id": "custom", "phantom_mode": mode,
-                                                "phantom_source": source}]
-                        })
-                    argv = ["evaluate.py", "--config", str(config_path),
-                            "--h5_path", str(h5_path)]
-                    if mode == "in_vivo":
-                        argv.extend(["--phantom_mode", "contrast_speckle",
-                                     "--phantom_source", "simulation"])
-                    with patch.object(sys, "argv", argv):
-                        with self.assertRaisesRegex(ValueError, "不支持|缺少"):
-                            evaluate_main()
+            path = write_picmus_sample(root)
+            update_sample_metadata(path, phantom_path="")
+            with self.assertRaisesRegex(ValueError, "缺少 phantom_path"):
+                load_picmus_context(path, 0)
+            update_sample_metadata(path, phantom_path=str(root / "missing.h5"))
+            with self.assertRaises(FileNotFoundError):
+                load_picmus_context(path, 0)
+            with self.assertRaisesRegex(ValueError, "必须提供"):
+                load_picmus_context(path, 0, phantom_path="none")
 
-    def test_sample_policy_uses_path_and_index_instead_of_scene_name(self):
-        h5_path = Path("data/custom.h5").resolve()
-        scene = {"id": "renamed", "h5_path": "data/custom.h5", "sample_idx": 2,
-                 "allow_evaluation": True}
-        config = {"scenes": [scene]}
-        self.assertTrue(sample_evaluation_enabled(config, h5_path, 2))
-        self.assertFalse(sample_evaluation_enabled(config, h5_path, 0))
-        self.assertFalse(sample_evaluation_enabled(config, "data/other.h5", 2))
-        scene["allow_evaluation"] = False
-        self.assertFalse(sample_evaluation_enabled(config, h5_path, 2))
-        del scene["allow_evaluation"]
-        self.assertFalse(sample_evaluation_enabled(config, h5_path, 2))
+    def test_phantom_parameters_and_target_order_must_match_official_definition(self):
+        for mode, dataset, operation in (
+            ("contrast_speckle", "phantom_occlusionDiameter", "change"),
+            ("contrast_speckle", "phantom_lateralResolution", "delete"),
+            ("resolution_distorsion", "phantom_xPts", "reverse"),
+        ):
+            with (
+                self.subTest(dataset=dataset),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                path = write_picmus_sample(root, mode=mode)
+                phantom = root / "modified_phantom.h5"
+                shutil.copyfile(picmus_reference_path(mode, "simulation"), phantom)
+                with h5py.File(phantom, "r+") as handle:
+                    key = "US/US_DATASET0000/" + dataset
+                    if operation == "delete":
+                        del handle[key]
+                    elif operation == "reverse":
+                        handle[key][...] = handle[key][:][::-1]
+                    else:
+                        handle[key][...] = handle[key][:] * 2
+                update_sample_metadata(path, phantom_path=str(phantom))
+                with self.assertRaisesRegex(ValueError, "模体定义"):
+                    load_picmus_context(path, 0)
 
-    def test_sample_policy_rejects_invalid_and_ambiguous_configuration(self):
-        scene = {"id": "custom", "h5_path": "data/custom.h5", "sample_idx": 0,
-                 "allow_evaluation": True}
-        invalid = (("allow_evaluation", "false"), ("sample_idx", True),
-                   ("sample_idx", -1), ("h5_path", None))
-        for name, value in invalid:
-            with self.subTest(name=name, value=value):
-                with self.assertRaisesRegex(ValueError, name):
-                    sample_evaluation_enabled(
-                        {"scenes": [{**scene, name: value}]}, "data/custom.h5", 0
-                    )
-        with self.assertRaisesRegex(ValueError, "不能重复"):
-            sample_evaluation_enabled({"scenes": [scene, scene]}, "data/custom.h5", 0)
+    def test_grid_must_cover_complete_evaluation_regions(self):
+        for mode in ("contrast_speckle", "resolution_distorsion"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                path = write_picmus_sample(Path(directory), mode=mode)
+                with h5py.File(path, "r+") as handle:
+                    handle["x_grid"][...] = np.linspace(-0.002, 0.002, 201)
+                with self.assertRaisesRegex(ValueError, "未完整覆盖"):
+                    load_picmus_context(path, 0)
+
+    def test_distortion_correction_must_keep_targets_inside_grid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_picmus_sample(Path(directory), mode="resolution_distorsion")
+            with h5py.File(path, "r+") as handle:
+                config = yaml.safe_load(handle["config_yaml"][()])
+                config["evaluation"] = {"picmus_distortion_z_offset_mm": 100.0}
+                del handle["config_yaml"]
+                handle["config_yaml"] = yaml.safe_dump(config)
+            with self.assertRaisesRegex(ValueError, "未完整覆盖"):
+                load_picmus_context(path, 0)
+
+    def test_bad_picmus_input_fails_before_reconstruction_or_output_creation(self):
+        from run_one import main as run_main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = write_picmus_sample(root)
+            update_sample_metadata(path, phantom_path="")
+            config = root / "config.yaml"
+            config.write_text(
+                yaml.safe_dump(
+                    {
+                        "scenes": [
+                            {"id": "renamed", "h5_path": str(path), "sample_idx": 0}
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(
+                config=str(config), scene="renamed", no_evaluate=False
+            )
+            with (
+                patch("run_one.parse_args", return_value=args),
+                patch("run_one.subprocess.run") as process,
+            ):
+                with self.assertRaisesRegex(ValueError, "phantom_path"):
+                    run_main()
+            process.assert_not_called()
+            self.assertEqual(
+                sorted(p.name for p in root.iterdir()), ["config.yaml", "sample.h5"]
+            )
 
     def test_method_loader_rejects_non_object_run_params(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -163,52 +287,27 @@ class EvaluationInputTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "config_yaml.evaluation must be a mapping"):
                 picmus_distortion_z_offset_mm(path, "simulation")
 
-    def test_evaluation_and_plotting_smoke(self) -> None:
+    def test_evaluation_and_plotting_smoke(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            h5_path = root / "sample.h5"
+            h5_path = write_picmus_sample(root)
             comparison_path = root / "comparison.npy"
             metrics_dir = root / "metrics"
-            image = np.linspace(-50.0, 0.0, 25).reshape(5, 5)
+            image = np.linspace(-50.0, -5.0, 201 * 201).reshape(201, 201)
             np.save(comparison_path, np.stack((image, image - 1.0)))
-            with h5py.File(h5_path, "w") as handle:
-                handle.create_dataset("all_multi_I", data=np.zeros((1, 1, 1, 1)))
-                handle.create_dataset("all_envdb_norm", data=np.ones((1, 1, 5, 5)))
-                handle.create_dataset("x_grid", data=np.linspace(-0.002, 0.002, 5))
-                handle.create_dataset("z_grid", data=np.linspace(0.02, 0.024, 5))
-                handle.create_dataset(
-                    "config_yaml",
-                    data=(
-                        b"dataset:\n  phantom_mode: contrast_speckle\n"
-                        b"  phantom_source: simulation\nsource_samples:\n"
-                        b"  - id: renamed_contrast_sample\n"
-                        b"    phantom_mode: contrast_speckle\n"
-                        b"    phantom_source: simulation\n"
-                    ),
-                )
-            evaluate_args = SimpleNamespace(
-                config=str(_write_scene_config(root, h5_path)),
-                comparison_npy=str(comparison_path),
-                methods="model",
-                method_labels=None,
-                h5_path=str(h5_path),
-                h5_sample_idx=0,
-                dr=60.0,
-                out_dir=str(metrics_dir),
-                phantom_path="none",
-                phantom_mode="auto",
-                phantom_source="auto",
-                auto_roi_radius_mm=1.0,
-                auto_target_count=4,
-                auto_target_min_distance_mm=1.0,
-                fwhm_window_mm=1.0,
-            )
-            command = [sys.executable, str(Path(__file__).resolve().parents[1] / "evaluate.py")]
-            for name, value in vars(evaluate_args).items():
-                if value is not None:
-                    command.extend([f"--{name}", str(value)])
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve().parents[1] / "evaluate.py"),
+                "--comparison_npy",
+                str(comparison_path),
+                "--h5_path",
+                str(h5_path),
+                "--methods",
+                "model",
+                "--out_dir",
+                str(metrics_dir),
+            ]
             subprocess.run(command, check=True, capture_output=True, text=True)
-
             plot_args = SimpleNamespace(
                 metrics_dir=str(metrics_dir),
                 dr=None,
@@ -218,47 +317,46 @@ class EvaluationInputTests(unittest.TestCase):
             )
             with patch("evaluation.plot_metrics.parse_args", return_value=plot_args):
                 plot_main()
-
-            self.assertTrue((metrics_dir / "summary_metrics.csv").is_file())
-            self.assertTrue((metrics_dir / "evaluation_meta.json").is_file())
-            self.assertTrue((metrics_dir / "auxiliary_metrics.png").is_file())
-            self.assertTrue((metrics_dir / "roi_targets.png").is_file())
-            self.assertTrue((metrics_dir / "cyst_profile.png").is_file())
-            with (metrics_dir / "summary_metrics.csv").open(encoding="utf-8-sig") as file:
+            for name in (
+                "summary_metrics.csv",
+                "evaluation_meta.json",
+                "auxiliary_metrics.png",
+                "roi_targets.png",
+                "cyst_profile.png",
+            ):
+                self.assertTrue((metrics_dir / name).is_file(), name)
+            with (metrics_dir / "summary_metrics.csv").open(
+                encoding="utf-8-sig"
+            ) as file:
                 rows = list(csv.DictReader(file))
             model_row = next(row for row in rows if row["method"] != "GT")
-            self.assertAlmostEqual(float(model_row["PSNR_dB_vs_GT"]), 20 * np.log10(60.0))
+            self.assertAlmostEqual(
+                float(model_row["PSNR_dB_vs_GT"]), 20 * np.log10(60.0)
+            )
             metadata = json.loads((metrics_dir / "evaluation_meta.json").read_text())
-            self.assertEqual(metadata["sample_name"], "renamed_contrast_sample")
-            self.assertEqual(metadata["config_path"], evaluate_args.config)
+            self.assertEqual(metadata["sample_name"], "renamed_sample")
+            self.assertEqual(metadata["evaluation_protocol"], "picmus")
+            self.assertEqual(len(metadata["contrast_rois"]), 9)
 
-    def test_resolution_scene_smoke(self) -> None:
+    def test_resolution_scene_smoke(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            h5_path = root / "sample.h5"
+            h5_path = write_picmus_sample(root, mode="resolution_distorsion")
             comparison_path = root / "comparison.npy"
             metrics_dir = root / "metrics"
-            ground_truth = np.full((5, 5), -40.0)
-            ground_truth[2, 2] = -2.0
-            ground_truth[1, 3] = -5.0
-            np.save(comparison_path, np.stack((ground_truth, ground_truth - 1.0)))
-            with h5py.File(h5_path, "w") as handle:
-                handle.create_dataset("all_multi_I", data=np.zeros((1, 1, 1, 1)))
-                handle.create_dataset("all_envdb_norm", data=np.ones((1, 1, 5, 5)))
-                handle.create_dataset("x_grid", data=np.linspace(0.0, 0.004, 5))
-                handle.create_dataset("z_grid", data=np.linspace(0.02, 0.024, 5))
-                handle.create_dataset(
-                    "config_yaml",
-                    data=(
-                        b"dataset:\n  phantom_mode: resolution_distorsion\n"
-                        b"  phantom_source: simulation\nsource_samples:\n"
-                        b"  - id: renamed_resolution_sample\n"
-                        b"    phantom_mode: resolution_distorsion\n"
-                        b"    phantom_source: simulation\n"
-                    ),
-                )
-            evaluate_args = SimpleNamespace(
-                config=str(_write_scene_config(root, h5_path)),
+            with h5py.File(h5_path, "r") as handle:
+                x = handle["x_grid"][:] * 1000
+                z = handle["z_grid"][:] * 1000
+            phantom = read_phantom(
+                picmus_reference_path("resolution_distorsion", "simulation")
+            )
+            image = np.full((len(z), len(x)), -50.0)
+            for target in phantom["resolution_targets"]:
+                dx = (x[None, :] - target["x_mm"]) / 0.4
+                dz = (z[:, None] - target["z_mm"]) / 0.2
+                image = np.maximum(image, -3.0 - 6.0 * (dx**2 + dz**2))
+            np.save(comparison_path, np.stack((image, image - 1.0)))
+            args = SimpleNamespace(
                 comparison_npy=str(comparison_path),
                 methods="model",
                 method_labels=None,
@@ -266,17 +364,13 @@ class EvaluationInputTests(unittest.TestCase):
                 h5_sample_idx=0,
                 dr=60.0,
                 out_dir=str(metrics_dir),
-                phantom_path="none",
+                phantom_path="auto",
                 phantom_mode="auto",
                 phantom_source="auto",
-                auto_roi_radius_mm=1.0,
-                auto_target_count=2,
-                auto_target_min_distance_mm=1.0,
-                fwhm_window_mm=1.0,
+                fwhm_window_mm=1.8,
             )
-            with patch("evaluation.evaluate.parse_args", return_value=evaluate_args):
+            with patch("evaluation.evaluate.parse_args", return_value=args):
                 evaluate_main()
-
             plot_args = SimpleNamespace(
                 metrics_dir=str(metrics_dir),
                 dr=None,
@@ -286,10 +380,23 @@ class EvaluationInputTests(unittest.TestCase):
             )
             with patch("evaluation.plot_metrics.parse_args", return_value=plot_args):
                 plot_main()
-
-            self.assertTrue((metrics_dir / "resolution_target_metrics.csv").is_file())
-            self.assertTrue((metrics_dir / "resolution_group_metrics.csv").is_file())
-            self.assertTrue((metrics_dir / "point_profile.png").is_file())
+            for name in (
+                "resolution_target_metrics.csv",
+                "resolution_group_metrics.csv",
+                "point_profile.png",
+            ):
+                self.assertTrue((metrics_dir / name).is_file(), name)
+            metadata = json.loads((metrics_dir / "evaluation_meta.json").read_text())
+            self.assertEqual(len(metadata["resolution_targets"]), 20)
+            with (metrics_dir / "resolution_target_metrics.csv").open(
+                encoding="utf-8-sig"
+            ) as file:
+                targets = list(csv.DictReader(file))
+            self.assertEqual(len(targets), 40)
+            # 15 个采样点重采样至 150 点，-6 dB 区间分别跨 13 和 31 个间隔。
+            interval = 3.5 / 149
+            self.assertAlmostEqual(float(targets[0]["FWHM_axial_mm"]), 13 * interval)
+            self.assertAlmostEqual(float(targets[0]["FWHM_lateral_mm"]), 31 * interval)
 
     def test_plot_reader_defaults_for_non_object_run_params(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
