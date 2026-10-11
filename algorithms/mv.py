@@ -12,6 +12,7 @@ from algorithms.common import (
     build_row_dynamic_geometry,
     envelope_to_db,
     interpolate_channel_samples,
+    normalized_mv_weights,
     nonnegative_float,
     prepare_beamforming_input,
     print_physical_summary,
@@ -206,16 +207,7 @@ class RowDynamicMVBeamformerIQ:
                 # ========== 标准 MVDR 求解 ==========
                 ones_subarray = row["ones"]
 
-                try:
-                    v = torch.linalg.solve(
-                        covariance_loaded,
-                        ones_subarray,
-                    )  # [width, subarray_size, 1]
-                except RuntimeError:
-                    v = torch.linalg.pinv(covariance_loaded) @ ones_subarray
-
-                denom = torch.matmul(ones_subarray.mH, v)  # [width, 1, 1]
-                w = v / (denom + 1e-12)  # [width, subarray_size, 1]  归一化 MV 权重
+                w = normalized_mv_weights(covariance_loaded, ones_subarray)
 
                 # ========== 合成输出 ==========
                 t0 = self.temporal_win // 2

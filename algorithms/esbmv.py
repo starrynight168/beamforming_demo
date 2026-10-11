@@ -13,6 +13,7 @@ from algorithms.common import (
     closed_unit_interval_float,
     envelope_to_db,
     interpolate_channel_samples,
+    normalized_mv_weights,
     nonnegative_float,
     nonnegative_int,
     prepare_beamforming_input,
@@ -235,79 +236,19 @@ class RowDynamicMVBeamformerIQ:
                 # ========== 标准 MVDR 求解 ==========
                 ones_subarray = row["ones"]
 
-                try:
-                    v = torch.linalg.solve(
-                        covariance_loaded,
-                        ones_subarray,
-                    )  # [width, subarray_size, 1]
-                except RuntimeError:
-                    v = torch.linalg.pinv(covariance_loaded) @ ones_subarray
-
-                denom = torch.matmul(ones_subarray.mH, v)  # [width, 1, 1]
-                w_mv = v / (denom + 1e-12)  # [width, subarray_size, 1]  归一化 MV 权重
+                w_mv = normalized_mv_weights(covariance_loaded, ones_subarray)
 
                 # ========== ESBMV:将 MV 权重投影到信号子空间 ==========
                 if (
                     subarray_size > MAX_GPU_EIGH_SUBARRAY_SIZE
                     and not args.force_gpu_eigh
                 ):
-                    # 对于矩阵大小超过32的批处理,CUDA的 batch eigh 极慢,fallback 到 CPU 进行求解以提升速度
                     covariance_cpu = covariance_loaded.cpu()
-                    try:
-                        eigvals_cpu, eigvecs_cpu = torch.linalg.eigh(covariance_cpu)
-                    except RuntimeError:
-                        covariance_safe = covariance_cpu + 1e-6 * torch.eye(
-                            subarray_size,
-                            dtype=covariance_cpu.dtype,
-                            device=covariance_cpu.device,
-                        ).unsqueeze(0)
-                        try:
-                            eigvals_cpu, eigvecs_cpu = torch.linalg.eigh(
-                                covariance_safe
-                            )
-                        except RuntimeError:
-                            eigvals_cpu = torch.ones(
-                                (self.width, subarray_size),
-                                dtype=torch.float32,
-                                device=covariance_cpu.device,
-                            )
-                            eigvecs_cpu = (
-                                torch.eye(
-                                    subarray_size,
-                                    dtype=torch.complex64,
-                                    device=covariance_cpu.device,
-                                )
-                                .unsqueeze(0)
-                                .expand(self.width, -1, -1)
-                            )
+                    eigvals_cpu, eigvecs_cpu = torch.linalg.eigh(covariance_cpu)
                     eigvals = eigvals_cpu.to(device)
                     eigvecs = eigvecs_cpu.to(device)
                 else:
-                    try:
-                        eigvals, eigvecs = torch.linalg.eigh(covariance_loaded)
-                    except RuntimeError:
-                        # 如果不收敛(多见于全零或奇异矩阵),加入微小的对角加载保护重新求解
-                        covariance_safe = covariance_loaded + 1e-6 * torch.eye(
-                            subarray_size,
-                            dtype=covariance_loaded.dtype,
-                            device=covariance_loaded.device,
-                        ).unsqueeze(0)
-                        try:
-                            eigvals, eigvecs = torch.linalg.eigh(covariance_safe)
-                        except RuntimeError:
-                            # 极端情况下如果依然失败,则使用默认的单位阵退化处理
-                            eigvals = torch.ones(
-                                (self.width, subarray_size),
-                                dtype=torch.float32,
-                                device=device,
-                            )
-                            eigvecs = (
-                                torch.eye(
-                                    subarray_size, dtype=torch.complex64, device=device
-                                )
-                                .unsqueeze(0)
-                                .expand(self.width, -1, -1)
-                            )
+                    eigvals, eigvecs = torch.linalg.eigh(covariance_loaded)
 
                 eigvals = eigvals.flip(-1).real
                 eigvecs = eigvecs.flip(-1)

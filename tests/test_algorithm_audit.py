@@ -17,6 +17,7 @@ from algorithms.common import (
     aperture_window_1d,
     aperture_window_from_dx,
     interpolate_channel_samples,
+    normalized_mv_weights,
     parse_selected_angles,
     result_cache_signature,
     save_algorithm_result,
@@ -36,6 +37,22 @@ from tools.run_wizard_cn import (
 
 
 class AlgorithmAuditTests(unittest.TestCase):
+    def test_mv_weight_solver_matches_formula_and_handles_singular_covariance(self):
+        covariance = torch.tensor(
+            [[[2.0, 0.0], [0.0, 1.0]]], dtype=torch.complex64
+        )
+        steering = torch.ones((1, 2, 1), dtype=torch.complex64)
+        expected_v = torch.linalg.solve(covariance, steering)
+        expected = expected_v / (steering.mH @ expected_v + 1e-12)
+
+        torch.testing.assert_close(
+            normalized_mv_weights(covariance, steering), expected
+        )
+        singular = torch.zeros_like(covariance)
+        result = normalized_mv_weights(singular, steering)
+        self.assertTrue(torch.isfinite(result).all())
+        torch.testing.assert_close(result, torch.zeros_like(result))
+
     def test_two_channel_aperture_windows_keep_active_channels(self):
         for window in ("tukey", "hann", "hamming", "blackman", "kaiser"):
             with self.subTest(window=window):

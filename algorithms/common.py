@@ -125,7 +125,15 @@ def merge_common_params(config):
     configured = config.get("params", {}) or {}
     if not isinstance(configured, dict):
         raise ValueError("config.params must be a mapping")
+    unsupported = set(configured) - set(COMMON_PARAMS)
+    if unsupported:
+        raise ValueError(
+            f"config.params contains unsupported fields: {sorted(unsupported)}"
+        )
     params = COMMON_PARAMS | configured
+    for name in ("dynamic_aperture", "tgc"):
+        if not isinstance(params[name], bool):
+            raise ValueError(f"config.params.{name} must be a boolean")
     params["select_angles"] = str(params["select_angles"])
     return params
 
@@ -751,6 +759,14 @@ def build_row_dynamic_geometry(
     }
 
 
+def normalized_mv_weights(covariance, steering):
+    try:
+        solved = torch.linalg.solve(covariance, steering)
+    except RuntimeError:
+        solved = torch.linalg.pinv(covariance) @ steering
+    return solved / (steering.mH @ solved + 1e-12)
+
+
 def _lagrange_weight(frac, offset, offsets):
     weight = torch.ones_like(frac)
     for other in offsets:
@@ -962,8 +978,7 @@ def result_cache_signature(h5_path, method_name, parameters=None):
     input_path = Path(h5_path).resolve(strict=True)
     input_stat = input_path.stat()
     sources = {}
-    source_paths = (Path(__file__).with_name(f"{method_name}.py"), Path(__file__))
-    for source_path in source_paths:
+    for source_path in algorithm_source_paths(method_name):
         sources[str(source_path.resolve())] = hashlib.sha256(
             source_path.read_bytes()
         ).hexdigest()
@@ -1000,3 +1015,12 @@ def result_cache_signature(h5_path, method_name, parameters=None):
         "sources": sources,
         "dependencies": dependencies,
     }
+
+
+def algorithm_source_paths(method_name):
+    dependencies = {"cmsaw": ("mv",)}
+    return (
+        Path(__file__).with_name(f"{method_name}.py"),
+        Path(__file__),
+        *(Path(__file__).with_name(f"{name}.py") for name in dependencies.get(method_name, ())),
+    )
