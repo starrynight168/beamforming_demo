@@ -1,10 +1,14 @@
 """Provide Python utilities for esbmv."""
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from algorithms.common import (
     add_common_arguments,
@@ -13,12 +17,12 @@ from algorithms.common import (
     closed_unit_interval_float,
     envelope_to_db,
     interpolate_channel_samples,
-    normalized_mv_weights,
     nonnegative_float,
     nonnegative_int,
+    normalized_mv_weights,
+    positive_odd_int,
     prepare_beamforming_input,
     print_physical_summary,
-    positive_odd_int,
     resolve_project_path,
     run_beamformer,
     save_algorithm_result,
@@ -78,7 +82,6 @@ add_io_arguments(parser)
 args = None
 
 METHOD_NAME = "esbmv"
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -1,10 +1,14 @@
 """Provide Python utilities for cmsaw."""
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from algorithms.common import (
     add_common_arguments,
@@ -14,9 +18,9 @@ from algorithms.common import (
     envelope_to_db,
     interpolate_multi_angle_channel_samples,
     nonnegative_float,
+    positive_odd_int,
     prepare_beamforming_input,
     print_physical_summary,
-    positive_odd_int,
     resolve_project_path,
     run_beamformer,
     save_algorithm_result,
@@ -84,7 +88,6 @@ args = None
 
 METHOD_NAME = "cmsaw"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def validate_cmsaw_params(

@@ -111,7 +111,10 @@ pip install -r requirements.txt
 ```bash
    python -m algorithms.das --h5_path data/simulation.h5 --h5_sample_idx 0 --output_dir results/simulation_contrast_speckle
 ```
+
 此操作将在 `results/simulation_contrast_speckle/das/` 下生成重建的矩阵 `das.npy` 和 B-Mode 图像 `das.png`。
+
+也可在 `algorithms/` 目录直接运行 `python das.py`；其他算法和模板支持相同的启动方式。H5 相对路径以项目根目录为基准，输出相对路径以当前工作目录为基准。
 
 ### 2. 单个场景的一键批量比对与评估 (`run_one.py`)
 使用 `run_one.py` 可以自动调度 `config.yaml` 中配置的所有成像方法进行同一场景的波束合成，并在场景根目录下生成包含 Ground Truth 的拼接对比图 `comparison.png`，同时导出高分辨率独立的个人 B-Mode 图像目录 `individual_images/`：

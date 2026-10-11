@@ -1,5 +1,7 @@
 import argparse
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,6 +39,36 @@ from tools.run_wizard_cn import (
 
 
 class AlgorithmAuditTests(unittest.TestCase):
+    def test_algorithm_entrypoints_support_direct_and_module_execution(self):
+        project_root = Path(__file__).resolve().parents[1]
+        for name in (
+            "das", "mv", "esbmv", "gcfmv", "fdmas", "cmsaw", "template_algorithm"
+        ):
+            commands = (
+                ([sys.executable, f"{name}.py", "--help"], project_root / "algorithms"),
+                ([sys.executable, "-m", f"algorithms.{name}", "--help"], project_root),
+            )
+            for command, cwd in commands:
+                with self.subTest(algorithm=name, command=command):
+                    result = subprocess.run(
+                        command, cwd=cwd, capture_output=True, text=True
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("--h5_path", result.stdout)
+
+    def test_cache_signature_resolves_h5_relative_to_project_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            h5_path = root / "input.h5"
+            h5_path.write_bytes(b"input")
+            with patch("algorithms.common.PROJECT_ROOT", root), patch(
+                "algorithms.common.algorithm_source_paths", return_value=()
+            ):
+                self.assertEqual(
+                    result_cache_signature("input.h5", "das"),
+                    result_cache_signature(h5_path, "das"),
+                )
+
     def test_mv_weight_solver_matches_formula_and_handles_singular_covariance(self):
         covariance = torch.tensor(
             [[[2.0, 0.0], [0.0, 1.0]]], dtype=torch.complex64

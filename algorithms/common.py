@@ -975,7 +975,7 @@ def write_params(path, params):
 
 
 def result_cache_signature(h5_path, method_name, parameters=None):
-    input_path = Path(h5_path).resolve(strict=True)
+    input_path = Path(resolve_project_path(h5_path, PROJECT_ROOT)).resolve(strict=True)
     input_stat = input_path.stat()
     sources = {}
     for source_path in algorithm_source_paths(method_name):

@@ -20,7 +20,11 @@ contract.
 """
 
 import argparse
+import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from algorithms.common import (
     add_common_arguments,
@@ -101,7 +105,7 @@ def main():
     """Run the command-line workflow."""
     args = parse_args()
     input_data = prepare_beamforming_input(
-        resolve_project_path(args.h5_path, Path(__file__).resolve().parents[1]),
+        resolve_project_path(args.h5_path, PROJECT_ROOT),
         args.h5_sample_idx,
         args.select_angles,
     )

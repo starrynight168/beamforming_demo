@@ -1,10 +1,14 @@
 """Provide Python utilities for das."""
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from algorithms.common import (
     add_common_arguments,
@@ -43,7 +47,6 @@ parser.add_argument(
 args = None
 
 METHOD_NAME = "das"
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
