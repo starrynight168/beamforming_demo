@@ -9,17 +9,13 @@ import csv
 import json
 import math
 import os
+from pathlib import Path
 
 import h5py
 import numpy as np
 import yaml
 from scipy.ndimage import convolve, gaussian_filter
 from scipy.stats import kstest
-
-try:
-    from .constants import CONTROLLED_SCENES
-except ImportError:
-    from constants import CONTROLLED_SCENES
 
 EPSILON = 1e-9
 PASS_THRESHOLD = 0.5
@@ -45,11 +41,41 @@ PROJECT_ROOT = os.path.abspath(os.path.join(HERE, os.pardir))
 PICMUS_ROOT = os.path.join(PROJECT_ROOT, "data", "PICMUS")
 
 
+def scene_evaluation_enabled(scene):
+    enabled = scene.get("allow_evaluation", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("scene.allow_evaluation 必须是布尔值")
+    return enabled
+
+
+def sample_evaluation_enabled(config, h5_path, sample_idx):
+    if not isinstance(config, dict) or not isinstance(config.get("scenes"), list):
+        raise ValueError("config.scenes 必须是场景字典列表")
+    target_path = Path(resolve(h5_path)).resolve()
+    matches = []
+    for scene in config["scenes"]:
+        if not isinstance(scene, dict):
+            raise ValueError("config.scenes 必须是场景字典列表")
+        path = scene.get("h5_path")
+        index = scene.get("sample_idx")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("scene.h5_path 必须是非空路径字符串")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise ValueError("scene.sample_idx 必须是非负整数")
+        enabled = scene_evaluation_enabled(scene)
+        if Path(resolve(path)).resolve() == target_path and index == sample_idx:
+            matches.append(enabled)
+    if len(matches) > 1:
+        raise ValueError("config.scenes 中同一 H5 路径和样本编号不能重复")
+    return matches[0] if matches else False
+
+
 def parse_args():
     """Parse args."""
     parser = argparse.ArgumentParser(
         description="Evaluate run_one.py comparison output.",
     )
+    parser.add_argument("--config", default=os.path.join(PROJECT_ROOT, "config.yaml"))
     parser.add_argument(
         "--comparison_npy",
         default=os.path.join("results", "comparison.npy"),
@@ -443,18 +469,13 @@ def read_phantom(phantom_path):
     return out
 
 
-def infer_source(args, meta=None):
+def infer_source(args, meta):
     """Execute infer source."""
     if args.phantom_source != "auto":
         return args.phantom_source
-    if meta is None:
-        meta = read_sample_meta(resolve(args.h5_path), args.h5_sample_idx)
-    if meta.get("phantom_source"):
-        return meta["phantom_source"]
-    h5_name = os.path.basename(resolve(args.h5_path)).lower()
-    if "val" in h5_name or "valid" in h5_name:
-        return "experiments"
-    return "simulation"
+    if not meta.get("phantom_source"):
+        raise ValueError("H5 缺少 phantom_source，请显式指定 --phantom_source")
+    return meta["phantom_source"]
 
 
 def default_phantom(mode, source):
@@ -480,19 +501,13 @@ def default_phantom(mode, source):
     return resolve_existing(rel)
 
 
-def infer_mode(args, meta=None):
+def infer_mode(args, meta):
     """Execute infer mode."""
     if args.phantom_mode != "auto":
         return args.phantom_mode
-    if meta is None:
-        meta = read_sample_meta(resolve(args.h5_path), args.h5_sample_idx)
-    if meta.get("phantom_mode"):
-        return meta["phantom_mode"]
-    if "resolution" in os.path.basename(args.comparison_npy).lower():
-        return "resolution_distorsion"
-    if args.h5_sample_idx == 1:
-        return "resolution_distorsion"
-    return "contrast_speckle"
+    if not meta.get("phantom_mode"):
+        raise ValueError("H5 缺少 phantom_mode，请显式指定 --phantom_mode")
+    return meta["phantom_mode"]
 
 
 def standard_contrast_score(
@@ -1047,12 +1062,22 @@ def main():
     comparison_path = resolve(args.comparison_npy)
     h5_path = resolve(args.h5_path)
     out_dir = resolve(args.out_dir)
+    config_path = resolve(args.config)
+    with open(config_path, encoding="utf-8") as file:
+        config = yaml.safe_load(file)
+    if not sample_evaluation_enabled(config, h5_path, args.h5_sample_idx):
+        print(f"Evaluation disabled by {config_path}: {h5_path} sample {args.h5_sample_idx}")
+        return
     meta_from_h5 = read_sample_meta(h5_path, args.h5_sample_idx)
     has_gt = bool(meta_from_h5.get("has_gt", False))
-    sample_name = str(meta_from_h5.get("sample_name", ""))
-    if sample_name not in CONTROLLED_SCENES:
-        print(f"Non-controlled scene {sample_name or '<unknown>'}: skipped full phantom metric export.")
-        return
+    if "in_vivo" in (meta_from_h5["phantom_mode"], meta_from_h5["phantom_source"]):
+        raise ValueError("活体样本不支持模体评估")
+    mode = infer_mode(args, meta_from_h5)
+    source = infer_source(args, meta_from_h5)
+    if mode not in {"contrast_speckle", "resolution_distorsion"} or source not in {
+        "simulation", "experiments"
+    }:
+        raise ValueError(f"不支持的模体评估类型: mode={mode}, source={source}")
 
     comparison = np.load(comparison_path).astype(np.float64)
     x_mm, z_mm = load_grids(h5_path)
@@ -1069,8 +1094,6 @@ def main():
         raise ValueError(f"comparison 包含 {bad_count} 个 NaN/Inf,拒绝生成无效指标")
     methods = load_method_names(args, comparison_path, comparison.shape[0], has_gt)
 
-    mode = infer_mode(args, meta_from_h5)
-    source = infer_source(args, meta_from_h5)
     distortion_z_offset_mm = picmus_distortion_z_offset_mm(h5_path, source)
     os.makedirs(out_dir, exist_ok=True)
     if args.phantom_path == "auto" and meta_from_h5.get("phantom_path"):
@@ -1326,6 +1349,8 @@ def main():
     )
 
     meta = {
+        "config_path": config_path,
+        "allow_evaluation": True,
         "comparison_npy": comparison_path,
         "h5_path": h5_path,
         "h5_sample_idx": args.h5_sample_idx,

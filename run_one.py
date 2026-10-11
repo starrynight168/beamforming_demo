@@ -21,7 +21,7 @@ from algorithms.common import (
     merge_common_params,
     result_cache_signature,
 )
-from evaluation.constants import CONTROLLED_SCENES
+from evaluation.evaluate import scene_evaluation_enabled
 
 ROOT = Path(__file__).resolve().parent
 
@@ -96,6 +96,8 @@ def scene_ids(config):
         or len(ids) != len(set(ids))
     ):
         raise ValueError("config.scenes 必须包含非空且不重复的 id")
+    for scene in scenes:
+        scene_evaluation_enabled(scene)
     return ids
 
 
@@ -221,13 +223,6 @@ def scene_has_gt(scene):
             "all_envdb_norm" in hf and 0 <= sample_idx < hf["all_envdb_norm"].shape[0]
         )
     return available
-
-
-def scene_is_non_controlled(scene):
-    """Return whether a scene is outside the four controlled metric scenes."""
-    return not scene.get("allow_evaluation", False) and str(
-        scene.get("id", "")
-    ) not in CONTROLLED_SCENES
 
 
 def gt_norm_to_db(gt, dr):
@@ -372,6 +367,8 @@ def run_evaluation(args, config, scene, scene_dir, comparison_path, methods):
     cmd = [
         args.python_exe,
         str(ROOT / "evaluation" / "evaluate.py"),
+        "--config",
+        str(resolve_path(args.config)),
         "--comparison_npy",
         str(comparison_path),
         "--h5_path",
@@ -522,11 +519,11 @@ def main():
     with open(scene_dir / "run_params.json", "w", encoding="utf-8") as f:
         json.dump(run_params, f, ensure_ascii=False, indent=2)
 
-    non_controlled = scene_is_non_controlled(scene)
-    if not args.no_evaluate and has_gt and not non_controlled:
+    evaluation_enabled = scene_evaluation_enabled(scene)
+    if not args.no_evaluate and has_gt and evaluation_enabled:
         run_evaluation(args, config, scene, scene_dir, comparison_path, methods)
-    elif not args.no_evaluate and non_controlled:
-        print("Skip evaluation: non-controlled scenes only generate images.")
+    elif not args.no_evaluate and not evaluation_enabled:
+        print("Skip evaluation: disabled in scene configuration.")
     elif not args.no_evaluate:
         print("Skip evaluation: H5 没有 all_envdb_norm ground truth.")
 

@@ -170,6 +170,10 @@ python tools/run_ablation_cn.py
 
 ## 评估指标体系说明
 
+根目录 `config.yaml` 的 `scenes` 条目通过 `allow_evaluation: true/false` 控制评估，省略时关闭。运行向导和评估入口按 `h5_path` 与 `sample_idx` 匹配配置，不依赖场景或 H5 样本名称；同一 H5 样本只能配置一次，相对路径以项目根目录为基准。
+
+`evaluation/evaluate.py --config path/to/config.yaml` 可使用指定配置，默认读取根目录 `config.yaml`。单次运行传递实际配置，消融统一评估使用向导读取的根配置。评估类型默认读取 H5 的 `phantom_mode` 和 `phantom_source`；字段缺失时必须显式指定对应 CLI 参数。支持 `contrast_speckle` / `resolution_distorsion` 和 `simulation` / `experiments`，活体数据不支持模体指标。
+
 本工程内置的评估计算核心（`evaluation/evaluate.py`）在四个 controlled phantom 场景中对齐 PICMUS 挑战赛官方 MATLAB 算法语义：
 - **对比度 (Contrast)**: 基于官方同心环形 ROI 划定，并且方差计算使用样本方差（$N-1$ 自由度），保障与 MATLAB 的 `var()` 结果完全一致；
 - **散斑拟合度 (Speckle Quality)**: 提取散斑区进行 5 倍下采样并执行 Kolmogorov-Smirnov 检验以拟合 Rayleigh 分布，评估 KS 统计量 $D$ 和 $p$ 值；

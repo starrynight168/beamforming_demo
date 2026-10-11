@@ -18,7 +18,7 @@ DATA_DIR = ROOT / "data"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from evaluation.constants import CONTROLLED_SCENES
+from evaluation.evaluate import sample_evaluation_enabled
 
 
 def parse_args():
@@ -455,11 +455,11 @@ def inspect_h5(path):
     }
 
 
-def sample_can_be_evaluated(info, sample_idx):
+def sample_can_be_evaluated(info, sample_idx, config, h5_path):
     return (
         info["gt"] == "有"
         and not info["in_vivo"][sample_idx]
-        and info["names"][sample_idx] in CONTROLLED_SCENES
+        and sample_evaluation_enabled(config, h5_path, sample_idx)
     )
 
 
@@ -557,6 +557,7 @@ def build_config(base_config, h5_path, sample_idx, algorithms, params):
         "id": scene_id,
         "h5_path": h5_rel,
         "sample_idx": int(sample_idx),
+        "allow_evaluation": sample_evaluation_enabled(base_config, h5_path, sample_idx),
     }
     config = {
         "algorithms": algorithms,
@@ -827,11 +828,13 @@ def main():
         sample_name = info["names"][state["sample_idx"]]
         explain(state["teaching"], "gt")
         state["has_gt"] = has_gt_default
-        state["evaluate"] = sample_can_be_evaluated(info, state["sample_idx"])
+        state["evaluate"] = sample_can_be_evaluated(
+            info, state["sample_idx"], state["base_config"], state["h5_path"]
+        )
         if state["in_vivo"]:
             print("活体样本:保留重建与对比图,自动跳过评估指标。")
         elif has_gt_default and not state["evaluate"]:
-            print(f"样本 {sample_name} 不在受控指标场景中:保留 GT 对比,跳过指标。")
+            print(f"配置未启用样本 {sample_name} 的评估:保留 GT 对比,跳过指标。")
         else:
             print(
                 f"GT: {'H5 中存在,将自动加入对比并计算指标' if has_gt_default else 'H5 中不存在,将跳过对比和指标'}",
