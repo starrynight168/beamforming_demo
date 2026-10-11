@@ -42,6 +42,7 @@ Thumbs.db
 PICMUS/
 data/*.h5
 data/logs/
+/data/gt_preview/
 results/
 .ipynb_checkpoints/
 *.log
