@@ -13,6 +13,8 @@ import h5py
 import numpy as np
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from evaluation.evaluate import (
     load_method_names,
     load_picmus_context,
@@ -72,6 +74,20 @@ def update_sample_metadata(path, **changes):
 
 
 class EvaluationInputTests(unittest.TestCase):
+    def test_method_loader_uses_root_algorithm_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metadata = {
+                "algorithms": ["das", "mv"],
+                "algorithm_labels": {"das": "DAS", "mv": "MV"},
+            }
+            (root / "run_params.json").write_text(json.dumps(metadata), encoding="utf-8")
+            args = SimpleNamespace(methods=None, method_labels=None)
+            self.assertEqual(
+                load_method_names(args, str(root / "comparison.npy"), 3, True),
+                ["GT", "DAS", "MV"],
+            )
+
     def test_non_picmus_sample_skips_without_reading_comparison(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -216,7 +232,8 @@ class EvaluationInputTests(unittest.TestCase):
                 encoding="utf-8",
             )
             args = SimpleNamespace(
-                config=str(config), scene="renamed", no_evaluate=False
+                config=str(config), scene="renamed", no_evaluate=False,
+                extra_algorithm_args=[],
             )
             with (
                 patch("run_one.parse_args", return_value=args),

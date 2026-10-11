@@ -17,7 +17,9 @@ import numpy as np
 import yaml
 
 from algorithms.common import (
+    add_common_arguments,
     add_scale_bar,
+    ground_truth_db,
     merge_common_params,
     result_cache_signature,
 )
@@ -188,7 +190,7 @@ def load_grid_and_gt(h5_path, sample_idx, has_gt):
         z_grid = hf["z_grid"][:].astype(np.float32)
         gt = None
         if has_gt and "all_envdb_norm" in hf:
-            gt = hf["all_envdb_norm"][sample_idx].astype(np.float32)
+            gt = ground_truth_db(hf, sample_idx)
     for name, grid in (("x_grid", x_grid), ("z_grid", z_grid)):
         if (
             grid.ndim != 1
@@ -223,11 +225,6 @@ def scene_has_gt(scene):
             "all_envdb_norm" in hf and 0 <= sample_idx < hf["all_envdb_norm"].shape[0]
         )
     return available
-
-
-def gt_norm_to_db(gt, dr):
-    """Execute gt norm to db."""
-    return np.clip(gt, 0.0, 1.0) * dr - dr
 
 
 def save_comparison(images, titles, extent_mm, output_path, dr, _cleanup_pages=True):
@@ -344,7 +341,8 @@ def can_reuse_existing(scene_dir, config, scene, method, args):
         "method_params": algorithm_params(config, method),
         "extra_algorithm_args": args.extra_algorithm_args,
         "cache_signature": result_cache_signature(
-            resolve_path(scene["h5_path"]), method, algorithm_params(config, method)
+            resolve_path(scene["h5_path"]), method, algorithm_params(config, method),
+            extra_args=args.extra_algorithm_args,
         ),
     }
     actual = {
@@ -411,6 +409,12 @@ def main():
     args = parse_args()
     config = load_config(resolve_path(args.config))
     scene = find_scene(config, args.scene)
+    common_parser = argparse.ArgumentParser(add_help=False)
+    add_common_arguments(common_parser, merge_common_params(config))
+    common_params, args.extra_algorithm_args = common_parser.parse_known_args(
+        args.extra_algorithm_args
+    )
+    config["params"] = vars(common_params)
     evaluation_context = (
         load_picmus_context(resolve_path(scene["h5_path"]), scene["sample_idx"])
         if not args.no_evaluate else None
@@ -464,7 +468,7 @@ def main():
     titles = []
     image_names = []
     if has_gt and gt is not None:
-        images.append(gt_norm_to_db(gt, dr))
+        images.append(gt)
         titles.append("Ground Truth")
         image_names.append("ground_truth")
     for method in methods:
@@ -512,6 +516,7 @@ def main():
                 resolve_path(scene["h5_path"]),
                 method,
                 algorithm_params(config, method),
+                extra_args=args.extra_algorithm_args,
             )
             for method in methods
         },

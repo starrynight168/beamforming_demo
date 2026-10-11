@@ -527,8 +527,6 @@ def flatten_ablation_result(scene_dir, algorithm):
 def preserve_ground_truth(scene_dir, out_dir):
     """Keep one GT panel before per-value comparison files are flattened away."""
     target = out_dir / "ground_truth.npy"
-    if target.exists():
-        return target
     comparison_path = scene_dir / "comparison.npy"
     if not comparison_path.exists():
         return None

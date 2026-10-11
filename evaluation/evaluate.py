@@ -101,26 +101,20 @@ def load_method_names(args, comparison_path, n_panels, has_gt):
             params = json.load(f)
         if not isinstance(params, dict):
             raise ValueError(f"run_params.json 顶层必须是对象: {params_path}")
-        model_map = params.get("models")
-        if not isinstance(model_map, dict) or not model_map:
-            raise ValueError(f"run_params.json 缺少当前格式的 models 字典: {params_path}")
-        model_names = list(model_map)
-        evaluation = params.get("evaluation")
-        if evaluation is None:
-            evaluation = {}
-        if not isinstance(evaluation, dict):
-            raise ValueError(f"run_params.json evaluation 必须是对象: {params_path}")
-        skip_baselines = evaluation.get("skip_baselines", False)
-        if not isinstance(skip_baselines, bool):
-            raise ValueError(f"run_params.json evaluation.skip_baselines 必须是布尔值: {params_path}")
-        baseline_names = [] if skip_baselines else ["DAS", "MV"]
-        names = [*baseline_names, *model_names]
-        n_methods = n_panels - 1 if has_gt else n_panels
-        if len(names) != n_methods:
-            raise ValueError(
-                f"run_params.json 中的模型/基线数量与 comparison 不一致: "
-                f"expected={n_methods}, actual={len(names)}"
-            )
+        algorithms = params.get("algorithms")
+        if algorithms is not None:
+            if not isinstance(algorithms, list) or not all(
+                isinstance(name, str) and name for name in algorithms
+            ):
+                raise ValueError("run_params.json algorithms 必须是算法名列表")
+            labels = params.get("algorithm_labels")
+            if not isinstance(labels, dict):
+                raise ValueError("run_params.json algorithm_labels 必须是标签字典")
+            names = [labels[name] for name in algorithms]
+            if not all(isinstance(name, str) and name for name in names):
+                raise ValueError("run_params.json 算法标签必须是非空字符串")
+        else:
+            names = load_model_names(params, n_panels, has_gt, params_path)
     if has_gt:
         names = ["GT", *names]
     if len(names) != n_panels:
@@ -129,6 +123,30 @@ def load_method_names(args, comparison_path, n_panels, has_gt):
         )
     if len(names) != len(set(names)):
         raise ValueError(f"Method labels must be unique: {names}")
+    return names
+
+
+def load_model_names(params, n_panels, has_gt, params_path):
+    model_map = params.get("models")
+    if not isinstance(model_map, dict) or not model_map:
+        raise ValueError(f"run_params.json 缺少当前格式的 models 字典: {params_path}")
+    model_names = list(model_map)
+    evaluation = params.get("evaluation")
+    if evaluation is None:
+        evaluation = {}
+    if not isinstance(evaluation, dict):
+        raise ValueError(f"run_params.json evaluation 必须是对象: {params_path}")
+    skip_baselines = evaluation.get("skip_baselines", False)
+    if not isinstance(skip_baselines, bool):
+        raise ValueError(f"run_params.json evaluation.skip_baselines 必须是布尔值: {params_path}")
+    baseline_names = [] if skip_baselines else ["DAS", "MV"]
+    names = [*baseline_names, *model_names]
+    n_methods = n_panels - 1 if has_gt else n_panels
+    if len(names) != n_methods:
+        raise ValueError(
+            f"run_params.json 中的模型/基线数量与 comparison 不一致: "
+            f"expected={n_methods}, actual={len(names)}"
+        )
     return names
 
 

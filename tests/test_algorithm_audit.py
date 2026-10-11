@@ -1,4 +1,6 @@
 import argparse
+import contextlib
+import io
 import json
 import subprocess
 import sys
@@ -13,6 +15,8 @@ import numpy as np
 import torch
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from algorithms import das
 from algorithms.cmsaw import validate_cmsaw_params
 from algorithms.common import (
@@ -25,9 +29,12 @@ from algorithms.common import (
     save_algorithm_result,
 )
 from run_one import can_reuse_existing
+from run_one import main as run_scene
+from tools.ablate_sound_speed import dense_grid_sweep, multi_section_search
 from tools.run_ablation_cn import (
     can_reuse_flat_result,
     numeric_range_values,
+    preserve_ground_truth,
     run_ablation_evaluation,
     validate_values,
 )
@@ -39,6 +46,100 @@ from tools.run_wizard_cn import (
 
 
 class AlgorithmAuditTests(unittest.TestCase):
+    def test_cache_signature_tracks_cli_file_dependencies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            h5_path = root / "input.h5"
+            checkpoint = root / "model.pth"
+            config = root / "model.yaml"
+            h5_path.write_bytes(b"input")
+            checkpoint.write_bytes(b"weights")
+            config.write_bytes(b"config")
+            extra = ["--checkpoint", str(checkpoint), f"--eval-config={config}", "--no_fbss"]
+            first = result_cache_signature(h5_path, "das", extra_args=extra)
+            self.assertEqual(len(first["dependencies"]), 2)
+            checkpoint.write_bytes(b"new weights")
+            second = result_cache_signature(h5_path, "das", extra_args=extra)
+            self.assertNotEqual(first["dependencies"], second["dependencies"])
+
+    def test_ablation_refreshes_gt_after_reconstruction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scene = root / "scene"
+            scene.mkdir()
+            gt = np.array([[0.0, -30.0], [-60.0, -45.0]], dtype=np.float32)
+            np.save(root / "ground_truth.npy", np.zeros_like(gt))
+            np.save(scene / "comparison.npy", np.stack([gt, gt - 1]))
+            target = preserve_ground_truth(scene, root)
+            np.testing.assert_array_equal(np.load(target), gt)
+
+    def test_sound_speed_search_requires_a_shrinking_bracket(self):
+        cache = {}
+
+        def evaluate(speed):
+            result = {
+                "c": float(speed), "ssim": 1 - ((speed - 1300) / 300) ** 2,
+                "psnr": 20, "mae_db": 1, "elapsed_sec": 0,
+            }
+            cache[float(speed)] = result
+            return result
+
+        evaluator = SimpleNamespace(cache=cache, evaluate_c=evaluate)
+        with self.assertRaisesRegex(ValueError, "at least 3"):
+            multi_section_search(evaluator, 1000, 1600, num_sections=2)
+        with contextlib.redirect_stdout(io.StringIO()):
+            for sections in (3, 4):
+                cache.clear()
+                best, history, interval = multi_section_search(
+                    evaluator, 1000, 1600, num_sections=sections, tol=5, max_iter=20
+                )
+                self.assertLessEqual(interval[1] - interval[0], 5)
+                self.assertAlmostEqual(best["c"], 1300, delta=5)
+                self.assertTrue(history)
+            grid = dense_grid_sweep(evaluator, 1000, 1600, step=250)
+            self.assertEqual([row["c"] for row in grid], [1000, 1250, 1500, 1600])
+
+    def test_runner_common_overrides_and_stored_gt_range(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            h5_path = root / "input.h5"
+            gt = np.array([[1.0, 0.5], [0.0, 0.25]], dtype=np.float32)
+            with h5py.File(h5_path, "w") as handle:
+                handle.create_dataset("x_grid", data=[-0.001, 0.001])
+                handle.create_dataset("z_grid", data=[0.001, 0.002])
+                handle.create_dataset("all_envdb_norm", data=gt[None, None])
+                handle.create_dataset("config_yaml", data=yaml.safe_dump({
+                    "generation": {"ground_truth": {"dynamic_range_db": 60}}
+                }))
+            config = {
+                "algorithms": ["das"], "params": {"dr": 60},
+                "scenes": [{"id": "sample", "h5_path": str(h5_path), "sample_idx": 0}],
+            }
+            config_path = root / "config.yaml"
+            config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+            scene_dir = root / "output" / "sample"
+            (scene_dir / "das").mkdir(parents=True)
+            np.save(scene_dir / "das" / "das.npy", [[0.0, -10.0], [-20.0, -30.0]])
+            args = argparse.Namespace(
+                config=str(config_path), scene="sample", algorithms=None,
+                output_root=str(root / "output"), python_exe=sys.executable,
+                no_evaluate=True, no_individual_images=True, keep_existing=False,
+                extra_algorithm_args=["--dr", "40", "--no_tgc", "--row_block", "2"],
+            )
+            with patch("run_one.parse_args", return_value=args), patch(
+                "run_one.subprocess.run", return_value=SimpleNamespace(returncode=0)
+            ) as process, patch("run_one.save_comparison"):
+                run_scene()
+            command = process.call_args.args[0]
+            self.assertEqual(command.count("--dr"), 1)
+            self.assertEqual(float(command[command.index("--dr") + 1]), 40)
+            self.assertIn("--no_tgc", command)
+            params = json.loads((scene_dir / "run_params.json").read_text(encoding="utf-8"))
+            self.assertEqual(params["params"]["dr"], 40)
+            self.assertFalse(params["params"]["tgc"])
+            comparison = np.load(scene_dir / "comparison.npy")
+            np.testing.assert_array_equal(comparison[0], gt * 60 - 60)
+
     def test_algorithm_entrypoints_support_direct_and_module_execution(self):
         project_root = Path(__file__).resolve().parents[1]
         for name in (

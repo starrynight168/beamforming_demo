@@ -226,6 +226,17 @@ def resolve_project_path(path, project_root):
     return str(path if path.is_absolute() else Path(project_root) / path)
 
 
+def ground_truth_db(hf, sample_idx):
+    config = yaml.safe_load(hf["config_yaml"][()])
+    dynamic_range = float(config["generation"]["ground_truth"]["dynamic_range_db"])
+    if not np.isfinite(dynamic_range) or dynamic_range <= 0:
+        raise ValueError("ground_truth.dynamic_range_db 必须是有限正数")
+    gt = hf["all_envdb_norm"][sample_idx].astype(np.float32)
+    if not np.isfinite(gt).all() or np.any((gt < 0) | (gt > 1)):
+        raise ValueError("all_envdb_norm 必须是位于 [0,1] 的有限数组")
+    return gt * dynamic_range - dynamic_range
+
+
 def load_from_h5(h5_path, sample_idx=0):
     with h5py.File(h5_path, "r") as hf:
         i_all = hf["all_multi_I"]
@@ -403,9 +414,11 @@ def save_algorithm_result(
     )
     sample = input_data.sample
     if sample.has_gt and args.save_gt:
+        with h5py.File(resolve_project_path(args.h5_path, PROJECT_ROOT), "r") as hf:
+            gt_db = ground_truth_db(hf, args.h5_sample_idx)
         save_comparison_figure(
             image_db,
-            sample.gt_data,
+            gt_db,
             input_data.extent_mm,
             method_dir / f"{method_name}_comparison.png",
             title,
@@ -896,7 +909,7 @@ def add_scale_bar(axis, extent_mm, fontsize=10):
 
 def save_comparison_figure(
     image_db,
-    gt_norm,
+    gt_db,
     extent_mm,
     out_path,
     title_str,
@@ -905,14 +918,14 @@ def save_comparison_figure(
 ):
     vmin, vmax = db_display_range(dr)
     image_db = _to_2d(image_db)
-    gt_norm = _to_2d(gt_norm)
+    gt_db = _to_2d(gt_db)
 
     fig = plt.figure(figsize=(12, 8), dpi=300)
     grid = GridSpec(1, 3, width_ratios=[1, 1, 0.05], figure=fig)
 
     gt_axis = fig.add_subplot(grid[0, 0])
     gt_axis.imshow(
-        gt_norm, cmap="gray", vmin=0, vmax=1, extent=extent_mm, aspect="equal"
+        gt_db, cmap="gray", vmin=vmin, vmax=vmax, extent=extent_mm, aspect="equal"
     )
     gt_axis.set_title("Ground Truth", fontsize=12, pad=10)
     gt_axis.set_xlabel("Lateral (mm)")
@@ -974,7 +987,7 @@ def write_params(path, params):
     )
 
 
-def result_cache_signature(h5_path, method_name, parameters=None):
+def result_cache_signature(h5_path, method_name, parameters=None, *, extra_args=()):
     input_path = Path(resolve_project_path(h5_path, PROJECT_ROOT)).resolve(strict=True)
     input_stat = input_path.stat()
     sources = {}
@@ -983,8 +996,17 @@ def result_cache_signature(h5_path, method_name, parameters=None):
             source_path.read_bytes()
         ).hexdigest()
 
+    effective_parameters = dict(parameters or {})
+    for index, argument in enumerate(extra_args):
+        if not argument.startswith("--"):
+            continue
+        name, separator, value = argument[2:].partition("=")
+        if separator:
+            effective_parameters[name] = value
+        elif index + 1 < len(extra_args) and not extra_args[index + 1].startswith("--"):
+            effective_parameters[name] = extra_args[index + 1]
     dependencies = {}
-    for name, value in (parameters or {}).items():
+    for name, value in effective_parameters.items():
         normalized_name = str(name).lower().replace("-", "_")
         if normalized_name == "h5_path" or not any(
             token in normalized_name

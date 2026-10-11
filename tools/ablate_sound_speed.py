@@ -13,6 +13,7 @@ import sys
 import time
 from pathlib import Path
 
+import h5py
 import matplotlib
 
 matplotlib.use("Agg")
@@ -25,19 +26,20 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from algorithms import mv  # noqa: E402
 from algorithms.common import (  # noqa: E402
     INTERP_CHOICES,
     WINDOW_CHOICES,
+    ground_truth_db,
     load_from_h5,
     nonnegative_float,
     nonnegative_int,
     positive_float,
     positive_int,
     positive_odd_int,
+    tgc_gain,  # noqa: E402
     unit_interval_float,
 )
-from algorithms.common import tgc_gain  # noqa: E402
-from algorithms import mv  # noqa: E402
 from evaluation.evaluate import db_to_display, local_ssim, psnr  # noqa: E402
 
 
@@ -56,8 +58,8 @@ def validate_search_config(c_min, c_max, num_sections, tol, max_iter):
         raise ValueError("c_min, c_max and tol must be finite")
     if c_min <= 0 or c_max <= 0 or c_min >= c_max:
         raise ValueError("sound-speed range must satisfy 0 < c_min < c_max")
-    if num_sections < 2:
-        raise ValueError("num_sections must be at least 2")
+    if num_sections < 3:
+        raise ValueError("num_sections must be at least 3 to shrink the search bracket")
     if tol <= 0:
         raise ValueError("tol must be greater than 0")
     if max_iter < 1:
@@ -143,7 +145,10 @@ class SpeedOfSoundEvaluator:
             )
 
         # Multi-angle DAS reference (ground truth)
-        self.gt_display = np.asarray(self.gt_data.squeeze(), dtype=np.float32)
+        with h5py.File(self.h5_path, "r") as hf:
+            self.gt_display = db_to_display(
+                ground_truth_db(hf, self.sample_idx).squeeze(), self.dr
+            )
         if self.gt_display.ndim != 2:
             raise ValueError(
                 f"Expected 2D ground truth display array, got shape {self.gt_display.shape}"
@@ -345,7 +350,7 @@ def multi_section_search(
 
 def dense_grid_sweep(evaluator, c_min=1430.0, c_max=1620.0, step=10.0):
     """Evaluate sound speeds across a uniform grid for curve visualization."""
-    validate_search_config(c_min, c_max, 2, step, 1)
+    validate_search_config(c_min, c_max, 3, step, 1)
     grid_c = np.arange(c_min, c_max, step, dtype=float)
     if grid_c.size == 0 or grid_c[-1] < c_max:
         grid_c = np.append(grid_c, c_max)
@@ -649,7 +654,7 @@ def main():
         "--sections",
         type=positive_int,
         default=4,
-        help="Number of sections per bracket iteration",
+        help="Number of sections per bracket iteration (at least 3)",
     )
     parser.add_argument(
         "--tol",
