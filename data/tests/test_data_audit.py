@@ -286,6 +286,7 @@ class DataPipelineTests(unittest.TestCase):
         ):
             root = Path(directory)
             output = root / "packed.h5"
+            (root / "outside.h5").write_bytes(b"outside PICMUS")
             pack_dataset(
                 self._write_sources(root),
                 output,
@@ -321,6 +322,7 @@ class DataPipelineTests(unittest.TestCase):
                     ("phantom_path", " ", "phantom_path 必须是非空字符串"),
                     ("phantom_path", "missing.h5", "模体文件不存在"),
                     ("phantom_path", ".", "模体文件不存在"),
+                    ("phantom_path", "../outside.h5", "必须指向 PICMUS 目录内文件"),
                     (
                         "phantom_path",
                         str(root / "PICMUS" / "phantom.h5"),
@@ -338,6 +340,32 @@ class DataPipelineTests(unittest.TestCase):
                         self.assertTrue(
                             any(message in problem for problem in problems), problems
                         )
+
+    def test_all_available_angle_selection_must_include_every_angle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "data.check_data.DATA_DIR", Path(directory)
+        ):
+            root = Path(directory)
+            output = root / "packed.h5"
+            pack_dataset(
+                self._write_sources(root),
+                output,
+                root,
+                row_block=2,
+                save_gt_images_enabled=False,
+            )
+            with h5py.File(output, "r+") as handle:
+                config = yaml.safe_load(handle["config_yaml"][()])
+                input_iq = config["generation"]["input_iq"]
+                input_iq["all_steering_angles_rad"] = [-0.1, 0.0, 0.1]
+                input_iq["selected_angle_indices"] = [0, 2]
+                handle["config_yaml"][()] = yaml.safe_dump(config, sort_keys=False)
+                status, problems = run_checks(handle)
+            self.assertEqual(status, "失败")
+            self.assertTrue(
+                any("all_available 必须选择全部" in item for item in problems),
+                problems,
+            )
 
 
 if __name__ == "__main__":

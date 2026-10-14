@@ -214,6 +214,7 @@ def parse_args():
         "--reference-mode",
         choices=("auto", "model", "algorithms"),
         default="auto",
+        help="auto 从同目录 run_params.json 推断；也可显式指定 model 或 algorithms",
     )
     parser.add_argument("--profile-roi-index", type=int, help="Cyst ROI编号，从1开始")
     parser.add_argument("--profile-target-index", type=int, help="Point target编号，从1开始")
@@ -275,19 +276,17 @@ def infer_repeat_references(metrics_dir, reference_mode):
     if reference_mode == "algorithms":
         return False
     params_path = Path(metrics_dir).parent / "run_params.json"
-    if params_path.exists():
-        try:
-            with params_path.open(encoding="utf-8") as file:
-                params = json.load(file)
-        except (OSError, json.JSONDecodeError):
-            params = {}
-        if not isinstance(params, dict):
-            return True
-        if isinstance(params.get("models"), dict):
-            return True
-        if isinstance(params.get("algorithms"), list):
-            return False
-    return True
+    if not params_path.is_file():
+        raise FileNotFoundError(f"auto reference mode requires {params_path}")
+    with params_path.open(encoding="utf-8") as file:
+        params = json.load(file)
+    if not isinstance(params, dict):
+        raise ValueError(f"run_params.json 顶层必须是对象: {params_path}")
+    if isinstance(params.get("models"), dict) and "algorithms" not in params:
+        return True
+    if isinstance(params.get("algorithms"), list) and "models" not in params:
+        return False
+    raise ValueError(f"run_params.json 必须包含 models 或 algorithms 之一: {params_path}")
 
 
 def finite_value(value):

@@ -27,18 +27,22 @@ from algorithms.common import (
     parse_selected_angles,
     result_cache_signature,
     save_algorithm_result,
+    spatial_temporal_covariance,
 )
-from run_one import can_reuse_existing
+from run_one import can_reuse_existing, scene_has_gt
 from run_one import main as run_scene
 from tools.ablate_sound_speed import dense_grid_sweep, multi_section_search
 from tools.run_ablation_cn import (
     can_reuse_flat_result,
+    method_output_path,
     numeric_range_values,
     preserve_ground_truth,
     run_ablation_evaluation,
     validate_values,
 )
 from tools.run_wizard_cn import (
+    ask_algorithm_param,
+    configured_choice_index,
     inspect_h5,
     sample_can_be_evaluated,
     validate_algorithm_param,
@@ -46,6 +50,30 @@ from tools.run_wizard_cn import (
 
 
 class AlgorithmAuditTests(unittest.TestCase):
+    def test_ablation_uses_only_flattened_method_outputs(self):
+        scene_dir = Path("run") / "scene"
+        self.assertEqual(
+            method_output_path(scene_dir, "das", "npy"),
+            scene_dir / "das.npy",
+        )
+
+    def test_wizard_rejects_unsupported_configured_choices(self):
+        choices = [("rect", "rectangular"), ("hann", "Hann")]
+        self.assertEqual(configured_choice_index(choices, "hann", "params.window"), 1)
+        with self.assertRaisesRegex(ValueError, "params.window.*不受支持"):
+            configured_choice_index(choices, "old_window", "params.window")
+        with self.assertRaisesRegex(ValueError, "das.aperture_mode.*不受支持"):
+            ask_algorithm_param("das", "aperture_mode", "legacy")
+
+    def test_scene_rejects_truncated_ground_truth(self):
+        with tempfile.TemporaryDirectory() as directory:
+            h5_path = Path(directory) / "input.h5"
+            with h5py.File(h5_path, "w") as handle:
+                handle.create_dataset("all_multi_I", data=np.zeros((2, 1, 1, 1)))
+                handle.create_dataset("all_envdb_norm", data=np.zeros((1, 1, 2, 2)))
+            with self.assertRaisesRegex(ValueError, "样本数必须与 all_multi_I 一致"):
+                scene_has_gt({"h5_path": str(h5_path), "sample_idx": 1})
+
     def test_cache_signature_tracks_cli_file_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -105,6 +133,7 @@ class AlgorithmAuditTests(unittest.TestCase):
             h5_path = root / "input.h5"
             gt = np.array([[1.0, 0.5], [0.0, 0.25]], dtype=np.float32)
             with h5py.File(h5_path, "w") as handle:
+                handle.create_dataset("all_multi_I", data=np.zeros((1, 1, 2, 1)))
                 handle.create_dataset("x_grid", data=[-0.001, 0.001])
                 handle.create_dataset("z_grid", data=[0.001, 0.002])
                 handle.create_dataset("all_envdb_norm", data=gt[None, None])
@@ -185,6 +214,28 @@ class AlgorithmAuditTests(unittest.TestCase):
         result = normalized_mv_weights(singular, steering)
         self.assertTrue(torch.isfinite(result).all())
         torch.testing.assert_close(result, torch.zeros_like(result))
+
+    def test_spatial_temporal_covariance_matches_forward_and_fbss_formulas(self):
+        real = torch.arange(2 * 4 * 3, dtype=torch.float32).reshape(2, 4, 3)
+        x_active = torch.complex(real, real.flip(-1) / 3)
+        x_subarrays = x_active.unfold(1, 3, 1).permute(0, 3, 1, 2)
+        x_snapshots = x_subarrays.reshape(2, 3, x_subarrays.shape[2] * 3)
+        forward = x_snapshots @ x_snapshots.mH / x_snapshots.shape[-1]
+
+        actual_subarrays, actual_forward = spatial_temporal_covariance(
+            x_active, 3, 3, False
+        )
+        actual_fbss_subarrays, actual_fbss = spatial_temporal_covariance(
+            x_active, 3, 3, True
+        )
+
+        self.assertEqual(actual_subarrays.shape, (2, 3, 2, 3))
+        torch.testing.assert_close(actual_subarrays, x_subarrays)
+        torch.testing.assert_close(actual_fbss_subarrays, x_subarrays)
+        torch.testing.assert_close(actual_forward, forward)
+        torch.testing.assert_close(
+            actual_fbss, 0.5 * (forward + forward.conj().flip(-1, -2))
+        )
 
     def test_two_channel_aperture_windows_keep_active_channels(self):
         for window in ("tukey", "hann", "hamming", "blackman", "kaiser"):
@@ -461,7 +512,17 @@ class AlgorithmAuditTests(unittest.TestCase):
 
                 info = inspect_h5(h5_path)
                 self.assertEqual(info["gt"], "有")
+                self.assertEqual(info["names"], ["simulation_contrast_speckle"])
                 self.assertFalse(sample_can_be_evaluated(h5_path, 0))
+
+                with h5py.File(h5_path, "r+") as hf:
+                    del hf["config_yaml"]
+                    hf.create_dataset(
+                        "config_yaml",
+                        data=yaml.safe_dump({"source_samples": [{}]}),
+                    )
+                with self.assertRaisesRegex(ValueError, "必须包含 id 或 acquisition_id"):
+                    inspect_h5(h5_path)
 
 
 if __name__ == "__main__":

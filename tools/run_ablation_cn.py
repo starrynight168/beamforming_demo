@@ -25,10 +25,7 @@ if str(ROOT) not in sys.path:
 from algorithms.common import result_cache_signature
 from evaluation.evaluate import load_picmus_context
 
-try:
-    from . import run_wizard_cn as wizard
-except ImportError:
-    import run_wizard_cn as wizard
+from tools import run_wizard_cn as wizard
 
 ALGORITHMS = wizard.ALGORITHMS
 ExitCommandError = wizard.ExitCommandError
@@ -467,11 +464,7 @@ def run_one(config_path, scene_id, output_root, keep_existing):
 
 
 def method_output_path(scene_dir, algorithm, suffix):
-    """Execute method output path."""
-    direct = scene_dir / f"{algorithm}.{suffix}"
-    if direct.exists():
-        return direct
-    return scene_dir / algorithm / f"{algorithm}.{suffix}"
+    return scene_dir / f"{algorithm}.{suffix}"
 
 
 def _backup_flatten_target(path: Path, backup_root: Path) -> None:

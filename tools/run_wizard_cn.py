@@ -202,10 +202,7 @@ def ask_algorithm_param(algorithm, name, default):
             ("discrete", "discrete:离散通道孔径,适合公平对照"),
             ("geometry", "geometry:连续几何孔径,适合 DAS 单独研究"),
         ]
-        default_index = next(
-            (idx for idx, (key, _) in enumerate(options) if key == default),
-            0,
-        )
+        default_index = configured_choice_index(options, default, f"{algorithm}.{name}")
         return ask_choice(prompt, options, default_index=default_index)
     if isinstance(default, bool):
         return ask_yes_no(prompt, default=default)
@@ -250,6 +247,13 @@ def ask_choice(prompt, options, default_index=0):
             if isinstance(key, str) and raw.lower() == key.lower():
                 return key
         print("序号不合法,请重新输入。")
+
+
+def configured_choice_index(options, value, setting_name):
+    for index, (key, _) in enumerate(options):
+        if key == value:
+            return index
+    raise ValueError(f"{setting_name} 配置值不受支持: {value}")
 
 
 def ask_multi_choice(prompt, options, default_keys):
@@ -415,9 +419,13 @@ def inspect_h5(path):
             if not all(isinstance(sample, dict) for sample in samples):
                 raise ValueError("config_yaml.source_samples 必须是对象列表")
             names = [
-                str(sample.get("id") or sample.get("acquisition_id") or f"sample_{idx}")
-                for idx, sample in enumerate(samples)
+                sample.get("id") or sample.get("acquisition_id") for sample in samples
             ]
+            if any(name is None or not str(name).strip() for name in names):
+                raise ValueError(
+                    "config_yaml.source_samples 每个样本都必须包含 id 或 acquisition_id"
+                )
+            names = [str(name) for name in names]
             in_vivo = [
                 sample.get("phantom_mode") == "in_vivo"
                 or sample.get("phantom_source") == "in_vivo"
@@ -792,7 +800,7 @@ def main():
         state["window"] = ask_choice(
             "请选择孔径窗函数",
             options,
-            next((i for i, (key, _) in enumerate(options) if key == default), 0),
+            configured_choice_index(options, default, "params.window"),
         )
 
     def step_interp():
@@ -813,7 +821,7 @@ def main():
         state["interp"] = ask_choice(
             "请选择插值方式",
             options,
-            next((i for i, (key, _) in enumerate(options) if key == default), 0),
+            configured_choice_index(options, default, "params.interp"),
         )
 
     def step_gt_evaluate():

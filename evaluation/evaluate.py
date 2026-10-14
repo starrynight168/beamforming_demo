@@ -30,12 +30,6 @@ IMAGE_STACK_DIMENSIONS = 3
 SPECKLE_PASS_ALPHA = 0.05
 PICMUS_OFFICIAL_Z_CORRECTION_MM = 0.2
 
-try:
-    from skimage.metrics import peak_signal_noise_ratio
-except ImportError:
-    peak_signal_noise_ratio = None
-
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, os.pardir))
 PICMUS_ROOT = os.path.join(PROJECT_ROOT, "data", "PICMUS")
@@ -86,13 +80,16 @@ def parse_args():
 
 def load_method_names(args, comparison_path, n_panels, has_gt):
     """Load method names."""
+    if args.method_labels and not args.methods:
+        raise ValueError("--method_labels 必须与 --methods 一起使用")
     if args.methods:
         methods = [m.strip().lower() for m in args.methods.split(",") if m.strip()]
-        names = (
-            [m.strip() for m in args.method_labels.split(",") if m.strip()]
-            if args.method_labels
-            else [m.upper() for m in methods]
-        )
+        names = [m.upper() for m in methods]
+        if args.method_labels:
+            labels = [m.strip() for m in args.method_labels.split(",") if m.strip()]
+            if len(labels) != len(methods):
+                raise ValueError("--method_labels 数量必须与 --methods 数量一致")
+            names = labels
     else:
         params_path = os.path.join(os.path.dirname(comparison_path), "run_params.json")
         if not os.path.exists(params_path):
@@ -132,11 +129,9 @@ def load_model_names(params, n_panels, has_gt, params_path):
         raise ValueError(f"run_params.json 缺少当前格式的 models 字典: {params_path}")
     model_names = list(model_map)
     evaluation = params.get("evaluation")
-    if evaluation is None:
-        evaluation = {}
     if not isinstance(evaluation, dict):
         raise ValueError(f"run_params.json evaluation 必须是对象: {params_path}")
-    skip_baselines = evaluation.get("skip_baselines", False)
+    skip_baselines = evaluation.get("skip_baselines")
     if not isinstance(skip_baselines, bool):
         raise ValueError(f"run_params.json evaluation.skip_baselines 必须是布尔值: {params_path}")
     baseline_names = [] if skip_baselines else ["DAS", "MV"]
@@ -179,7 +174,11 @@ def read_sample_meta(h5_path, sample_idx):
         n_samples = int(hf["all_multi_I"].shape[0])
         if not 0 <= sample_idx < n_samples:
             raise IndexError(f"sample index {sample_idx} is outside [0, {n_samples - 1}]")
-        has_gt = "all_envdb_norm" in hf and 0 <= sample_idx < hf["all_envdb_norm"].shape[0]
+        has_gt = "all_envdb_norm" in hf
+        if has_gt:
+            gt_shape = hf["all_envdb_norm"].shape
+            if not gt_shape or gt_shape[0] != n_samples:
+                raise ValueError("all_envdb_norm 样本数必须与 all_multi_I 一致")
         config = h5_embedded_config(hf)
         dataset_meta = config.get("dataset", {})
         if dataset_meta is None:
@@ -1135,12 +1134,7 @@ def main():
                 gt_linear_envelope,
                 data_range=1.0,
             )
-            if peak_signal_noise_ratio is not None:
-                row["PSNR_dB_vs_GT"] = float(
-                    peak_signal_noise_ratio(gt_display, display, data_range=1.0),
-                )
-            else:
-                row["PSNR_dB_vs_GT"] = psnr(display, gt_display, data_range=1.0)
+            row["PSNR_dB_vs_GT"] = psnr(display, gt_display, data_range=1.0)
             clipped_db = np.clip(db_img, -args.dr, 0.0)
             clipped_gt_db = np.clip(gt_db, -args.dr, 0.0)
             row["MAE_dB_vs_GT"] = float(np.mean(np.abs(clipped_db - clipped_gt_db)))

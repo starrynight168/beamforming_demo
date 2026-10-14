@@ -780,6 +780,20 @@ def normalized_mv_weights(covariance, steering):
     return solved / (steering.mH @ solved + 1e-12)
 
 
+def spatial_temporal_covariance(x_active, subarray_size, temporal_win, use_fbss):
+    x_subarrays = x_active.unfold(1, subarray_size, 1).permute(0, 3, 1, 2)
+    snapshots = x_subarrays.shape[2] * temporal_win
+    x_snapshots = x_subarrays.reshape(x_active.shape[0], subarray_size, snapshots)
+    covariance_forward = torch.matmul(x_snapshots, x_snapshots.mH) / snapshots
+    if use_fbss:
+        covariance = 0.5 * (
+            covariance_forward + covariance_forward.conj().flip(-1, -2)
+        )
+    else:
+        covariance = covariance_forward
+    return x_subarrays, covariance
+
+
 def _lagrange_weight(frac, offset, offsets):
     weight = torch.ones_like(frac)
     for other in offsets:

@@ -88,6 +88,14 @@ class EvaluationInputTests(unittest.TestCase):
                 ["GT", "DAS", "MV"],
             )
 
+    def test_method_labels_must_match_explicit_method_count(self):
+        args = SimpleNamespace(methods="das,mv", method_labels="DAS")
+        with self.assertRaisesRegex(ValueError, "method_labels.*数量"):
+            load_method_names(args, "comparison.npy", n_panels=2, has_gt=True)
+        args = SimpleNamespace(methods=None, method_labels="DAS")
+        with self.assertRaisesRegex(ValueError, "method_labels.*必须与 --methods"):
+            load_method_names(args, "comparison.npy", n_panels=2, has_gt=True)
+
     def test_non_picmus_sample_skips_without_reading_comparison(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -260,14 +268,17 @@ class EvaluationInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             comparison = Path(directory) / "comparison.npy"
             params = comparison.parent / "run_params.json"
-            params.write_text(
-                json.dumps({"models": {"model": {}}, "evaluation": []}),
-                encoding="utf-8",
-            )
             args = SimpleNamespace(methods=None, method_labels=None)
 
-            with self.assertRaisesRegex(ValueError, "evaluation 必须是对象"):
-                load_method_names(args, str(comparison), n_panels=1, has_gt=False)
+            for metadata in (
+                {"models": {"model": {}}},
+                {"models": {"model": {}}, "evaluation": []},
+            ):
+                params.write_text(json.dumps(metadata), encoding="utf-8")
+                with self.subTest(metadata=metadata), self.assertRaisesRegex(
+                    ValueError, "evaluation 必须是对象"
+                ):
+                    load_method_names(args, str(comparison), n_panels=1, has_gt=False)
 
     def test_method_loader_requires_boolean_skip_baselines(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -282,6 +293,48 @@ class EvaluationInputTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "skip_baselines 必须是布尔值"):
                 load_method_names(args, str(comparison), n_panels=1, has_gt=False)
 
+    def test_method_loader_requires_skip_baselines_field(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            comparison = Path(directory) / "comparison.npy"
+            params = comparison.parent / "run_params.json"
+            params.write_text(
+                json.dumps({"models": {"model": {}}, "evaluation": {}}),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(methods=None, method_labels=None)
+
+            with self.assertRaisesRegex(ValueError, "skip_baselines 必须是布尔值"):
+                load_method_names(args, str(comparison), n_panels=1, has_gt=False)
+
+    def test_method_loader_uses_current_model_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            comparison = Path(directory) / "comparison.npy"
+            params = comparison.parent / "run_params.json"
+            args = SimpleNamespace(methods=None, method_labels=None)
+            for skip_baselines, expected in (
+                (False, ["GT", "DAS", "MV", "MBAN"]),
+                (True, ["GT", "MBAN"]),
+            ):
+                params.write_text(
+                    json.dumps(
+                        {
+                            "models": {"MBAN": "model.pth"},
+                            "evaluation": {"skip_baselines": skip_baselines},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with self.subTest(skip_baselines=skip_baselines):
+                    self.assertEqual(
+                        load_method_names(
+                            args,
+                            str(comparison),
+                            n_panels=len(expected),
+                            has_gt=True,
+                        ),
+                        expected,
+                    )
+
     def test_sample_metadata_rejects_non_object_dataset(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.h5"
@@ -294,6 +347,25 @@ class EvaluationInputTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "dataset must be a mapping"):
                 read_sample_meta(path, sample_idx=0)
+
+    def test_sample_metadata_rejects_truncated_ground_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sample.h5"
+            sample_meta = {
+                "id": "sample",
+                "phantom_mode": "contrast_speckle",
+                "phantom_source": "simulation",
+                "phantom_path": "phantom.h5",
+            }
+            with h5py.File(path, "w") as handle:
+                handle.create_dataset("all_multi_I", data=np.zeros((2, 1, 1, 1)))
+                handle.create_dataset("all_envdb_norm", data=np.zeros((1, 1, 2, 2)))
+                handle.create_dataset(
+                    "config_yaml",
+                    data=yaml.safe_dump({"source_samples": [sample_meta, sample_meta]}),
+                )
+            with self.assertRaisesRegex(ValueError, "样本数必须与 all_multi_I 一致"):
+                read_sample_meta(path, sample_idx=1)
 
     def test_picmus_config_rejects_non_object_evaluation_settings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -310,6 +382,9 @@ class EvaluationInputTests(unittest.TestCase):
             h5_path = write_picmus_sample(root)
             comparison_path = root / "comparison.npy"
             metrics_dir = root / "metrics"
+            (root / "run_params.json").write_text(
+                json.dumps({"models": {"model": "model.pth"}}), encoding="utf-8"
+            )
             image = np.linspace(-50.0, -5.0, 201 * 201).reshape(201, 201)
             np.save(comparison_path, np.stack((image, image - 1.0)))
             command = [
@@ -361,6 +436,9 @@ class EvaluationInputTests(unittest.TestCase):
             h5_path = write_picmus_sample(root, mode="resolution_distorsion")
             comparison_path = root / "comparison.npy"
             metrics_dir = root / "metrics"
+            (root / "run_params.json").write_text(
+                json.dumps({"models": {"model": "model.pth"}}), encoding="utf-8"
+            )
             with h5py.File(h5_path, "r") as handle:
                 x = handle["x_grid"][:] * 1000
                 z = handle["z_grid"][:] * 1000
@@ -415,14 +493,33 @@ class EvaluationInputTests(unittest.TestCase):
             self.assertAlmostEqual(float(targets[0]["FWHM_axial_mm"]), 13 * interval)
             self.assertAlmostEqual(float(targets[0]["FWHM_lateral_mm"]), 31 * interval)
 
-    def test_plot_reader_defaults_for_non_object_run_params(self) -> None:
+    def test_plot_reader_rejects_non_object_run_params(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             metrics = root / "metrics"
             metrics.mkdir()
+            with self.assertRaisesRegex(FileNotFoundError, "auto reference mode requires"):
+                infer_repeat_references(metrics, "auto")
             (root / "run_params.json").write_text("[]", encoding="utf-8")
 
-            self.assertTrue(infer_repeat_references(metrics, "auto"))
+            with self.assertRaisesRegex(ValueError, "顶层必须是对象"):
+                infer_repeat_references(metrics, "auto")
+            (root / "run_params.json").write_text(
+                json.dumps({"models": {}, "algorithms": []}), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "之一"):
+                infer_repeat_references(metrics, "auto")
+
+    def test_plot_reader_infers_algorithm_run_params(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metrics = root / "metrics"
+            metrics.mkdir()
+            (root / "run_params.json").write_text(
+                json.dumps({"algorithms": ["das"]}), encoding="utf-8"
+            )
+
+            self.assertFalse(infer_repeat_references(metrics, "auto"))
 
     def test_plot_reader_rejects_non_object_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -443,7 +540,12 @@ class EvaluationInputTests(unittest.TestCase):
 class PlotOutputTests(unittest.TestCase):
     def test_missing_comparison_cleans_stale_profile_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            metrics = Path(directory)
+            root = Path(directory)
+            metrics = root / "metrics"
+            metrics.mkdir()
+            (root / "run_params.json").write_text(
+                json.dumps({"models": {"model": "model.pth"}}), encoding="utf-8"
+            )
             (metrics / "evaluation_meta.json").write_text(
                 json.dumps({"comparison_npy": "missing.npy", "h5_path": "missing.h5"}),
                 encoding="utf-8",

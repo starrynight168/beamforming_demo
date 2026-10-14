@@ -221,10 +221,12 @@ def scene_has_gt(scene):
     h5_path = resolve_path(scene["h5_path"])
     sample_idx = int(scene["sample_idx"])
     with h5py.File(h5_path, "r") as hf:
-        available = (
-            "all_envdb_norm" in hf and 0 <= sample_idx < hf["all_envdb_norm"].shape[0]
-        )
-    return available
+        if "all_envdb_norm" not in hf:
+            return False
+        gt_shape = hf["all_envdb_norm"].shape
+        if not gt_shape or gt_shape[0] != hf["all_multi_I"].shape[0]:
+            raise ValueError("all_envdb_norm 样本数必须与 all_multi_I 一致")
+        return 0 <= sample_idx < gt_shape[0]
 
 
 def save_comparison(images, titles, extent_mm, output_path, dr, _cleanup_pages=True):

@@ -13,10 +13,6 @@ Reusable pieces live in algorithms/common.py: input loading and angle selection
 envelope-to-dB conversion (envelope_to_db), and standard artifact output
 (save_algorithm_result). Use them instead of re-implementing the boilerplate.
 
-To use this method as an H5 pack-time teacher as well, expose one uniquely named
-*BeamformerIQ class whose __call__(i_data, q_data, selected_angles, t_starts, fs)
-returns (i_output, q_output); see data/scripts/pack_EPFL.py for the discovery
-contract.
 """
 
 import argparse

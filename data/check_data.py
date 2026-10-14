@@ -418,6 +418,14 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
                 problems.append("config_yaml selected_angle_indices 不能重复")
         if input_iq.get("input_angle_selection") != "all_available":
             problems.append("config_yaml input_angle_selection 应为 all_available")
+        elif (
+            angles_valid
+            and indices_valid
+            and not np.array_equal(selected_indices, np.arange(all_angles.size))
+        ):
+            problems.append(
+                "config_yaml all_available 必须选择全部输入角度且保持原顺序"
+            )
         if (
             angles_valid
             and indices_valid
@@ -710,10 +718,17 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
                                 problems.append(
                                     f"source_samples[{index}].phantom_path 必须是非空字符串"
                                 )
-                            elif not (DATA_DIR / "PICMUS" / phantom_path).is_file():
-                                problems.append(
-                                    f"source_samples[{index}].phantom_path 模体文件不存在: {phantom_path}"
-                                )
+                            else:
+                                picmus_root = (DATA_DIR / "PICMUS").resolve()
+                                phantom_file = (picmus_root / phantom_path).resolve()
+                                if not phantom_file.is_relative_to(picmus_root):
+                                    problems.append(
+                                        f"source_samples[{index}].phantom_path 必须指向 PICMUS 目录内文件: {phantom_path}"
+                                    )
+                                elif not phantom_file.is_file():
+                                    problems.append(
+                                        f"source_samples[{index}].phantom_path 模体文件不存在: {phantom_path}"
+                                    )
                         elif (mode, source) != ("in_vivo", "in_vivo"):
                             problems.append(
                                 f"source_samples[{index}] 不支持的模体组合: mode={mode}, source={source}"

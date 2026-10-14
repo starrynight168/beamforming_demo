@@ -24,6 +24,7 @@ from algorithms.common import (
     resolve_project_path,
     run_beamformer,
     save_algorithm_result,
+    spatial_temporal_covariance,
     time_start_tensor,
     unit_interval_float,
     validate_db_output,
@@ -178,24 +179,11 @@ class RowDynamicMVBeamformerIQ:
                 if row["window"] is not None:
                     x_active = x_active * row["window"].view(1, aperture_size, 1)
 
-                # ========== 空间平滑 (前向) ==========
-                x_subarrays = x_active.unfold(1, subarray_size, 1).permute(
-                    0,
-                    3,
-                    1,
-                    2,
-                )  # [width, subarray_size, subarray_count, T]
-                snapshots = subarray_count * self.temporal_win
-                x_snapshots = x_subarrays.reshape(self.width, subarray_size, snapshots)
-                covariance_forward = (
-                    torch.matmul(x_snapshots, x_snapshots.mH) / snapshots
-                )  # [width, subarray_size, subarray_size]
-
-                # ========== 前向-后向空间平滑 (FBSS) ==========
-                covariance = (
-                    0.5 * (covariance_forward + covariance_forward.conj().flip(-1, -2))
-                    if self.use_fbss
-                    else covariance_forward
+                x_subarrays, covariance = spatial_temporal_covariance(
+                    x_active,
+                    subarray_size,
+                    self.temporal_win,
+                    self.use_fbss,
                 )
 
                 # ========== 对角加载 ==========
