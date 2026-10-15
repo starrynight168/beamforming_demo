@@ -141,7 +141,7 @@ class EvaluationInputTests(unittest.TestCase):
                 )
 
     def test_all_four_protocols_use_metadata_independent_of_sample_name(self):
-        for mode in ("contrast_speckle", "resolution_distorsion"):
+        for mode in ("contrast_speckle", "resolution_distortion"):
             for source in ("simulation", "experiments"):
                 with (
                     self.subTest(mode=mode, source=source),
@@ -179,7 +179,7 @@ class EvaluationInputTests(unittest.TestCase):
         for mode, dataset, operation in (
             ("contrast_speckle", "phantom_occlusionDiameter", "change"),
             ("contrast_speckle", "phantom_lateralResolution", "delete"),
-            ("resolution_distorsion", "phantom_xPts", "reverse"),
+            ("resolution_distortion", "phantom_xPts", "reverse"),
         ):
             with (
                 self.subTest(dataset=dataset),
@@ -202,7 +202,7 @@ class EvaluationInputTests(unittest.TestCase):
                     load_picmus_context(path, 0)
 
     def test_grid_must_cover_complete_evaluation_regions(self):
-        for mode in ("contrast_speckle", "resolution_distorsion"):
+        for mode in ("contrast_speckle", "resolution_distortion"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 path = write_picmus_sample(Path(directory), mode=mode)
                 with h5py.File(path, "r+") as handle:
@@ -212,7 +212,7 @@ class EvaluationInputTests(unittest.TestCase):
 
     def test_distortion_correction_must_keep_targets_inside_grid(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = write_picmus_sample(Path(directory), mode="resolution_distorsion")
+            path = write_picmus_sample(Path(directory), mode="resolution_distortion")
             with h5py.File(path, "r+") as handle:
                 config = yaml.safe_load(handle["config_yaml"][()])
                 config["evaluation"] = {"picmus_distortion_z_offset_mm": 100.0}
@@ -433,7 +433,7 @@ class EvaluationInputTests(unittest.TestCase):
     def test_resolution_scene_smoke(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            h5_path = write_picmus_sample(root, mode="resolution_distorsion")
+            h5_path = write_picmus_sample(root, mode="resolution_distortion")
             comparison_path = root / "comparison.npy"
             metrics_dir = root / "metrics"
             (root / "run_params.json").write_text(
@@ -443,7 +443,7 @@ class EvaluationInputTests(unittest.TestCase):
                 x = handle["x_grid"][:] * 1000
                 z = handle["z_grid"][:] * 1000
             phantom = read_phantom(
-                picmus_reference_path("resolution_distorsion", "simulation")
+                picmus_reference_path("resolution_distortion", "simulation")
             )
             image = np.full((len(z), len(x)), -50.0)
             for target in phantom["resolution_targets"]:

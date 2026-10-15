@@ -70,7 +70,7 @@ scenes:
     h5_path: data/simulation.h5
     sample_idx: 0
 
-  - id: simulation_resolution_distorsion
+  - id: simulation_resolution_distortion
     h5_path: data/simulation.h5
     sample_idx: 1
 
@@ -78,7 +78,7 @@ scenes:
     h5_path: data/experiments.h5
     sample_idx: 0
 
-  - id: experiments_resolution_distorsion
+  - id: experiments_resolution_distortion
     h5_path: data/experiments.h5
     sample_idx: 1
 

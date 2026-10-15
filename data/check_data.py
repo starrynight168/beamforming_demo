@@ -707,7 +707,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
                         mode = sample.get("phantom_mode")
                         source = sample.get("phantom_source")
                         if (
-                            mode in ("contrast_speckle", "resolution_distorsion")
+                            mode in ("contrast_speckle", "resolution_distortion")
                             and source in ("simulation", "experiments")
                         ):
                             phantom_path = sample.get("phantom_path")

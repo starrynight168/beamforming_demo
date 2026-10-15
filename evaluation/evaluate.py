@@ -65,7 +65,7 @@ def parse_args():
     )
     parser.add_argument(
         "--phantom_mode",
-        choices=["auto", "contrast_speckle", "resolution_distorsion"],
+        choices=["auto", "contrast_speckle", "resolution_distortion"],
         default="auto",
     )
     parser.add_argument(
@@ -367,13 +367,13 @@ def read_phantom(phantom_path):
 
 
 def picmus_reference_path(mode, source):
-    if mode == "resolution_distorsion":
+    if mode == "resolution_distortion":
         prefix = "expe" if source == "experiments" else "simu"
         rel = os.path.join(
             "database",
             source,
-            "resolution_distorsion",
-            f"resolution_distorsion_{prefix}_phantom.hdf5",
+            "resolution_distortion",
+            f"resolution_distortion_{prefix}_phantom.hdf5",
         )
     else:
         prefix = "expe" if source == "experiments" else "simu"
@@ -410,7 +410,7 @@ def load_picmus_context(
             raise ValueError(f"H5 缺少 {name}，请显式指定 --{name}")
         values.append(value)
     mode, source = values
-    supported_mode = mode in {"contrast_speckle", "resolution_distorsion"}
+    supported_mode = mode in {"contrast_speckle", "resolution_distortion"}
     supported_source = source in {"simulation", "experiments"}
     if not supported_mode and not supported_source:
         return None
@@ -489,7 +489,7 @@ def validate_picmus_geometry(phantom, mode, source, x_mm, z_mm, window_mm, z_off
         x, z = region["x_mm"], region["z_mm"]
         shifted_z = (
             z + z_offset_mm
-            if mode == "resolution_distorsion" and source == "simulation"
+            if mode == "resolution_distortion" and source == "simulation"
             else z
         )
         if not (
@@ -570,7 +570,7 @@ def contrast_roi_metrics(db_img, x_mm, z_mm, roi, lateral_resolution_mm, padding
 
     return {
         "CR_dB": float(cr_db),
-        "CNR": float(cnr),
+        "CNR_env": float(cnr),
         "gCNR": float(gcnr),
         "cyst_residual_dB": float(residual_db),
     }
@@ -633,7 +633,7 @@ def standard_speckle_quality(
         "speckle_KS_D": float(ks.statistic),
         "speckle_KS_p": float(ks.pvalue),
         "speckle_SNR": float(np.mean(sample) / (np.std(sample) + 1e-12)),
-        "ENL": float((np.mean(sample) ** 2) / (np.var(sample) + 1e-24)),
+        "ENL_env": float((np.mean(sample) ** 2) / (np.var(sample) + 1e-24)),
     }
 
 
@@ -767,7 +767,7 @@ def target_resolution(
         "islr_axial_db": float(islr_axial_db),
         "islr_lateral_db": float(islr_lateral_db),
         "islr_db": float(islr_db),
-        "distortion_mm": float(peak_offset),
+        "localization_error_mm": float(peak_offset),
     }
 
 
@@ -904,8 +904,8 @@ def build_resolution_group_rows(target_rows, source, target_count, methods):
                     ),
                     "pslr_db": mean_or_nan([row.get("pslr_db") for row in selected]),
                     "islr_db": mean_or_nan([row.get("islr_db") for row in selected]),
-                    "distortion_mm": mean_or_nan(
-                        [row.get("distortion_mm") for row in selected],
+                    "localization_error_mm": mean_or_nan(
+                        [row.get("localization_error_mm") for row in selected],
                     ),
                     "distortion_pass_rate": pass_rate,
                     "distortion_penalty": penalty,
@@ -939,7 +939,7 @@ def build_contrast_group_rows(roi_rows, source, roi_count, methods):
                         [row.get("contrast_score_dB") for row in selected],
                     ),
                     "CR_dB": mean_or_nan([row.get("CR_dB") for row in selected]),
-                    "CNR": mean_or_nan([row.get("CNR") for row in selected]),
+                    "CNR_env": mean_or_nan([row.get("CNR_env") for row in selected]),
                     "gCNR": mean_or_nan([row.get("gCNR") for row in selected]),
                     "cyst_residual_dB": mean_or_nan(
                         [row.get("cyst_residual_dB") for row in selected],
@@ -986,7 +986,7 @@ def write_picmus_report(
                     f"mean_contrast_score_dB: {fmt_metric(row.get('contrast_score_dB'), 1)}\n",
                 )
                 file.write(f"mean_CR_dB: {fmt_metric(row.get('CR_dB'), 3)}\n")
-                file.write(f"mean_CNR: {fmt_metric(row.get('CNR'), 3)}\n")
+                file.write(f"mean_CNR_env: {fmt_metric(row.get('CNR_env'), 3)}\n")
                 file.write(f"mean_gCNR: {fmt_metric(row.get('gCNR'), 3)}\n")
                 file.write(
                     f"speckle_pass_rate: {fmt_metric(row.get('speckle_pass_rate'), 3)}\n",
@@ -998,10 +998,10 @@ def write_picmus_report(
                     file.write(
                         f"  {group['group']} ({group['roi_indices']}): "
                         f"contrast={fmt_metric(group.get('contrast_score_dB'), 1)}, "
-                        f"CNR={fmt_metric(group.get('CNR'), 3)}, "
+                        f"CNR_env={fmt_metric(group.get('CNR_env'), 3)}, "
                         f"gCNR={fmt_metric(group.get('gCNR'), 3)}\n",
                     )
-            elif mode == "resolution_distorsion":
+            elif mode == "resolution_distortion":
                 file.write(
                     f"mean_FWHM_axial_mm: {fmt_metric(row.get('FWHM_axial_mm'), 4)}\n",
                 )
@@ -1082,7 +1082,7 @@ def main():
     phantom = context["phantom"]
     rois = phantom["contrast_rois"]
     speckle_rois = phantom["speckle_rois"]
-    targets = phantom["resolution_targets"] if mode == "resolution_distorsion" else []
+    targets = phantom["resolution_targets"] if mode == "resolution_distortion" else []
     lateral_resolution_mm = phantom.get("lateral_resolution_mm")
     axial_resolution_mm = phantom.get("axial_resolution_mm")
     gt_db = comparison[0] if has_gt else None
@@ -1124,12 +1124,12 @@ def main():
         row = {"method": method}
         if has_gt and method == "GT":
             row["SSIM_dB_vs_GT"] = 1.0
-            row["SSIM_envelope_vs_GT"] = 1.0
+            row["SSIM_env_vs_GT"] = 1.0
             row["PSNR_dB_vs_GT"] = float("inf")
             row["MAE_dB_vs_GT"] = 0.0
         elif has_gt:
             row["SSIM_dB_vs_GT"] = local_ssim(display, gt_display, data_range=1.0)
-            row["SSIM_envelope_vs_GT"] = local_ssim(
+            row["SSIM_env_vs_GT"] = local_ssim(
                 env,
                 gt_linear_envelope,
                 data_range=1.0,
@@ -1140,7 +1140,7 @@ def main():
             row["MAE_dB_vs_GT"] = float(np.mean(np.abs(clipped_db - clipped_gt_db)))
         else:
             row["SSIM_dB_vs_GT"] = np.nan
-            row["SSIM_envelope_vs_GT"] = np.nan
+            row["SSIM_env_vs_GT"] = np.nan
             row["PSNR_dB_vs_GT"] = np.nan
             row["MAE_dB_vs_GT"] = np.nan
 
@@ -1170,14 +1170,14 @@ def main():
             if metrics is not None:
                 roi_row.update(metrics)
                 cr_scores.append(metrics["CR_dB"])
-                cnr_scores.append(metrics["CNR"])
+                cnr_scores.append(metrics["CNR_env"])
                 gcnr_scores.append(metrics["gCNR"])
                 residual_scores.append(metrics["cyst_residual_dB"])
             roi_rows.append(roi_row)
             contrast_scores.append(score)
         row["contrast_score_dB"] = mean_or_nan(contrast_scores)
         row["CR_dB"] = mean_or_nan(cr_scores)
-        row["CNR"] = mean_or_nan(cnr_scores)
+        row["CNR_env"] = mean_or_nan(cnr_scores)
         row["gCNR"] = mean_or_nan(gcnr_scores)
         row["cyst_residual_dB"] = mean_or_nan(residual_scores)
 
@@ -1205,7 +1205,7 @@ def main():
         row["speckle_KS_D"] = mean_or_nan([s["speckle_KS_D"] for s in speckle_stats])
         row["speckle_KS_p"] = mean_or_nan([s["speckle_KS_p"] for s in speckle_stats])
         row["speckle_SNR"] = mean_or_nan([s["speckle_SNR"] for s in speckle_stats])
-        row["ENL"] = mean_or_nan([s["ENL"] for s in speckle_stats])
+        row["ENL_env"] = mean_or_nan([s["ENL_env"] for s in speckle_stats])
 
         target_stats = []
         for idx, target in enumerate(targets):
@@ -1235,7 +1235,9 @@ def main():
         )
         row["pslr_db"] = mean_or_nan([s["pslr_db"] for s in target_stats])
         row["islr_db"] = mean_or_nan([s["islr_db"] for s in target_stats])
-        row["distortion_mm"] = mean_or_nan([s["distortion_mm"] for s in target_stats])
+        row["localization_error_mm"] = mean_or_nan(
+            [s["localization_error_mm"] for s in target_stats]
+        )
         row["distortion_pass_rate"] = mean_or_nan(
             [s["distortion_pass"] for s in target_stats],
         )
@@ -1249,12 +1251,12 @@ def main():
     summary_fields = [
         "method",
         "SSIM_dB_vs_GT",
-        "SSIM_envelope_vs_GT",
+        "SSIM_env_vs_GT",
         "PSNR_dB_vs_GT",
         "MAE_dB_vs_GT",
         "contrast_score_dB",
         "CR_dB",
-        "CNR",
+        "CNR_env",
         "gCNR",
         "cyst_residual_dB",
         "speckle_pass_rate",
@@ -1262,12 +1264,12 @@ def main():
         "speckle_KS_D",
         "speckle_KS_p",
         "speckle_SNR",
-        "ENL",
+        "ENL_env",
         "FWHM_axial_mm",
         "FWHM_lateral_mm",
         "pslr_db",
         "islr_db",
-        "distortion_mm",
+        "localization_error_mm",
         "distortion_pass_rate",
         "distortion_penalty",
     ]
@@ -1337,17 +1339,18 @@ def main():
         "metric_domains": {
             "contrast_score_dB": "relative dB domain from normalized envelope",
             "CR_dB": "linear envelope mean ratio, reported in dB",
-            "CNR": "linear envelope domain",
+            "CNR_env": "linear envelope domain",
             "gCNR": "linear envelope domain, fixed 256-bin histogram on [0, 1]",
             "speckle_KS_D": "linear envelope domain with 5-pixel block sampling",
             "speckle_SNR": "linear envelope domain with 5-pixel block sampling",
-            "ENL": "linear envelope domain with 5-pixel block sampling",
+            "ENL_env": "linear envelope domain with 5-pixel block sampling; envelope mean squared divided by envelope variance",
             "FWHM_axial_mm": "relative dB domain, -6 dB width",
             "FWHM_lateral_mm": "relative dB domain, -6 dB width",
             "pslr_db": "relative dB domain",
             "islr_db": "relative dB domain",
+            "localization_error_mm": "mean Euclidean distance from each point target to the measured peak position",
             "SSIM_dB_vs_GT": "[-dr, 0] dB display domain",
-            "SSIM_envelope_vs_GT": "normalized linear envelope domain",
+            "SSIM_env_vs_GT": "normalized linear envelope domain",
             "PSNR_dB_vs_GT": "[-dr, 0] dB display domain",
             "MAE_dB_vs_GT": "clipped [-dr, 0] dB domain",
         },

@@ -465,7 +465,19 @@ def save_bar_plot(
         fig.delaxes(axes[j])
     if _page_title:
         fig.suptitle(_page_title, fontsize=10, y=0.995)
-    fig.tight_layout(pad=1.4, h_pad=2.0, w_pad=1.6)
+    has_domain_labels = any(
+        "[log]" in item[0] or "[env]" in item[0] for item in metrics_to_plot
+    )
+    if has_domain_labels:
+        fig.text(
+            0.01,
+            0.008,
+            "[log] dB-compressed display; [env] linear envelope; units in parentheses.",
+            fontsize=6.5,
+        )
+        fig.tight_layout(rect=(0.0, 0.035, 1.0, 1.0), pad=1.4, h_pad=2.0, w_pad=1.6)
+    else:
+        fig.tight_layout(pad=1.4, h_pad=2.0, w_pad=1.6)
     fig.savefig(path, facecolor="white")
     plt.close(fig)
 
@@ -531,8 +543,8 @@ def save_group_metric_plot(
     }
     method_colors = build_page_method_colors(methods)
     n_plots = len(available_metrics)
-    cols = METRIC_COLUMNS
-    rows_grid = 2
+    cols = min(METRIC_COLUMNS, n_plots)
+    rows_grid = math.ceil(n_plots / cols)
     panel_width = METRIC_PANEL_WIDTH
     panel_height = METRIC_PANEL_HEIGHT
     fig, axes = plt.subplots(
@@ -622,6 +634,14 @@ def save_group_metric_plot(
         frameon=False,
         bbox_to_anchor=(0.5, 0.012),
     )
+    if any("[log]" in title or "[env]" in title for _, title in available_metrics):
+        fig.text(
+            0.5,
+            0.05,
+            "[log] dB-compressed display; [env] linear envelope; units in parentheses.",
+            ha="center",
+            fontsize=6.5,
+        )
     fig.tight_layout(
         rect=(0.0, 0.08, 1.0, 1.0),
         pad=1.4,
@@ -639,19 +659,20 @@ def build_metric_plots(rows):
     non_gt = [r for r in ordered_rows if r["method"] != "GT"]
     standard = []
     for title, key in [
-        ("Contrast score (dB)", "contrast_score_dB"),
-        ("CNR", "CNR"),
-        ("gCNR", "gCNR"),
-        ("Speckle Pass Rate", "speckle_pass_rate"),
-        ("Speckle SNR", "speckle_SNR"),
-        ("ENL", "ENL"),
-        ("Axial FWHM (mm)", "FWHM_axial_mm"),
-        ("Lateral FWHM (mm)", "FWHM_lateral_mm"),
-        ("PSLR (dB)", "pslr_db"),
-        ("ISLR (dB)", "islr_db"),
-        ("Distortion Pass Rate", "distortion_pass_rate"),
-        ("Speckle penalty", "speckle_penalty"),
-        ("Distortion penalty", "distortion_penalty"),
+        ("Contrast [log] (dB)", "contrast_score_dB"),
+        ("CNR [env]", "CNR_env"),
+        ("gCNR [env]", "gCNR"),
+        ("Speckle pass rate", "speckle_pass_rate"),
+        ("Speckle SNR [env]", "speckle_SNR"),
+        ("ENL [env]", "ENL_env"),
+        ("FWHM ax. [log] (mm)", "FWHM_axial_mm"),
+        ("FWHM lat. [log] (mm)", "FWHM_lateral_mm"),
+        ("PSLR [log] (dB)", "pslr_db"),
+        ("ISLR [log] (dB)", "islr_db"),
+        ("Loc. err. (mm)", "localization_error_mm"),
+        ("Distortion pass rate", "distortion_pass_rate"),
+        ("Speckle penalty (pts)", "speckle_penalty"),
+        ("Distortion pen. (pts)", "distortion_penalty"),
     ]:
         if any(np.isfinite(finite_value(r.get(key, np.nan))) for r in ordered_rows):
             standard.append(
@@ -661,10 +682,10 @@ def build_metric_plots(rows):
     auxiliary = []
     aux_methods = [r["method"] for r in non_gt]
     for title, key in [
-        ("Gaussian SSIM vs GT (dB)", "SSIM_dB_vs_GT"),
-        ("Gaussian SSIM vs GT (linear envelope)", "SSIM_envelope_vs_GT"),
-        ("PSNR vs GT (dB)", "PSNR_dB_vs_GT"),
-        ("MAE vs GT (dB)", "MAE_dB_vs_GT"),
+        ("SSIM [log] vs Ref.", "SSIM_dB_vs_GT"),
+        ("SSIM [env] vs Ref.", "SSIM_env_vs_GT"),
+        ("PSNR [log] (dB) vs Ref.", "PSNR_dB_vs_GT"),
+        ("MAE [log] (dB) vs Ref.", "MAE_dB_vs_GT"),
     ]:
         if any(np.isfinite(finite_value(r.get(key, np.nan))) for r in non_gt):
             auxiliary.append(
@@ -1003,10 +1024,10 @@ def main():
         os.path.join(metrics_dir, "contrast_group_metrics.png"),
         contrast_group_rows,
         [
-            ("contrast_score_dB", "Contrast score (dB)"),
-            ("CNR", "CNR"),
-            ("gCNR", "gCNR"),
-            ("CR_dB", "CR (dB)"),
+            ("contrast_score_dB", "Contrast [log] (dB)"),
+            ("CNR_env", "CNR [env]"),
+            ("gCNR", "gCNR [env]"),
+            ("CR_dB", "CR [env] (dB)"),
         ],
         "Contrast groups",
         _repeat_references=repeat_references,
@@ -1015,10 +1036,11 @@ def main():
         os.path.join(metrics_dir, "resolution_group_metrics.png"),
         resolution_group_rows,
         [
-            ("FWHM_axial_mm", "Axial FWHM (mm)"),
-            ("FWHM_lateral_mm", "Lateral FWHM (mm)"),
-            ("pslr_db", "PSLR (dB)"),
-            ("islr_db", "ISLR (dB)"),
+            ("FWHM_axial_mm", "FWHM ax. [log] (mm)"),
+            ("FWHM_lateral_mm", "FWHM lat. [log] (mm)"),
+            ("pslr_db", "PSLR [log] (dB)"),
+            ("islr_db", "ISLR [log] (dB)"),
+            ("localization_error_mm", "Loc. err. (mm)"),
         ],
         "Resolution groups",
         _repeat_references=repeat_references,
@@ -1050,7 +1072,7 @@ def main():
         rois = phantom.get("contrast_rois", []) or meta.get("contrast_rois", [])
         targets = (
             (phantom.get("resolution_targets", []) or meta.get("resolution_targets", []))
-            if meta.get("mode") == "resolution_distorsion"
+            if meta.get("mode") == "resolution_distortion"
             else []
         )
         center_x_mm = float((x_mm[0] + x_mm[-1]) / 2.0)

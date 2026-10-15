@@ -298,7 +298,7 @@ class DataPipelineTests(unittest.TestCase):
                 config = yaml.safe_load(handle["config_yaml"][()])
                 sample = config["source_samples"][0]
                 for source in ("simulation", "experiments"):
-                    for mode in ("contrast_speckle", "resolution_distorsion"):
+                    for mode in ("contrast_speckle", "resolution_distortion"):
                         with self.subTest(mode=mode, source=source):
                             sample.update(phantom_mode=mode, phantom_source=source)
                             handle["config_yaml"][()] = yaml.safe_dump(

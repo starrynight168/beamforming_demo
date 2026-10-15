@@ -35,13 +35,13 @@ SIMULATION_SCENES = [
         "gt": "reconstructed_image/simulation/contrast_speckle/contrast_speckle_simu_img_from_iq.hdf5",
     },
     {
-        "name": "simulation_resolution_distorsion",
-        "mode": "resolution_distorsion",
+        "name": "simulation_resolution_distortion",
+        "mode": "resolution_distortion",
         "source": "simulation",
-        "iq": "database/simulation/resolution_distorsion/resolution_distorsion_simu_dataset_iq.hdf5",
-        "scan": "database/simulation/resolution_distorsion/resolution_distorsion_simu_scan.hdf5",
-        "phantom": "database/simulation/resolution_distorsion/resolution_distorsion_simu_phantom.hdf5",
-        "gt": "reconstructed_image/simulation/resolution_distorsion/resolution_distorsion_simu_img_from_iq.hdf5",
+        "iq": "database/simulation/resolution_distortion/resolution_distortion_simu_dataset_iq.hdf5",
+        "scan": "database/simulation/resolution_distortion/resolution_distortion_simu_scan.hdf5",
+        "phantom": "database/simulation/resolution_distortion/resolution_distortion_simu_phantom.hdf5",
+        "gt": "reconstructed_image/simulation/resolution_distortion/resolution_distortion_simu_img_from_iq.hdf5",
     },
 ]
 
@@ -56,13 +56,13 @@ EXPERIMENT_SCENES = [
         "gt": "reconstructed_image/experiments/contrast_speckle/contrast_speckle_expe_img_from_iq.hdf5",
     },
     {
-        "name": "experiments_resolution_distorsion",
-        "mode": "resolution_distorsion",
+        "name": "experiments_resolution_distortion",
+        "mode": "resolution_distortion",
         "source": "experiments",
-        "iq": "database/experiments/resolution_distorsion/resolution_distorsion_expe_dataset_iq.hdf5",
-        "scan": "database/experiments/resolution_distorsion/resolution_distorsion_expe_scan.hdf5",
-        "phantom": "database/experiments/resolution_distorsion/resolution_distorsion_expe_phantom.hdf5",
-        "gt": "reconstructed_image/experiments/resolution_distorsion/resolution_distorsion_expe_img_from_iq.hdf5",
+        "iq": "database/experiments/resolution_distortion/resolution_distortion_expe_dataset_iq.hdf5",
+        "scan": "database/experiments/resolution_distortion/resolution_distortion_expe_scan.hdf5",
+        "phantom": "database/experiments/resolution_distortion/resolution_distortion_expe_phantom.hdf5",
+        "gt": "reconstructed_image/experiments/resolution_distortion/resolution_distortion_expe_img_from_iq.hdf5",
     },
 ]
 

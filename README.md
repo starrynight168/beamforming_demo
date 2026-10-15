@@ -96,7 +96,7 @@ pip install -r requirements.txt
    ```
 
 4. **进行数据完整性体检**：
-   验证必需字段、数据类型、形状、有限性、归一化尺度、路径元数据和 contract 一致性。模体类型支持 `contrast_speckle`/`resolution_distorsion` 与 `simulation`/`experiments` 的组合，以及 `in_vivo`/`in_vivo`；前四种组合的 `phantom_path` 必须指向 `data/PICMUS` 下存在的文件，活体允许空模体路径。`valid_time_samples` 必须是有效整数，其后的 IQ 必须保持零填充；`all_envdb_norm` 必须为有限的 `[N,1,H,W]` 且位于 `[0,1]`：
+   验证必需字段、数据类型、形状、有限性、归一化尺度、路径元数据和 contract 一致性。模体类型支持 `contrast_speckle`/`resolution_distortion` 与 `simulation`/`experiments` 的组合，以及 `in_vivo`/`in_vivo`；前四种组合的 `phantom_path` 必须指向 `data/PICMUS` 下存在的文件，活体允许空模体路径。`valid_time_samples` 必须是有效整数，其后的 IQ 必须保持零填充；`all_envdb_norm` 必须为有限的 `[N,1,H,W]` 且位于 `[0,1]`：
    ```bash
    python data/check_data.py
    python data/check_data.py data/simulation.h5
