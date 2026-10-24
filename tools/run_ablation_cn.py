@@ -49,7 +49,7 @@ GLOBAL_PARAM_DESCRIPTIONS = {
     "tgc": "是否启用深度增益补偿。关闭后深部通常更暗。",
     "tgc_alpha": "TGC 强度。只在 tgc=true 时有意义。",
     "window": "孔径窗函数。rect 锐但旁瓣明显;hann 平滑干净;tukey 折中。",
-    "interp": "延迟插值方式。nearest 最快但粗糙,linear 较快,cubic 平滑,quintic/farrow/sinc 更高阶但通常更慢。",
+    "interp": "延迟插值方式。nearest 最快但粗糙,linear 较快,cubic/catmull_rom 平滑,quintic/farrow/sinc 更高阶但通常更慢。",
 }
 
 ALGORITHM_PARAM_DESCRIPTIONS = {
@@ -85,7 +85,15 @@ PARAM_VALUE_LABELS = {
 CATEGORICAL_PARAM_CHOICES = {
     "aperture_mode": ("discrete", "geometry"),
     "window": ("rect", "tukey", "hann", "hamming", "blackman", "kaiser"),
-    "interp": ("nearest", "linear", "cubic", "quintic", "farrow", "sinc"),
+    "interp": (
+        "nearest",
+        "linear",
+        "cubic",
+        "catmull_rom",
+        "quintic",
+        "farrow",
+        "sinc",
+    ),
 }
 
 

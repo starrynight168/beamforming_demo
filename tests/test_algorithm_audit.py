@@ -405,7 +405,15 @@ class AlgorithmAuditTests(unittest.TestCase):
         i_data[0, -1, 0] = 7.0
         q_data = np.zeros_like(i_data)
         for aperture in ("geometry", "centered"):
-            for interpolation in ("nearest", "linear", "cubic", "quintic", "farrow", "sinc"):
+            for interpolation in (
+                "nearest",
+                "linear",
+                "cubic",
+                "catmull_rom",
+                "quintic",
+                "farrow",
+                "sinc",
+            ):
                 with self.subTest(aperture=aperture, interpolation=interpolation):
                     args = argparse.Namespace(
                         aperture_mode=aperture, dynamic_aperture=False, f_number=1.5,
@@ -461,7 +469,15 @@ class AlgorithmAuditTests(unittest.TestCase):
         samples = torch.tensor([-1.0, 4.0, 5.0])
         expected = torch.tensor([0.0, 4.0, 4.0])
 
-        interpolations = ("nearest", "linear", "cubic", "quintic", "farrow", "sinc")
+        interpolations = (
+            "nearest",
+            "linear",
+            "cubic",
+            "catmull_rom",
+            "quintic",
+            "farrow",
+            "sinc",
+        )
         for interpolation in interpolations:
             with self.subTest(interpolation=interpolation):
                 i_values, q_values = interpolate_channel_samples(
