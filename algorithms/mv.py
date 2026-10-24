@@ -85,8 +85,10 @@ class RowDynamicMVBeamformerIQ:
         fbss=True,
         subarray_ratio=0.5,
         temporal_win=1,
+        options=None,
     ):
         """Initialize the instance."""
+        self.options = args if options is None else options
         geometry = build_row_dynamic_geometry(
             z_grid,
             x_grid,
@@ -95,9 +97,9 @@ class RowDynamicMVBeamformerIQ:
             c,
             fc,
             fs,
-            args.f_number,
-            args.dynamic_aperture,
-            args.window,
+            self.options.f_number,
+            self.options.dynamic_aperture,
+            self.options.window,
             subarray_ratio,
             temporal_win,
             device,
@@ -156,7 +158,7 @@ class RowDynamicMVBeamformerIQ:
                     q_angle,
                     sample,
                     self.ch,
-                    args.interp,
+                    self.options.interp,
                 )
 
                 # 2. 接收端相位旋转 (3D)
@@ -167,7 +169,7 @@ class RowDynamicMVBeamformerIQ:
 
                 x_flat = torch.complex(i_rx, q_rx) * valid_mask
                 row = self.row_cache[hz]
-                aperture_size, subarray_size, subarray_count = (
+                aperture_size, subarray_size, _subarray_count = (
                     row["aperture_size"],
                     row["subarray_size"],
                     row["subarray_count"],

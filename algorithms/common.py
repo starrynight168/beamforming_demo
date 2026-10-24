@@ -21,7 +21,7 @@ from matplotlib.gridspec import GridSpec
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WINDOW_CHOICES = ["rect", "tukey", "hann", "hamming", "blackman", "kaiser"]
-INTERP_CHOICES = ["nearest", "linear", "cubic", "quintic", "farrow", "sinc"]
+INTERP_CHOICES = ["nearest", "linear", "cubic", "catmull_rom", "quintic", "farrow", "sinc"]
 
 COMMON_PARAMS = {
     "select_angles": "1",
@@ -828,6 +828,18 @@ def _interpolate_samples(sample, n_samples, interp, gather):
         q = q0 * (1.0 - frac) + q1 * frac
         return i, q
 
+    if interp == "catmull_rom":
+        idx0 = sample.floor().long().clamp(0, n_samples - 2)
+        frac = sample - idx0.float()
+        weights = (
+            -.5 * frac**3 + frac**2 - .5 * frac,
+            1.5 * frac**3 - 2.5 * frac**2 + 1,
+            -1.5 * frac**3 + 2 * frac**2 + .5 * frac,
+            .5 * frac**3 - .5 * frac**2,
+        )
+        pairs = [gather((idx0 + offset).clamp(0, n_samples - 1)) for offset in (-1, 0, 1, 2)]
+        return tuple(sum(pair[part] * weight for pair, weight in zip(pairs, weights)) for part in (0, 1))
+
     idx0 = sample.floor().long()
     frac = sample - idx0.float()
     if interp == "cubic":
@@ -1058,5 +1070,6 @@ def algorithm_source_paths(method_name):
     return (
         Path(__file__).with_name(f"{method_name}.py"),
         Path(__file__),
+        Path(__file__).with_name("factory.py"),
         *(Path(__file__).with_name(f"{name}.py") for name in dependencies.get(method_name, ())),
     )

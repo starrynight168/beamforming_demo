@@ -111,7 +111,7 @@ def validate_cmsaw_params(
         raise ValueError("depth_smooth_rows must be a positive odd integer")
 
 
-def delayed_iq(sample, angle_idx):
+def delayed_iq(sample, angle_idx, interp):
     """Execute delayed iq."""
     i_data = torch.from_numpy(sample["I"][angle_idx]).to(device)
     q_data = torch.from_numpy(sample["Q"][angle_idx]).to(device)
@@ -141,7 +141,7 @@ def delayed_iq(sample, angle_idx):
         exact,
         angle_index,
         channel_offset,
-        args.interp,
+        interp,
     )
 
     phase_rx = 2.0 * torch.pi * sample["fc"] * (receive / sample["c"])
@@ -332,8 +332,10 @@ class CMSAWBeamformerIQ:
         gamma=0.5,
         clip_percentile=90.0,
         depth_smooth_rows=1,
+        options=None,
     ):
         """Initialize the instance."""
+        self.options = args if options is None else options
         validate_cmsaw_params(
             lmax_ratio,
             min_subarray_len,
@@ -361,7 +363,6 @@ class CMSAWBeamformerIQ:
         from algorithms import mv as mv_module
 
         self.mv_module = mv_module
-        self.mv_module.args = args
         self.mv_bf = self.mv_module.RowDynamicMVBeamformerIQ(
             self.z_grid,
             self.x_grid,
@@ -376,6 +377,7 @@ class CMSAWBeamformerIQ:
             fbss=fbss,
             subarray_ratio=subarray_ratio,
             temporal_win=temporal_win,
+            options=self.options,
         )
         self.last_weight = None
         self.last_lengths = None
@@ -401,15 +403,15 @@ class CMSAWBeamformerIQ:
         angle_weights = []
         angle_lengths = []
         for angle_idx in range(len(selected_angles)):
-            data = delayed_iq(sample, np.array([angle_idx]))
+            data = delayed_iq(sample, np.array([angle_idx]), self.options.interp)
             angle_weight, angle_length = cmsaw_weight_from_delayed_data(
                 data,
                 self.z_grid,
                 self.x_grid,
                 self.pitch,
-                args.f_number,
-                args.dynamic_aperture,
-                args.window,
+                self.options.f_number,
+                self.options.dynamic_aperture,
+                self.options.window,
                 self.lmax_ratio,
                 self.min_subarray_len,
                 self.delta_max,

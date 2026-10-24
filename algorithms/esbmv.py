@@ -109,8 +109,10 @@ class RowDynamicMVBeamformerIQ:
         fbss=True,
         subarray_ratio=0.5,
         temporal_win=1,
+        options=None,
     ):
         """Initialize the instance."""
+        self.options = args if options is None else options
         geometry = build_row_dynamic_geometry(
             z_grid,
             x_grid,
@@ -119,9 +121,9 @@ class RowDynamicMVBeamformerIQ:
             c,
             fc,
             fs,
-            args.f_number,
-            args.dynamic_aperture,
-            args.window,
+            self.options.f_number,
+            self.options.dynamic_aperture,
+            self.options.window,
             subarray_ratio,
             temporal_win,
             device,
@@ -180,7 +182,7 @@ class RowDynamicMVBeamformerIQ:
                     q_angle,
                     sample,
                     self.ch,
-                    args.interp,
+                    self.options.interp,
                 )
 
                 # 2. 接收端相位旋转 (3D)
@@ -191,7 +193,7 @@ class RowDynamicMVBeamformerIQ:
 
                 x_flat = torch.complex(i_rx, q_rx) * valid_mask
                 row = self.row_cache[hz]
-                aperture_size, subarray_size, subarray_count = (
+                aperture_size, subarray_size, _subarray_count = (
                     row["aperture_size"],
                     row["subarray_size"],
                     row["subarray_count"],
@@ -232,7 +234,7 @@ class RowDynamicMVBeamformerIQ:
                 # ========== ESBMV:将 MV 权重投影到信号子空间 ==========
                 if (
                     subarray_size > MAX_GPU_EIGH_SUBARRAY_SIZE
-                    and not args.force_gpu_eigh
+                    and not self.options.force_gpu_eigh
                 ):
                     covariance_cpu = covariance_loaded.cpu()
                     eigvals_cpu, eigvecs_cpu = torch.linalg.eigh(covariance_cpu)
@@ -243,12 +245,12 @@ class RowDynamicMVBeamformerIQ:
 
                 eigvals = eigvals.flip(-1).real
                 eigvecs = eigvecs.flip(-1)
-                if args.num_eig > 0:
-                    n_eig = max(1, min(args.num_eig, subarray_size))
+                if self.options.num_eig > 0:
+                    n_eig = max(1, min(self.options.num_eig, subarray_size))
                     signal_space = eigvecs[:, :, :n_eig]
                     w = signal_space @ (signal_space.mH @ w_mv)
                 else:
-                    keep = eigvals >= args.eig_threshold * eigvals[:, :1].clamp_min(
+                    keep = eigvals >= self.options.eig_threshold * eigvals[:, :1].clamp_min(
                         1e-12,
                     )
                     keep[:, 0] = True

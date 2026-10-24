@@ -99,8 +99,10 @@ class RowDynamicMVBeamformerIQ:
         fbss=True,
         subarray_ratio=0.5,
         temporal_win=1,
+        options=None,
     ):
         """Initialize the instance."""
+        self.options = args if options is None else options
         geometry = build_row_dynamic_geometry(
             z_grid,
             x_grid,
@@ -109,9 +111,9 @@ class RowDynamicMVBeamformerIQ:
             c,
             fc,
             fs,
-            args.f_number,
-            args.dynamic_aperture,
-            args.window,
+            self.options.f_number,
+            self.options.dynamic_aperture,
+            self.options.window,
             subarray_ratio,
             temporal_win,
             device,
@@ -170,7 +172,7 @@ class RowDynamicMVBeamformerIQ:
                     q_angle,
                     sample,
                     self.ch,
-                    args.interp,
+                    self.options.interp,
                 )
 
                 # 2. 接收端相位旋转 (3D)
@@ -181,7 +183,7 @@ class RowDynamicMVBeamformerIQ:
 
                 x_flat = torch.complex(i_rx, q_rx) * valid_mask
                 row = self.row_cache[hz]
-                aperture_size, subarray_size, subarray_count = (
+                aperture_size, subarray_size, _subarray_count = (
                     row["aperture_size"],
                     row["subarray_size"],
                     row["subarray_count"],
@@ -226,7 +228,7 @@ class RowDynamicMVBeamformerIQ:
                     -1
                 )  # [width, subarray_size, 1]
                 y_row_rx = torch.matmul(w.mH, x_mean)  # [width, 1, 1]
-                if args.gcf_power > 0:
+                if self.options.gcf_power > 0:
                     spatial_spectrum = torch.fft.fftshift(
                         torch.fft.fft(x_mean.squeeze(-1), dim=1),
                         dim=1,
@@ -234,7 +236,7 @@ class RowDynamicMVBeamformerIQ:
                     power_spectrum = torch.abs(spatial_spectrum).square()
                     center = subarray_size // 2
                     low_bins = max(
-                        0, min(args.gcf_low_bins, center, subarray_size - center - 1)
+                        0, min(self.options.gcf_low_bins, center, subarray_size - center - 1)
                     )
                     low_energy = power_spectrum[
                         :,
@@ -244,7 +246,7 @@ class RowDynamicMVBeamformerIQ:
                     gcf = (low_energy / total_energy).clamp(0, 1)
                     y_row_rx = y_row_rx * torch.pow(
                         gcf.view(self.width, 1, 1),
-                        args.gcf_power,
+                        self.options.gcf_power,
                     )
 
                 # 3. 发射端相位旋转 (2D)

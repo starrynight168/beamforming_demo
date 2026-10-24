@@ -49,8 +49,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class FDMASBeamformerIQ:
     """Represent FDMASBeamformerIQ."""
 
-    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad):
+    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad, options=None):
         """Initialize the instance."""
+        self.options = args if options is None else options
         self.height, self.width, self.N = len(z_grid), len(x_grid), n_elem
         self.x_grid = torch.from_numpy(x_grid).float().to(device)
         self.z_grid = torch.from_numpy(z_grid).float().to(device)
@@ -81,14 +82,14 @@ class FDMASBeamformerIQ:
         for iz, depth in enumerate(self.z_grid):
             k = dynamic_aperture_channel_count(
                 float(depth.item()),
-                args.f_number,
+                self.options.f_number,
                 pitch,
                 n_elem,
-                args.dynamic_aperture,
+                self.options.dynamic_aperture,
             )
             starts = torch.clamp(centers - k // 2, 0, n_elem - k)
             channels = starts[:, None] + torch.arange(k, device=device)[None, :]
-            row_window = aperture_window_1d(k, args.window, device).expand(
+            row_window = aperture_window_1d(k, self.options.window, device).expand(
                 self.width, -1
             )
             win[iz].scatter_(1, channels, row_window)
@@ -122,7 +123,7 @@ class FDMASBeamformerIQ:
             (self.height, self.width), dtype=torch.complex64, device=device
         )
         ch = self.ch
-        row_block = self.height if args.row_block <= 0 else max(1, args.row_block)
+        row_block = self.height if self.options.row_block <= 0 else max(1, self.options.row_block)
 
         for z0 in range(0, self.height, row_block):
             z1 = min(z0 + row_block, self.height)
@@ -156,7 +157,7 @@ class FDMASBeamformerIQ:
                     q_angle,
                     sample,
                     ch,
-                    args.interp,
+                    self.options.interp,
                 )
 
                 valid_w = valid.float() * weights_b
