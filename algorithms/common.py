@@ -1070,6 +1070,5 @@ def algorithm_source_paths(method_name):
     return (
         Path(__file__).with_name(f"{method_name}.py"),
         Path(__file__),
-        Path(__file__).with_name("factory.py"),
         *(Path(__file__).with_name(f"{name}.py") for name in dependencies.get(method_name, ())),
     )
