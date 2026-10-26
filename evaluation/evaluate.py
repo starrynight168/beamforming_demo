@@ -22,12 +22,19 @@ PASS_THRESHOLD = 0.5
 MIN_PROFILE_POINTS = 2
 MIN_SIDE_LOBE_POINTS = 5
 MIN_ROI_SAMPLES = 8
+TARGET_MIN_PROMINENCE_DB = 6.0
 SIMULATION_RESOLUTION_TARGETS = 20
 EXPERIMENT_RESOLUTION_TARGETS = 7
 SIMULATION_CONTRAST_ROIS = 9
 EXPERIMENT_CONTRAST_ROIS = 2
 IMAGE_STACK_DIMENSIONS = 3
 SPECKLE_PASS_ALPHA = 0.05
+NON_PICMUS_PROTOCOLS = {
+    ("in_vivo", "in_vivo"),
+    ("in_vitro", "in_vitro"),
+    ("in_silico", "random_point_scattering"),
+    ("unknown", "unknown"),
+}
 PICMUS_OFFICIAL_Z_CORRECTION_MM = 0.2
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -47,7 +54,7 @@ def parse_args():
     parser.add_argument(
         "--methods",
         default=None,
-        help="逗号分隔算法名,不含GT;默认从run_params.json读取",
+        help="逗号分隔算法名,不含GT;省略或设为auto时从run_params.json读取",
     )
     parser.add_argument(
         "--method_labels",
@@ -80,10 +87,13 @@ def parse_args():
 
 def load_method_names(args, comparison_path, n_panels, has_gt):
     """Load method names."""
-    if args.method_labels and not args.methods:
+    methods_arg = args.methods
+    if methods_arg is not None and methods_arg.strip().lower() == "auto":
+        methods_arg = None
+    if args.method_labels and not methods_arg:
         raise ValueError("--method_labels 必须与 --methods 一起使用")
-    if args.methods:
-        methods = [m.strip().lower() for m in args.methods.split(",") if m.strip()]
+    if methods_arg:
+        methods = [m.strip().lower() for m in methods_arg.split(",") if m.strip()]
         names = [m.upper() for m in methods]
         if args.method_labels:
             labels = [m.strip() for m in args.method_labels.split(",") if m.strip()]
@@ -410,10 +420,10 @@ def load_picmus_context(
             raise ValueError(f"H5 缺少 {name}，请显式指定 --{name}")
         values.append(value)
     mode, source = values
+    if (mode, source) in NON_PICMUS_PROTOCOLS:
+        return None
     supported_mode = mode in {"contrast_speckle", "resolution_distortion"}
     supported_source = source in {"simulation", "experiments"}
-    if not supported_mode and not supported_source:
-        return None
     if not supported_mode or not supported_source:
         raise ValueError(f"不支持的 PICMUS 模体组合: mode={mode}, source={source}")
     if phantom_path == "auto":
@@ -713,6 +723,23 @@ def build_square_label_map(x_mm, z_mm, targets, half_width_mm, z_offset_mm=0.0):
     return labels
 
 
+def target_response_peak(db_img, target_mask):
+    z_ids, x_ids = np.where(target_mask)
+    if z_ids.size == 0:
+        return None
+    values = db_img[target_mask]
+    if not np.any(np.isfinite(values)):
+        return None
+    peak_flat_index = int(np.nanargmax(values))
+    peak_value = float(values[peak_flat_index])
+    prominence = peak_value - float(np.nanmedian(values))
+    return (
+        int(z_ids[peak_flat_index]),
+        int(x_ids[peak_flat_index]),
+        prominence >= TARGET_MIN_PROMINENCE_DB,
+    )
+
+
 def target_resolution(
     db_img,
     x_mm,
@@ -736,13 +763,30 @@ def target_resolution(
     z_ids, x_ids = np.where(target_mask)
     if z_ids.size == 0:
         return None
+    peak = target_response_peak(db_img, target_mask)
+    if peak is None:
+        return None
+    iz, ix, response_detected = peak
+    result = {
+        "target_x_mm": target["x_mm"],
+        "target_z_mm": target["z_mm"],
+        "peak_x_mm": np.nan,
+        "peak_z_mm": np.nan,
+        "FWHM_axial_mm": np.nan,
+        "FWHM_lateral_mm": np.nan,
+        "pslr_axial_db": np.nan,
+        "pslr_lateral_db": np.nan,
+        "pslr_db": np.nan,
+        "islr_axial_db": np.nan,
+        "islr_lateral_db": np.nan,
+        "islr_db": np.nan,
+        "localization_error_mm": np.nan,
+        "target_response_detected": response_detected,
+    }
+    if not response_detected:
+        return result
     masked = np.full_like(db_img, np.nanmin(db_img), dtype=np.float64)
     masked[target_mask] = db_img[target_mask]
-    roi_values = masked[target_mask]
-    if not np.any(np.isfinite(roi_values)):
-        return None
-    peak_idx = np.nanargmax(roi_values)
-    iz, ix = z_ids[peak_idx], x_ids[peak_idx]
     z_slice = slice(int(z_ids.min()), int(z_ids.max()) + 1)
     x_slice = slice(int(x_ids.min()), int(x_ids.max()) + 1)
     axial_profile = masked[z_slice, ix]
@@ -756,9 +800,7 @@ def target_resolution(
     peak_offset = math.sqrt(
         (x_mm[ix] - target["x_mm"]) ** 2 + (z_mm[iz] - target["z_mm"]) ** 2,
     )
-    return {
-        "target_x_mm": target["x_mm"],
-        "target_z_mm": target["z_mm"],
+    result.update({
         "peak_x_mm": float(x_mm[ix]),
         "peak_z_mm": float(z_mm[iz]),
         "FWHM_axial_mm": axial,
@@ -770,7 +812,8 @@ def target_resolution(
         "islr_lateral_db": float(islr_lateral_db),
         "islr_db": float(islr_db),
         "localization_error_mm": float(peak_offset),
-    }
+    })
+    return result
 
 
 def picmus_distortion_pass(
@@ -789,9 +832,13 @@ def picmus_distortion_pass(
     target_mask = roi_label_map == target_idx
     if not np.any(target_mask):
         return np.nan
-    masked = np.full_like(db_img, np.nanmin(db_img), dtype=np.float64)
-    masked[target_mask] = db_img[target_mask]
-    peak = np.unravel_index(np.nanargmax(masked), masked.shape)
+    peak = target_response_peak(db_img, target_mask)
+    if peak is None:
+        return np.nan
+    z_index, x_index, response_detected = peak
+    if not response_detected:
+        return 0.0
+    peak = z_index, x_index
     return 1.0 if inside_label_map[peak] == target_idx else 0.0
 
 
@@ -898,6 +945,12 @@ def build_resolution_group_rows(target_rows, source, target_count, methods):
                     "group": group_name,
                     "target_indices": " ".join(str(i) for i in indices),
                     "n_targets": len(selected),
+                    "n_detected": sum(
+                        bool(row["target_response_detected"]) for row in selected
+                    ),
+                    "target_response_detection_rate": mean_or_nan(
+                        [row["target_response_detected"] for row in selected]
+                    ),
                     "FWHM_axial_mm": mean_or_nan(
                         [row.get("FWHM_axial_mm") for row in selected],
                     ),
@@ -1013,6 +1066,10 @@ def write_picmus_report(
                 file.write(f"mean_PSLR_dB: {fmt_metric(row.get('pslr_db'), 3)}\n")
                 file.write(f"mean_ISLR_dB: {fmt_metric(row.get('islr_db'), 3)}\n")
                 file.write(
+                    "target_response_detection_rate: "
+                    f"{fmt_metric(row.get('target_response_detection_rate'), 3)}\n",
+                )
+                file.write(
                     f"distortion_pass_rate: {fmt_metric(row.get('distortion_pass_rate'), 3)}\n",
                 )
                 file.write(
@@ -1021,6 +1078,7 @@ def write_picmus_report(
                 for group in [r for r in resolution_group_rows if r["method"] == method]:
                     file.write(
                         f"  {group['group']} ({group['target_indices']}): "
+                        f"detected={group['n_detected']}/{group['n_targets']}, "
                         f"axial={fmt_metric(group.get('FWHM_axial_mm'), 4)}, "
                         f"lateral={fmt_metric(group.get('FWHM_lateral_mm'), 4)}, "
                         f"penalty={fmt_metric(group.get('distortion_penalty'), 1)}\n",
@@ -1240,6 +1298,9 @@ def main():
         row["localization_error_mm"] = mean_or_nan(
             [s["localization_error_mm"] for s in target_stats]
         )
+        row["target_response_detection_rate"] = mean_or_nan(
+            [s["target_response_detected"] for s in target_stats]
+        )
         row["distortion_pass_rate"] = mean_or_nan(
             [s["distortion_pass"] for s in target_stats],
         )
@@ -1272,6 +1333,7 @@ def main():
         "pslr_db",
         "islr_db",
         "localization_error_mm",
+        "target_response_detection_rate",
         "distortion_pass_rate",
         "distortion_penalty",
     ]
@@ -1331,6 +1393,7 @@ def main():
         "speckle_roi_count": len(speckle_rois),
         "resolution_target_count": len(targets),
         "fwhm_window_mm": args.fwhm_window_mm,
+        "target_min_prominence_db": TARGET_MIN_PROMINENCE_DB,
         "picmus_distortion_z_offset_mm": distortion_z_offset_mm,
         "contrast_groups": picmus_contrast_groups(source, len(rois)),
         "resolution_groups": picmus_resolution_groups(source, len(targets)),
@@ -1351,6 +1414,10 @@ def main():
             "pslr_db": "relative dB domain",
             "islr_db": "relative dB domain",
             "localization_error_mm": "mean Euclidean distance from each point target to the measured peak position",
+            "target_response_detection_rate": (
+                "fraction of point targets whose peak is at least "
+                "6 dB above the target-window median"
+            ),
             "SSIM_dB_vs_GT": "[-dr, 0] dB display domain",
             "SSIM_env_vs_GT": "normalized linear envelope domain",
             "PSNR_dB_vs_GT": "[-dr, 0] dB display domain",

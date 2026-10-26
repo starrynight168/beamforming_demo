@@ -581,6 +581,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
         iq_shape is not None
         and isinstance(iq_dataset, h5py.Dataset)
         and isinstance(q_dataset, h5py.Dataset)
+        and iq_dataset.shape == q_dataset.shape
         and "valid_time_samples" in hf
     ):
         valid_ds = hf["valid_time_samples"]
@@ -829,14 +830,9 @@ def inspect_file(path: Path) -> bool:
                 ("样本帧数", n_frames),
                 ("输入 IQ", input_shape),
                 ("主 GT", gt_shape),
-                ("输入采样率", f"{fs / 1e6:.6g} MHz" if fs else "缺失"),
-                (
-                    "GT 参考采样率",
-                    f"{float(gt_reference_fs) / 1e6:.6g} MHz"
-                    if gt_reference_fs
-                    else "缺失",
-                ),
-                ("降采样倍数", int(decimation) if decimation else "缺失"),
+                ("输入采样率", format_frequency_mhz(fs)),
+                ("GT 参考采样率", format_frequency_mhz(gt_reference_fs)),
+                ("降采样倍数", format_positive_integer(decimation)),
                 ("全部字段数", len(hf.keys())),
             ]
             print_table(summary_rows, ("项目", "值"))
@@ -902,6 +898,22 @@ def inspect_file(path: Path) -> bool:
 def discover_default_files() -> list[Path]:
     """Execute discover default files."""
     return sorted(DATA_DIR.glob("*.h5"))
+
+
+def format_frequency_mhz(value) -> str:
+    if value is None:
+        return "缺失"
+    if type(value) not in (int, float) or not np.isfinite(value) or value <= 0:
+        return f"非法: {value}"
+    return f"{value / 1e6:.6g} MHz"
+
+
+def format_positive_integer(value):
+    if value is None:
+        return "缺失"
+    if type(value) is not int or value < 1:
+        return f"非法: {value}"
+    return value
 
 
 def resolve_files(values: list[str] | None) -> list[Path]:

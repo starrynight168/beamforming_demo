@@ -349,6 +349,21 @@ def process_scene(scene, source_root, row_block=24):
     for key in ("name", "mode", "source", "iq", "scan", "gt"):
         if not isinstance(scene[key], str) or not scene[key].strip():
             raise ValueError(f"场景字段 {key} 必须是非空字符串")
+    if (scene["mode"], scene["source"]) not in {
+        ("contrast_speckle", "simulation"),
+        ("contrast_speckle", "experiments"),
+        ("resolution_distortion", "simulation"),
+        ("resolution_distortion", "experiments"),
+        ("in_vivo", "in_vivo"),
+    }:
+        raise ValueError(
+            f"不支持的模体组合: mode={scene['mode']}, source={scene['source']}"
+        )
+    if (
+        scene["gt"].startswith("generated:")
+        and scene["gt"] != "generated:multi_angle_das"
+    ):
+        raise ValueError(f"不支持的生成式 GT: {scene['gt']}")
     print(f"Processing {scene['name']}")
     source_root = Path(source_root)
     iq_path = source_root / scene["iq"]
@@ -894,18 +909,11 @@ def pack_dataset(
             data=np.array([item["I"].shape[2] for item in items], dtype=np.int32),
         )
 
-        max_a = max(item["t0"].shape[1] for item in items)
-        t0_padded = [
-            np.pad(
-                item["t0"],
-                ((0, 0), (0, max_a - item["t0"].shape[1])),
-                mode="constant",
-            )
-            for item in items
-        ]
         hf.create_dataset(
             "time_start_vector",
-            data=np.concatenate(t0_padded, axis=0).astype(np.float32, copy=False),
+            data=np.concatenate([item["t0"] for item in items], axis=0).astype(
+                np.float32, copy=False
+            ),
             compression="gzip",
             compression_opts=4,
         )

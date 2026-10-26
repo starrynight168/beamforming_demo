@@ -670,6 +670,7 @@ def build_metric_plots(rows):
         ("PSLR [log] (dB)", "pslr_db"),
         ("ISLR [log] (dB)", "islr_db"),
         ("Loc. err. (mm)", "localization_error_mm"),
+        ("Target response detection rate", "target_response_detection_rate"),
         ("Distortion pass rate", "distortion_pass_rate"),
         ("Speckle penalty (pts)", "speckle_penalty"),
         ("Distortion pen. (pts)", "distortion_penalty"),
@@ -910,6 +911,7 @@ def save_lateral_profile_plot(
             target_z_indices = np.flatnonzero(np.abs(z_mm - target_point["z_mm"]) < fwhm_window_mm)
             display_x_mask = np.abs(x_mm - target_point["x_mm"]) < display_window_mm
             fig, ax = plt.subplots(figsize=(12.5, 5.8), dpi=150)
+            y_upper = 0.0
             for i, method in zip(method_indices, page_methods, strict=True):
                 style = profile_styles[method]
                 if target_x_indices.size == 0 or target_z_indices.size == 0:
@@ -918,12 +920,13 @@ def save_lateral_profile_plot(
                 if not np.any(np.isfinite(target_patch)):
                     continue
                 peak_flat_index = int(np.nanargmax(target_patch))
+                target_peak = float(target_patch.flat[peak_flat_index])
                 peak_z_index = int(target_z_indices[peak_flat_index // target_x_indices.size])
                 profile = comparison[i, peak_z_index, display_x_mask].astype(np.float64)
                 if profile.size == 0 or not np.any(np.isfinite(profile)):
                     continue
-                profile -= np.nanmax(profile)
-                profile = np.minimum(profile, 0.0)
+                profile -= target_peak
+                y_upper = max(y_upper, float(np.nanmax(profile)))
                 plot_label = method
                 for row in target_rows or []:
                     try:
@@ -960,8 +963,8 @@ def save_lateral_profile_plot(
                 pad=12,
             )
             ax.set_xlabel("Lateral offset from target (mm)")
-            ax.set_ylabel("Amplitude relative to local peak (dB)")
-            ax.set_ylim(-dr, 0)
+            ax.set_ylabel("Amplitude relative to target-window peak (dB)")
+            ax.set_ylim(-dr, y_upper)
             ax.grid(True, linestyle="--", alpha=0.5)
             handles, labels = ax.get_legend_handles_labels()
             if handles:

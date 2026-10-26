@@ -49,7 +49,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class FDMASBeamformerIQ:
     """Represent FDMASBeamformerIQ."""
 
-    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, options=None):
+    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad, options=None):
         """Initialize the instance."""
         self.options = args if options is None else options
         self.height, self.width, self.N = len(z_grid), len(x_grid), n_elem
@@ -249,6 +249,8 @@ def main():
         c,
         fc,
         fs,
+        t0_sub,
+        angles_all,
     )
 
     print("Processing F-DMAS...")
@@ -284,8 +286,6 @@ def main():
         title_parts.append("Full")
     title_params = " | ".join(title_parts)
 
-    out_name = METHOD_NAME
-
     method_dir = save_algorithm_result(
         fdmas_db,
         input_data,
@@ -295,7 +295,7 @@ def main():
         dt,
     )
 
-    print(f"  GPU Time: {dt:.2f}s | Saved -> {out_name}")
+    print(f"  GPU Time: {dt:.2f}s | Saved -> {METHOD_NAME}")
     print(f"\nDone | Output: {method_dir}")
 
 

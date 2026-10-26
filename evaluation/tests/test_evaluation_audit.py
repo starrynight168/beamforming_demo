@@ -16,8 +16,10 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from evaluation.evaluate import (
+    build_resolution_group_rows,
     load_method_names,
     load_picmus_context,
+    picmus_distortion_pass,
     picmus_distortion_z_offset_mm,
     picmus_reference_path,
     read_phantom,
@@ -89,6 +91,129 @@ class EvaluationInputTests(unittest.TestCase):
                 ["GT", "DAS", "MV"],
             )
 
+    def test_methods_auto_uses_run_params_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "run_params.json").write_text(
+                json.dumps(
+                    {
+                        "algorithms": ["das", "mv"],
+                        "algorithm_labels": {"das": "DAS", "mv": "MV"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(methods="auto", method_labels=None)
+            self.assertEqual(
+                load_method_names(args, str(root / "comparison.npy"), 2, False),
+                ["DAS", "MV"],
+            )
+
+    def test_resolution_peak_stays_inside_target_roi(self):
+        image = np.full((3, 3), -60.0)
+        image[0, 0] = 0.0
+        image[1, 1] = -5.0
+        x_mm = np.array([0.0, 1.0, 2.0])
+        z_mm = np.array([0.0, 1.0, 2.0])
+        target = {"x_mm": 2.0, "z_mm": 2.0}
+
+        resolution = target_resolution(
+            image, x_mm, z_mm, target, 1.1, target_idx=1
+        )
+        self.assertEqual((resolution["peak_x_mm"], resolution["peak_z_mm"]), (1.0, 1.0))
+
+    def test_distortion_peak_stays_inside_target_roi(self):
+        image = np.full((3, 3), -60.0)
+        image[0, 0] = 0.0
+        image[1, 1] = -5.0
+        target_mask = np.zeros((3, 3), dtype=np.int32)
+        target_mask[1:, 1:] = 1
+        inside_mask = np.zeros_like(target_mask)
+        inside_mask[1, 1] = 1
+        self.assertEqual(
+            picmus_distortion_pass(
+                image,
+                1,
+                "simulation",
+                roi_label_map=target_mask,
+                inside_label_map=inside_mask,
+            ),
+            1.0,
+        )
+
+    def test_undetectable_target_has_na_metrics_and_fails_distortion(self):
+        image = np.full((3, 3), -60.0)
+        image[0, 0] = 0.0
+        x_mm = np.array([0.0, 1.0, 2.0])
+        z_mm = np.array([0.0, 1.0, 2.0])
+        target = {"x_mm": 2.0, "z_mm": 2.0}
+        target_mask = np.zeros((3, 3), dtype=np.int32)
+        target_mask[1:, 1:] = 1
+        inside_mask = np.zeros_like(target_mask)
+        inside_mask[1, 1] = 1
+
+        resolution = target_resolution(
+            image,
+            x_mm,
+            z_mm,
+            target,
+            1.1,
+            target_idx=1,
+            label_map=target_mask,
+        )
+        self.assertFalse(resolution["target_response_detected"])
+        for metric in (
+            "peak_x_mm",
+            "peak_z_mm",
+            "FWHM_axial_mm",
+            "FWHM_lateral_mm",
+            "pslr_db",
+            "islr_db",
+            "localization_error_mm",
+        ):
+            self.assertTrue(np.isnan(resolution[metric]), metric)
+        self.assertEqual(
+            picmus_distortion_pass(
+                image,
+                1,
+                "simulation",
+                roi_label_map=target_mask,
+                inside_label_map=inside_mask,
+            ),
+            0.0,
+        )
+
+        group = build_resolution_group_rows(
+            [
+                {
+                    "method": "DAS",
+                    "target_idx": 1,
+                    **resolution,
+                    "distortion_pass": 0.0,
+                }
+            ],
+            "simulation",
+            1,
+            ["DAS"],
+        )[0]
+        self.assertEqual(group["n_targets"], 1)
+        self.assertEqual(group["n_detected"], 0)
+        self.assertEqual(group["target_response_detection_rate"], 0.0)
+        self.assertEqual(group["distortion_pass_rate"], 0.0)
+
+    def test_target_detection_threshold_is_six_db_over_window_median(self):
+        x_mm = np.array([0.0, 1.0, 2.0])
+        z_mm = np.array([0.0, 1.0, 2.0])
+        target = {"x_mm": 2.0, "z_mm": 2.0}
+        for peak, expected in ((-4.0, True), (-4.01, False)):
+            with self.subTest(peak=peak):
+                image = np.full((3, 3), -10.0)
+                image[2, 2] = peak
+                resolution = target_resolution(
+                    image, x_mm, z_mm, target, 1.1, target_idx=1
+                )
+                self.assertEqual(resolution["target_response_detected"], expected)
+
     def test_method_labels_must_match_explicit_method_count(self):
         args = SimpleNamespace(methods="das,mv", method_labels="DAS")
         with self.assertRaisesRegex(ValueError, "method_labels.*数量"):
@@ -114,10 +239,31 @@ class EvaluationInputTests(unittest.TestCase):
                 evaluate_main()
             self.assertFalse((root / "metrics").exists())
 
+    def test_unknown_protocol_fails_instead_of_skipping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = write_picmus_sample(
+                root, mode="unrecognized", source="unrecognized"
+            )
+            argv = [
+                "evaluate.py",
+                "--h5_path",
+                str(path),
+                "--comparison_npy",
+                str(root / "missing.npy"),
+                "--out_dir",
+                str(root / "metrics"),
+            ]
+            with patch.object(sys, "argv", argv):
+                with self.assertRaisesRegex(ValueError, "不支持的 PICMUS 模体组合"):
+                    evaluate_main()
+            self.assertFalse((root / "metrics").exists())
+
     def test_metadata_must_define_a_consistent_protocol(self):
         for mode, source in (
             ("unknown", "simulation"),
             ("contrast_speckle", "unknown"),
+            ("unrecognized", "unrecognized"),
             ("", "simulation"),
             ("contrast_speckle", ""),
         ):
@@ -157,11 +303,18 @@ class EvaluationInputTests(unittest.TestCase):
                     )
                     self.assertEqual(context["meta"]["sample_name"], "renamed_sample")
                     self.assertTrue(context["meta"]["has_gt"])
-        with tempfile.TemporaryDirectory() as directory:
-            path = write_picmus_sample(
-                Path(directory), mode="in_vitro", source="in_vitro"
-            )
-            self.assertIsNone(load_picmus_context(path, 0))
+        for mode, source in (
+            ("in_vivo", "in_vivo"),
+            ("in_vitro", "in_vitro"),
+            ("in_silico", "random_point_scattering"),
+            ("unknown", "unknown"),
+        ):
+            with (
+                self.subTest(mode=mode, source=source),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = write_picmus_sample(Path(directory), mode=mode, source=source)
+                self.assertIsNone(load_picmus_context(path, 0))
 
     def test_missing_phantom_never_uses_defaults_or_gt_detection(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -431,27 +584,6 @@ class EvaluationInputTests(unittest.TestCase):
             self.assertEqual(metadata["evaluation_protocol"], "picmus")
             self.assertEqual(len(metadata["contrast_rois"]), 9)
 
-    def test_flat_frame_peak_stays_inside_resolution_target_roi(self):
-        x_mm = np.linspace(-20, 20, 81)
-        z_mm = np.linspace(0, 60, 121)
-        target = {"x_mm": 0.0, "z_mm": 30.0}
-        label_map = np.zeros((len(z_mm), len(x_mm)), dtype=np.int32)
-        label_map[58:63, 38:43] = 1
-
-        result = target_resolution(
-            np.zeros_like(label_map, dtype=np.float64),
-            x_mm,
-            z_mm,
-            target,
-            window_mm=2.0,
-            target_idx=1,
-            label_map=label_map,
-        )
-
-        peak_x = np.flatnonzero(np.isclose(x_mm, result["peak_x_mm"]))[0]
-        peak_z = np.flatnonzero(np.isclose(z_mm, result["peak_z_mm"]))[0]
-        self.assertEqual(label_map[peak_z, peak_x], 1)
-
     def test_resolution_scene_smoke(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -510,6 +642,14 @@ class EvaluationInputTests(unittest.TestCase):
             ) as file:
                 targets = list(csv.DictReader(file))
             self.assertEqual(len(targets), 40)
+            self.assertEqual(targets[0]["target_response_detected"], "True")
+            with (metrics_dir / "summary_metrics.csv").open(
+                encoding="utf-8-sig"
+            ) as file:
+                summary = list(csv.DictReader(file))
+            model_row = next(row for row in summary if row["method"] != "GT")
+            self.assertEqual(float(model_row["target_response_detection_rate"]), 1.0)
+            self.assertEqual(metadata["target_min_prominence_db"], 6.0)
             # 15 个采样点重采样至 150 点，-6 dB 区间分别跨 13 和 31 个间隔。
             interval = 3.5 / 149
             self.assertAlmostEqual(float(targets[0]["FWHM_axial_mm"]), 13 * interval)
@@ -560,6 +700,45 @@ class EvaluationInputTests(unittest.TestCase):
 
 
 class PlotOutputTests(unittest.TestCase):
+    def test_point_profile_uses_peak_inside_target_window_as_reference(self) -> None:
+        from matplotlib.axes import Axes
+
+        with tempfile.TemporaryDirectory() as directory:
+            grid = np.linspace(-5.0, 5.0, 21)
+            comparison = np.full((1, len(grid), len(grid)), -30.0)
+            comparison[0, 10, 10] = -1.0
+            comparison[0, 10, 16] = 0.0
+            plotted = []
+            limits = []
+            original_plot = Axes.plot
+            original_set_ylim = Axes.set_ylim
+
+            def capture_plot(axis, x, y, *args, **kwargs):
+                plotted.append((np.asarray(x), np.asarray(y)))
+                return original_plot(axis, x, y, *args, **kwargs)
+
+            def capture_ylim(axis, *args, **kwargs):
+                limits.append(args)
+                return original_set_ylim(axis, *args, **kwargs)
+
+            with patch.object(Axes, "plot", new=capture_plot), patch.object(
+                Axes, "set_ylim", new=capture_ylim
+            ):
+                save_lateral_profile_plot(
+                    directory,
+                    comparison,
+                    grid,
+                    grid,
+                    rois=[],
+                    targets=[{"x_mm": 0.0, "z_mm": 0.0}],
+                    methods=["DAS"],
+                )
+
+            offsets, profile = plotted[0]
+            self.assertAlmostEqual(profile[np.flatnonzero(offsets == 0.0)[0]], 0.0)
+            self.assertAlmostEqual(profile[np.flatnonzero(offsets == 3.0)[0]], 1.0)
+            self.assertEqual(limits[-1], (-60.0, 1.0))
+
     def test_missing_comparison_cleans_stale_profile_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

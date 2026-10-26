@@ -20,7 +20,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import yaml
 
 # Add project root and evaluation to path
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -73,18 +72,6 @@ def best_cached_result(evaluator):
     return max(evaluator.cache.values(), key=lambda result: result["ssim"])
 
 
-def sample_output_name(hf, sample_idx):
-    config = yaml.safe_load(hf["config_yaml"][()])
-    sample_name = config["source_samples"][sample_idx]["id"]
-    if (
-        not isinstance(sample_name, str)
-        or Path(sample_name).name != sample_name
-        or sample_name in {".", ".."}
-    ):
-        raise ValueError("H5 source sample id must be a directory name")
-    return sample_name
-
-
 class SpeedOfSoundEvaluator:
     """Evaluates single-angle MV beamforming across different sound speeds against multi-angle DAS."""
 
@@ -122,14 +109,11 @@ class SpeedOfSoundEvaluator:
         self.interp = interp
         self.dr = dr
 
-        mv.args = argparse.Namespace(
+        self.mv_options = argparse.Namespace(
             f_number=self.f_number,
             dynamic_aperture=self.dynamic_aperture,
             window=self.window,
             interp=self.interp,
-            tgc=self.tgc,
-            tgc_alpha=self.tgc_alpha,
-            dr=self.dr,
         )
 
         # Load H5 dataset
@@ -159,7 +143,6 @@ class SpeedOfSoundEvaluator:
 
         # Multi-angle DAS reference (ground truth)
         with h5py.File(self.h5_path, "r") as hf:
-            self.sample_name = sample_output_name(hf, self.sample_idx)
             self.gt_display = db_to_display(
                 ground_truth_db(hf, self.sample_idx).squeeze(), self.dr
             )
@@ -232,10 +215,13 @@ class SpeedOfSoundEvaluator:
             c_key,
             self.fc,
             self.fs,
+            self.sel_t0,
+            self.sel_angles,
             mv_dl=self.mv_dl,
             fbss=self.fbss,
             subarray_ratio=self.subarray_ratio,
             temporal_win=self.temporal_win,
+            options=self.mv_options,
         )
 
         with torch.inference_mode():
@@ -272,7 +258,6 @@ class SpeedOfSoundEvaluator:
             "psnr": psnr_val,
             "mae_db": mae_db,
             "elapsed_sec": elapsed,
-            "display": display,
             "db_img": db_img,
         }
         self.cache[c_key] = result
@@ -804,7 +789,10 @@ def main():
         overall_best = best_cached_result(evaluator)
 
     # 3. Output Figures and Data
-    out_dir = resolve_path(args.output_dir) / evaluator.sample_name
+    sample_name = (
+        "carotid_cross" if args.sample_idx == 0 else f"carotid_sample_{args.sample_idx}"
+    )
+    out_dir = resolve_path(args.output_dir) / sample_name
     plot_results(evaluator, history, overall_best, out_dir)
     save_results(evaluator, history, overall_best, final_bracket, out_dir)
 

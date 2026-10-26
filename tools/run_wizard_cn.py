@@ -1,6 +1,7 @@
 """Provide Python utilities for run_wizard_cn."""
 
 import argparse
+import hashlib
 import json
 import math
 import subprocess
@@ -63,6 +64,24 @@ ALGORITHM_PARAM_HELP = {
     "depth_smooth_rows": "CMSAW 深度平滑行数,必须为正奇数",
 }
 
+ALGORITHM_PARAM_TYPES = {
+    "aperture_mode": str,
+    "mv_dl": float,
+    "fbss": bool,
+    "subarray_ratio": float,
+    "temporal_win": int,
+    "num_eig": int,
+    "eig_threshold": float,
+    "gcf_low_bins": int,
+    "gcf_power": float,
+    "lmax_ratio": float,
+    "min_subarray_len": int,
+    "delta_max": float,
+    "gamma": float,
+    "clip_percentile": float,
+    "depth_smooth_rows": int,
+}
+
 HELP_TEXT = {
     "h5": "H5 是已经整理好的成像数据包,里面通常包含输入 IQ、角度、探头参数、成像网格,有些还包含 GT 参考图。",
     "sample": "一个 H5 里可以有多个样本。样本编号就是选择第几帧/第几个场景来成像。",
@@ -78,7 +97,7 @@ HELP_TEXT = {
     "gt": "GT 是参考图像。加入 GT 后,对比图会把算法结果和参考图放在一起,便于肉眼比较。",
     "evaluate": "指标会计算算法结果和 GT 的差异,并生成 CSV/图片。没有 GT 时不建议计算。",
     "keep_existing": "复用已有输出可以节省时间,但如果你改了参数,应关闭复用重新计算。",
-    "execute": "如果暂不执行,向导只会生成临时配置和命令,方便你检查。",
+    "execute": "如果暂不执行,向导只会显示最终配置和命令,不会写入临时配置。",
     "output": "结果目录会保存各算法输出图、comparison.png、运行参数和可选指标。",
 }
 
@@ -194,7 +213,7 @@ def validate_algorithm_param(name, value):
 
 
 def ask_algorithm_param(algorithm, name, default):
-    """Ask for one method-specific parameter using the type from config.yaml."""
+    """Ask for one method-specific parameter using its algorithm CLI type."""
     label = ALGORITHM_PARAM_HELP.get(name, name)
     prompt = f"[{algorithm}] {name} - {label}"
     if name == "aperture_mode":
@@ -204,26 +223,29 @@ def ask_algorithm_param(algorithm, name, default):
         ]
         default_index = configured_choice_index(options, default, f"{algorithm}.{name}")
         return ask_choice(prompt, options, default_index=default_index)
-    if isinstance(default, bool):
+    value_type = ALGORITHM_PARAM_TYPES.get(name)
+    if value_type is None:
+        raise ValueError(f"不支持的算法参数: {algorithm}.{name}")
+    if value_type is bool:
+        if not isinstance(default, bool):
+            raise ValueError(f"{algorithm}.{name} 配置必须是布尔值")
         return ask_yes_no(prompt, default=default)
 
     while True:
         raw = ask_text(prompt, default=default)
         try:
-            if isinstance(default, int):
+            if value_type is int:
                 value = int(raw)
                 if str(value) != raw.strip() and raw.strip() not in {f"+{value}"}:
                     raise ValueError
-            elif isinstance(default, float):
+            else:
                 value = float(raw)
                 if not math.isfinite(value):
                     raise ValueError
-            else:
-                return raw
             return validate_algorithm_param(name, value)
         except (TypeError, ValueError) as exc:
             detail = str(exc) or (
-                "请输入整数。" if isinstance(default, int) else "请输入合法数字。"
+                "请输入整数。" if value_type is int else "请输入合法数字。"
             )
             print(detail)
 
@@ -256,12 +278,17 @@ def configured_choice_index(options, value, setting_name):
     raise ValueError(f"{setting_name} 配置值不受支持: {value}")
 
 
-def preserve_disabled_setting(state, name, configured_params, fallback):
-    state[name] = state.get(name, configured_params.get(name, fallback))
-
-
 def ask_multi_choice(prompt, options, default_keys):
     """Execute ask multi choice."""
+    option_keys = {key for key, _ in options}
+    if (
+        not isinstance(default_keys, (list, tuple))
+        or not default_keys
+        or any(not isinstance(key, str) for key in default_keys)
+        or len(default_keys) != len(set(default_keys))
+        or any(key not in option_keys for key in default_keys)
+    ):
+        raise ValueError("config.algorithms 必须是非空且仅含支持算法的列表")
     print(f"\n{prompt}")
     for idx, (key, desc) in enumerate(options, 1):
         print(f"  {idx}. {key:<7} {desc}")
@@ -287,22 +314,12 @@ def ask_multi_choice(prompt, options, default_keys):
                 ok = False
                 print(f"无法识别:{item}")
                 break
-        selected = list(dict.fromkeys(selected))
         if ok and selected:
+            if len(selected) != len(set(selected)):
+                print("算法列表包含重复项,请重新选择。")
+                continue
             return selected
         print("请选择至少一个合法算法。")
-
-
-def validate_algorithm_modules(algorithms):
-    if not isinstance(algorithms, list) or not algorithms:
-        raise ValueError("config.algorithms 必须是非空列表")
-    missing = [
-        algorithm
-        for algorithm in algorithms
-        if not (ROOT / "algorithms" / f"{algorithm}.py").is_file()
-    ]
-    if missing:
-        raise ValueError(f"config.algorithms 模块不存在: {missing}")
 
 
 def relative_to_root(path):
@@ -589,6 +606,29 @@ def build_config(base_config, h5_path, sample_idx, algorithms, params):
     return config, scene_id
 
 
+def reusable_scene_id(config):
+    """Return a stable scene ID for an identical reusable wizard configuration."""
+    scene = config["scenes"][0]
+    algorithms = config["algorithms"]
+    identity = {
+        "h5_path": scene["h5_path"],
+        "sample_idx": scene["sample_idx"],
+        "algorithms": algorithms,
+        "params": config["params"],
+        "algorithm_params": {
+            algorithm: (config.get("algorithm_params", {}) or {}).get(algorithm, {})
+            for algorithm in algorithms
+        },
+    }
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"wizard_{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+
 def load_base_config():
     """Load base config."""
     with open(ROOT / "config.yaml", encoding="utf-8") as f:
@@ -667,16 +707,14 @@ def main():
     def step_algorithms():
         """Execute step algorithms."""
         algorithm_options = list(ALGORITHMS.items())
-        default_algorithms = state.get(
-            "algorithms",
-            state["base_config"].get("algorithms", ["das"]),
-        )
-        validate_algorithm_modules(default_algorithms)
         explain(state["teaching"], "algorithm")
         state["algorithms"] = ask_multi_choice(
             "请选择成像方法",
             algorithm_options,
-            default_keys=default_algorithms,
+            default_keys=state.get(
+                "algorithms",
+                state["base_config"].get("algorithms", ["das"]),
+            ),
         )
 
     def step_algorithm_params():
@@ -766,10 +804,8 @@ def main():
                 strictly_greater=True,
             )
         else:
-            preserve_disabled_setting(
-                state,
+            state["f_number"] = (state["base_config"].get("params", {}) or {}).get(
                 "f_number",
-                state["base_config"].get("params", {}) or {},
                 1.5,
             )
 
@@ -797,10 +833,8 @@ def main():
                 minimum=0,
             )
         else:
-            preserve_disabled_setting(
-                state,
+            state["tgc_alpha"] = (state["base_config"].get("params", {}) or {}).get(
                 "tgc_alpha",
-                state["base_config"].get("params", {}) or {},
                 0.5,
             )
 
@@ -901,8 +935,6 @@ def main():
             "window": state["window"],
             "interp": state["interp"],
         }
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_id = f"wizard_{timestamp}"
         config, _ = build_config(
             state["base_config"],
             state["h5_path"],
@@ -910,11 +942,16 @@ def main():
             state["algorithms"],
             params,
         )
-        config["scenes"][0]["id"] = run_id
         for algorithm, method_params in state["algorithm_params"].items():
             config.setdefault("algorithm_params", {})[algorithm] = deepcopy(
                 method_params
             )
+        if state["keep_existing"]:
+            run_id = reusable_scene_id(config)
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            run_id = f"wizard_{timestamp}"
+        config["scenes"][0]["id"] = run_id
         config_path = make_temp_config_path(state["output_root"], run_id)
         cmd = [
             sys.executable,

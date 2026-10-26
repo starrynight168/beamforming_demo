@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from run_one import load_config as load_comparison_config
-from run_one import resolve_path, scene_ids
+from run_one import resolve_path, scene_ids, select_algorithms
 
 
 ROOT = Path(__file__).resolve().parent
@@ -50,6 +50,7 @@ def main():
     unknown = [scene for scene in scenes if scene not in all_scenes]
     if unknown:
         raise ValueError(f"Unknown scene ids: {unknown}")
+    select_algorithms(config, args.algorithms)
 
     failed = []
     for idx, scene_id in enumerate(scenes, 1):
@@ -65,7 +66,7 @@ def main():
             "--python_exe",
             args.python_exe,
         ]
-        if args.algorithms:
+        if args.algorithms is not None:
             cmd.extend(["--algorithms", args.algorithms])
         if args.no_evaluate:
             cmd.append("--no_evaluate")
@@ -75,7 +76,7 @@ def main():
 
         print("\n" + "#" * 70)
         print(f"[{idx}/{len(scenes)}] {scene_id}")
-        print("#" * 70)
+        print("#" * 70, flush=True)
         result = subprocess.run(cmd, cwd=ROOT, text=True, check=False)
         if result.returncode != 0:
             failed.append(scene_id)

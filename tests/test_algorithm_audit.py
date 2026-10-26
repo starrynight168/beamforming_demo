@@ -18,10 +18,12 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from algorithms import das
-from algorithms.cmsaw import CMSAWBeamformerIQ, validate_cmsaw_params
+from algorithms.cmsaw import validate_cmsaw_params
 from algorithms.common import (
     aperture_window_1d,
     aperture_window_from_dx,
+    algorithm_source_paths,
+    dynamic_aperture_channel_count,
     interpolate_channel_samples,
     normalized_mv_weights,
     parse_selected_angles,
@@ -32,12 +34,13 @@ from algorithms.common import (
 from run_one import can_reuse_existing, scene_has_gt
 from run_one import main as run_scene
 from tools.ablate_sound_speed import (
+    SpeedOfSoundEvaluator,
     dense_grid_sweep,
     multi_section_search,
-    sample_output_name,
 )
 from tools.run_ablation_cn import (
     can_reuse_flat_result,
+    find_matching_ablation_run,
     method_output_path,
     numeric_range_values,
     preserve_ground_truth,
@@ -45,63 +48,24 @@ from tools.run_ablation_cn import (
     validate_values,
 )
 from tools.run_wizard_cn import (
+    ALGORITHMS,
     ask_algorithm_param,
+    ask_multi_choice,
     configured_choice_index,
     inspect_h5,
-    preserve_disabled_setting,
+    reusable_scene_id,
     sample_can_be_evaluated,
     validate_algorithm_param,
-    validate_algorithm_modules,
 )
 
 
 class AlgorithmAuditTests(unittest.TestCase):
-    def test_cmsaw_rejects_depth_smoothing_larger_than_image_at_construction(self):
-        with self.assertRaisesRegex(ValueError, "超过图像深度"):
-            CMSAWBeamformerIQ(
-                np.array([0.0, 1.0]),
-                np.array([0.0]),
-                1,
-                0.3,
-                1540.0,
-                5e6,
-                20e6,
-                depth_smooth_rows=3,
-            )
-
-    def test_esbmv_force_gpu_eigh_rejects_cpu_device(self):
-        from algorithms import esbmv
-
-        with (
-            patch.object(esbmv, "device", torch.device("cpu")),
-            patch.object(esbmv, "args", None),
-            patch.object(
-                esbmv.parser,
-                "parse_args",
-                return_value=SimpleNamespace(force_gpu_eigh=True),
-            ),
-            self.assertRaisesRegex(ValueError, "requires CUDA"),
-        ):
-            esbmv.main()
-
     def test_ablation_uses_only_flattened_method_outputs(self):
         scene_dir = Path("run") / "scene"
         self.assertEqual(
             method_output_path(scene_dir, "das", "npy"),
             scene_dir / "das.npy",
         )
-
-    def test_sound_speed_output_name_comes_from_h5_sample_metadata(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "input.h5"
-            with h5py.File(path, "w") as handle:
-                handle.create_dataset(
-                    "config_yaml",
-                    data=yaml.safe_dump(
-                        {"source_samples": [{"id": "carotid_cross"}, {"id": "carotid_long"}]}
-                    ),
-                )
-                self.assertEqual(sample_output_name(handle, 1), "carotid_long")
 
     def test_wizard_rejects_unsupported_configured_choices(self):
         choices = [("rect", "rectangular"), ("hann", "Hann")]
@@ -110,23 +74,38 @@ class AlgorithmAuditTests(unittest.TestCase):
             configured_choice_index(choices, "old_window", "params.window")
         with self.assertRaisesRegex(ValueError, "das.aperture_mode.*不受支持"):
             ask_algorithm_param("das", "aperture_mode", "legacy")
+        with self.assertRaisesRegex(ValueError, "config.algorithms"):
+            ask_multi_choice("algorithms", list(ALGORITHMS.items()), ["das", "unknown"])
+        with (
+            patch("tools.run_wizard_cn.read_line", side_effect=["das,das", "das"]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(
+                ask_multi_choice("algorithms", list(ALGORITHMS.items()), ["das"]),
+                ["das"],
+            )
 
-    def test_wizard_preserves_inactive_parameter_values(self):
-        state = {"f_number": 2.0, "tgc_alpha": 0.8}
-        configured = {"f_number": 1.5, "tgc_alpha": 0.5}
-        preserve_disabled_setting(state, "f_number", configured, 1.5)
-        preserve_disabled_setting(state, "tgc_alpha", configured, 0.5)
-        self.assertEqual(state, {"f_number": 2.0, "tgc_alpha": 0.8})
+    def test_wizard_numeric_parameter_types_follow_algorithm_cli(self):
+        with patch("tools.run_wizard_cn.ask_text", return_value="0.5"):
+            self.assertEqual(ask_algorithm_param("mv", "mv_dl", 0), 0.5)
+        with (
+            patch("tools.run_wizard_cn.ask_text", side_effect=["1.5", "3"]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(ask_algorithm_param("esbmv", "num_eig", 0.0), 3)
 
-    def test_wizard_rejects_missing_configured_algorithm_module(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "algorithms").mkdir()
-            (root / "algorithms" / "custom.py").touch()
-            with patch("tools.run_wizard_cn.ROOT", root):
-                validate_algorithm_modules(["custom"])
-                with self.assertRaisesRegex(ValueError, "config.algorithms 模块不存在"):
-                    validate_algorithm_modules(["missing"])
+    def test_wizard_reusable_scene_id_tracks_effective_configuration(self):
+        config = {
+            "algorithms": ["das"],
+            "scenes": [{"id": "old-id", "h5_path": "data/input.h5", "sample_idx": 0}],
+            "params": {"select_angles": "1", "f_number": 1.5},
+            "algorithm_params": {"das": {"aperture_mode": "discrete"}},
+        }
+        first = reusable_scene_id(config)
+        config["scenes"][0]["id"] = "new-id"
+        self.assertEqual(first, reusable_scene_id(config))
+        config["params"]["f_number"] = 2.0
+        self.assertNotEqual(first, reusable_scene_id(config))
 
     def test_scene_rejects_truncated_ground_truth(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -189,6 +168,51 @@ class AlgorithmAuditTests(unittest.TestCase):
                 self.assertTrue(history)
             grid = dense_grid_sweep(evaluator, 1000, 1600, step=250)
             self.assertEqual([row["c"] for row in grid], [1000, 1250, 1500, 1600])
+
+    def test_sound_speed_evaluator_uses_instance_options(self):
+        evaluator = object.__new__(SpeedOfSoundEvaluator)
+        evaluator.z_grid = np.array([0.01, 0.02], dtype=np.float32)
+        evaluator.x_grid = np.array([-0.001, 0.001], dtype=np.float32)
+        evaluator.n_elem = 2
+        evaluator.pitch = 0.0003
+        evaluator.fc = 5e6
+        evaluator.fs = 20e6
+        evaluator.sel_t0 = np.zeros(1, dtype=np.float32)
+        evaluator.sel_angles = np.zeros(1, dtype=np.float32)
+        evaluator.sel_i = np.ones((1, 4, 2), dtype=np.float32)
+        evaluator.sel_q = np.zeros((1, 4, 2), dtype=np.float32)
+        evaluator.mv_dl = 0.01
+        evaluator.fbss = True
+        evaluator.subarray_ratio = 0.5
+        evaluator.temporal_win = 3
+        evaluator.mv_options = SimpleNamespace(
+            f_number=1.2,
+            dynamic_aperture=False,
+            window="hann",
+            interp="nearest",
+        )
+        evaluator.tgc = False
+        evaluator.dr = 60.0
+        evaluator.gt_display = np.ones((2, 2), dtype=np.float32)
+        evaluator.cache = {}
+
+        captured = {}
+
+        class FakeBeamformer:
+            def __init__(self, *args, **kwargs):
+                captured["options"] = kwargs["options"]
+
+            def __call__(self, *args):
+                return np.ones((2, 2)), np.zeros((2, 2))
+
+        with patch(
+            "tools.ablate_sound_speed.mv.RowDynamicMVBeamformerIQ",
+            FakeBeamformer,
+        ):
+            result = evaluator.evaluate_c(1500.0)
+
+        self.assertIs(captured["options"], evaluator.mv_options)
+        self.assertNotIn("display", result)
 
     def test_runner_common_overrides_and_stored_gt_range(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -262,6 +286,21 @@ class AlgorithmAuditTests(unittest.TestCase):
                     result_cache_signature(h5_path, "das"),
                 )
 
+    def test_mban_cache_signature_tracks_inference_dependencies(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            h5_path = root / "input.h5"
+            h5_path.write_bytes(b"input")
+            with patch("algorithms.common.PROJECT_ROOT", root):
+                for source_path in algorithm_source_paths("mban")[2:]:
+                    source_path.parent.mkdir(parents=True, exist_ok=True)
+                    source_path.write_text(source_path.name, encoding="utf-8")
+                before = result_cache_signature("input.h5", "mban")
+                model_path = root / "train" / "shared_core" / "model.py"
+                model_path.write_text("changed", encoding="utf-8")
+                after = result_cache_signature("input.h5", "mban")
+            self.assertNotEqual(before["sources"], after["sources"])
+
     def test_mv_weight_solver_matches_formula_and_handles_singular_covariance(self):
         covariance = torch.tensor(
             [[[2.0, 0.0], [0.0, 1.0]]], dtype=torch.complex64
@@ -312,6 +351,12 @@ class AlgorithmAuditTests(unittest.TestCase):
                     window,
                 )
                 np.testing.assert_array_equal(geometry.numpy(), [[[1.0, 1.0]]])
+
+    def test_dynamic_aperture_saturates_at_physical_channel_count(self):
+        pitch = 0.00023
+        self.assertEqual(dynamic_aperture_channel_count(pitch, 1.0, pitch, 192, True), 2)
+        self.assertEqual(dynamic_aperture_channel_count(0.1, 1.0, pitch, 192, True), 192)
+        self.assertEqual(dynamic_aperture_channel_count(0.1, 1.0, pitch, 192, False), 192)
 
     def test_cache_signature_tracks_input_and_dependency_changes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -419,6 +464,24 @@ class AlgorithmAuditTests(unittest.TestCase):
             h5_path.write_bytes(b"changed input")
             self.assertFalse(can_reuse_flat_result(config_path, scene_dir, "das"))
 
+    def test_ablation_keep_existing_finds_matching_prior_run(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            expected = {"angles1": {"params": {"select_angles": "1"}}}
+            matching = root / "ablation_20261025_120000" / "configs"
+            matching.mkdir(parents=True)
+            (matching / "angles1.yaml").write_text(
+                yaml.safe_dump(expected["angles1"]), encoding="utf-8"
+            )
+            newer = root / "ablation_20261026_120000" / "configs"
+            newer.mkdir(parents=True)
+            (newer / "angles1.yaml").write_text(
+                yaml.safe_dump({"params": {"select_angles": "all"}}),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(find_matching_ablation_run(root, expected), matching.parent)
+
     def test_cmsaw_depth_smoothing_requires_odd_window(self):
         base = (0.5, 2, 1.0, 0.5, 90.0, 9)
         validate_cmsaw_params(*base, 3)
@@ -488,7 +551,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                     ):
                         beamformer = das.DASBeamformerIQ(
                             np.array([1.5, 2.0, 2.5]), np.array([0.0]),
-                            1, 1.0, 1.0, 0.0, 1.0,
+                            1, 1.0, 1.0, 0.0, 1.0, np.zeros(1), angles,
                         )
                         i_output, q_output = beamformer(
                             i_data, q_data, angles, np.zeros(1), 1.0

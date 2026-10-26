@@ -79,6 +79,8 @@ class RowDynamicMVBeamformerIQ:
         c,
         fc,
         fs,
+        _t0_all,
+        angles_rad,
         mv_dl=0.01,
         fbss=True,
         subarray_ratio=0.5,
@@ -307,6 +309,8 @@ def main():
         c,
         fc,
         fs,
+        t0_sub,
+        angles_all,
         mv_dl=args.mv_dl,
         fbss=args.fbss,
         subarray_ratio=args.subarray_ratio,
@@ -357,8 +361,6 @@ def main():
         title_parts.append("noFBSS")
     title_params = " | ".join(title_parts)
 
-    out_name = METHOD_NAME
-
     method_dir = save_algorithm_result(
         mv_db,
         input_data,
@@ -368,7 +370,7 @@ def main():
         dt,
     )
 
-    print(f"  GPU Time: {dt:.2f}s | Saved -> {out_name}")
+    print(f"  GPU Time: {dt:.2f}s | Saved -> {METHOD_NAME}")
     print(f"\nDone | Output: {method_dir}")
 
 

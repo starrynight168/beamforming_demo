@@ -103,6 +103,20 @@ def scene_ids(config):
     return ids
 
 
+def select_algorithms(config, override):
+    selected = ",".join(config["algorithms"]) if override is None else override
+    methods = [
+        method.strip().lower()
+        for method in selected.split(",")
+        if method.strip()
+    ]
+    if not methods:
+        raise ValueError("至少需要选择一个算法")
+    if len(methods) != len(set(methods)):
+        raise ValueError(f"算法列表包含重复项: {methods}")
+    return methods
+
+
 def resolve_path(path):
     """Execute resolve path."""
     path = Path(path)
@@ -136,6 +150,16 @@ def algorithm_label(config, algorithm):
     """Execute algorithm label."""
     labels = config.get("algorithm_labels", {}) or {}
     return labels.get(algorithm, algorithm.upper())
+
+
+def validate_algorithm_labels(config, algorithms, has_gt):
+    labels = [algorithm_label(config, algorithm) for algorithm in algorithms]
+    if any(not isinstance(label, str) or not label.strip() for label in labels):
+        raise ValueError("算法显示名必须是非空字符串")
+    names = (["GT"] if has_gt else []) + labels
+    if len(names) != len(set(names)):
+        raise ValueError(f"算法显示名必须唯一: {names}")
+    return labels
 
 
 def build_algorithm_cmd(args, config, scene, algorithm, scene_dir):
@@ -360,10 +384,9 @@ def can_reuse_existing(scene_dir, config, scene, method, args):
     return True, "参数一致"
 
 
-def run_evaluation(args, config, scene, scene_dir, comparison_path, methods):
+def run_evaluation(args, config, scene, scene_dir, comparison_path):
     """Execute run evaluation."""
     params = merge_common_params(config)
-    labels = [algorithm_label(config, method) for method in methods]
     cmd = [
         args.python_exe,
         str(ROOT / "evaluation" / "evaluate.py"),
@@ -373,10 +396,6 @@ def run_evaluation(args, config, scene, scene_dir, comparison_path, methods):
         str(resolve_path(scene["h5_path"])),
         "--h5_sample_idx",
         str(scene["sample_idx"]),
-        "--methods",
-        ",".join(methods),
-        "--method_labels",
-        ",".join(labels),
         "--dr",
         str(params["dr"]),
         "--out_dir",
@@ -421,15 +440,9 @@ def main():
         load_picmus_context(resolve_path(scene["h5_path"]), scene["sample_idx"])
         if not args.no_evaluate else None
     )
-    methods = [
-        m.strip().lower()
-        for m in (args.algorithms or ",".join(config["algorithms"])).split(",")
-        if m.strip()
-    ]
-    if not methods:
-        raise ValueError("至少需要选择一个算法")
-    if len(methods) != len(set(methods)):
-        raise ValueError(f"算法列表包含重复项: {methods}")
+    methods = select_algorithms(config, args.algorithms)
+    has_gt = scene_has_gt(scene)
+    labels = validate_algorithm_labels(config, methods, has_gt)
     scene_dir = resolve_path(args.output_root) / scene["id"]
     scene_dir.mkdir(parents=True, exist_ok=True)
     start_all = time.time()
@@ -457,7 +470,6 @@ def main():
 
     params = merge_common_params(config)
     dr = float(params["dr"])
-    has_gt = scene_has_gt(scene)
     extent_mm, gt = load_grid_and_gt(
         resolve_path(scene["h5_path"]),
         int(scene["sample_idx"]),
@@ -473,7 +485,7 @@ def main():
         images.append(gt)
         titles.append("Ground Truth")
         image_names.append("ground_truth")
-    for method in methods:
+    for method, label in zip(methods, labels, strict=True):
         path = scene_dir / method / f"{method}.npy"
         image = np.load(path).astype(np.float32)
         if image.shape != expected_shape or not np.all(np.isfinite(image)):
@@ -483,7 +495,7 @@ def main():
         if not np.any(image < -1.0e-3):
             raise ValueError(f"算法 {method} 输出没有可测动态范围")
         images.append(image)
-        titles.append(algorithm_label(config, method))
+        titles.append(label)
         image_names.append(method)
 
     comparison = np.stack(images, axis=0)
@@ -505,9 +517,7 @@ def main():
     run_params = {
         "scene": scene,
         "algorithms": methods,
-        "algorithm_labels": {
-            method: algorithm_label(config, method) for method in methods
-        },
+        "algorithm_labels": dict(zip(methods, labels, strict=True)),
         "params": params,
         "algorithm_params": {
             method: algorithm_params(config, method) for method in methods
@@ -529,7 +539,7 @@ def main():
         json.dump(run_params, f, ensure_ascii=False, indent=2)
 
     if not args.no_evaluate and has_gt and evaluation_context is not None:
-        run_evaluation(args, config, scene, scene_dir, comparison_path, methods)
+        run_evaluation(args, config, scene, scene_dir, comparison_path)
     elif not args.no_evaluate and evaluation_context is None:
         print("Skip evaluation: non-PICMUS sample.")
     elif not args.no_evaluate:

@@ -55,7 +55,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class DASBeamformerIQ:
     """Represent DASBeamformerIQ."""
 
-    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, options=None):
+    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad, options=None):
         """Initialize the instance."""
         self.options = args if options is None else options
         self.height, self.width, self.N = len(z_grid), len(x_grid), n_elem
@@ -255,7 +255,7 @@ def main():
         ],
     )
 
-    bf = DASBeamformerIQ(z_grid, x_grid, n_elem, pitch, c, fc, fs)
+    bf = DASBeamformerIQ(z_grid, x_grid, n_elem, pitch, c, fc, fs, t0_sub, angles_all)
 
     print("Processing DAS...")
     i_out, q_out, dt = run_beamformer(
@@ -290,8 +290,6 @@ def main():
         title_parts.append("Full")
     title_params = " | ".join(title_parts)
 
-    out_name = METHOD_NAME
-
     title = f"{title_params} | {args.aperture_mode}"
     method_dir = save_algorithm_result(
         das_db,
@@ -302,7 +300,7 @@ def main():
         dt,
     )
 
-    print(f"  GPU Time: {dt:.2f}s | Saved -> {out_name}")
+    print(f"  GPU Time: {dt:.2f}s | Saved -> {METHOD_NAME}")
     print(f"\nDone | Output: {method_dir}")
 
 

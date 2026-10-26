@@ -1,6 +1,8 @@
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from data.check_data import (
     decode_compact_sequence,
     display_width,
+    inspect_file,
     run_checks,
     shorten_text,
 )
@@ -27,6 +30,19 @@ from data.pack_data import (
 
 
 class DataUtilityTests(unittest.TestCase):
+    def test_checker_reports_iq_shape_mismatch_without_indexing_past_q(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mismatched.h5"
+            with h5py.File(path, "w") as handle:
+                handle.create_dataset("all_multi_I", data=np.zeros((2, 1, 4, 1)))
+                handle.create_dataset("all_multi_Q", data=np.zeros((1, 1, 4, 1)))
+                handle.create_dataset("valid_time_samples", data=np.array([2, 2]))
+
+                status, problems = run_checks(handle)
+
+            self.assertEqual(status, "失败")
+            self.assertIn("all_multi_I / all_multi_Q 形状不一致", problems)
+
     def test_compact_sequence_round_trip(self) -> None:
         values = np.arange(12, dtype=np.int32)
         encoded = compact_sequence_config(values)
@@ -279,6 +295,56 @@ class DataPipelineTests(unittest.TestCase):
                 ]
             with self.assertRaisesRegex(ValueError, "不是均匀线阵"):
                 process_scene(scenes[1], root)
+
+    def test_invalid_scene_metadata_fails_before_reading_inputs(self) -> None:
+        scene = {
+            "name": "bad",
+            "mode": "in_vivo",
+            "source": "in_vivo",
+            "iq": "missing.h5",
+            "scan": "missing.h5",
+            "phantom": "",
+            "gt": "generated:unknown",
+        }
+
+        with self.assertRaisesRegex(ValueError, "不支持的生成式 GT"):
+            process_scene(scene, Path("missing"))
+
+        scene["mode"] = "unknown"
+        with self.assertRaisesRegex(ValueError, "不支持的模体组合"):
+            process_scene(scene, Path("missing"))
+
+    def test_inspect_file_keeps_diagnostics_for_invalid_config_summary_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "data.check_data.DATA_DIR", Path(directory)
+        ):
+            root = Path(directory)
+            output = root / "packed.h5"
+            pack_dataset(
+                self._write_sources(root),
+                output,
+                root,
+                row_block=2,
+                save_gt_images_enabled=False,
+            )
+            invalid_values = (
+                ("ground_truth", "reference_sampling_frequency_hz", "bad"),
+                ("input_iq", "decimation_factor", "bad"),
+            )
+            for section, key, value in invalid_values:
+                with self.subTest(field=key):
+                    with h5py.File(output, "r+") as handle:
+                        config = yaml.safe_load(handle["config_yaml"][()])
+                        config["generation"][section][key] = value
+                        handle["config_yaml"][()] = yaml.safe_dump(
+                            config, sort_keys=False
+                        )
+
+                    stream = StringIO()
+                    with redirect_stdout(stream):
+                        self.assertFalse(inspect_file(output))
+                    self.assertIn("[字段占用]", stream.getvalue())
+                    self.assertIn("[问题]", stream.getvalue())
 
     def test_check_phantom_combinations_and_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch(

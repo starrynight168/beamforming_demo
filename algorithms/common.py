@@ -590,9 +590,9 @@ def dynamic_aperture_channel_count(
     if not dynamic_aperture:
         return n_channels
     count = int(depth / (f_number * pitch)) + 1
-    if count < 1 or count > n_channels:
-        raise ValueError("动态孔径超出物理通道范围；请检查深度、F-number 和阵元间距")
-    return count
+    if count < 1:
+        raise ValueError("动态孔径必须包含至少一个物理通道")
+    return min(count, n_channels)
 
 
 def tgc_gain(z_grid, fc, tgc_alpha):
@@ -1066,9 +1066,34 @@ def result_cache_signature(h5_path, method_name, parameters=None, *, extra_args=
 
 
 def algorithm_source_paths(method_name):
-    dependencies = {"cmsaw": ("mv",)}
+    script_path = Path(__file__)
+    mban_sources = (
+        "eval_core/inference.py",
+        "eval_core/models.py",
+        "eval_core/calibration.py",
+        "shared_core/beamforming.py",
+        "shared_core/config.py",
+        "shared_core/config_schema.py",
+        "shared_core/controls.py",
+        "shared_core/crossbar.py",
+        "shared_core/data.py",
+        "shared_core/geometry.py",
+        "shared_core/hardware.py",
+        "shared_core/hardware_config.py",
+        "shared_core/hashing.py",
+        "shared_core/interpolation.py",
+        "shared_core/model.py",
+        "shared_core/operators.py",
+        "shared_core/runtime.py",
+        "shared_core/signal_chain.py",
+        "shared_core/splits.py",
+    )
+    dependencies = {
+        "cmsaw": (script_path.with_name("mv.py"),),
+        "mban": tuple(PROJECT_ROOT / "train" / source for source in mban_sources),
+    }
     return (
-        Path(__file__).with_name(f"{method_name}.py"),
-        Path(__file__),
-        *(Path(__file__).with_name(f"{name}.py") for name in dependencies.get(method_name, ())),
+        script_path.with_name(f"{method_name}.py"),
+        script_path,
+        *dependencies.get(method_name, ()),
     )

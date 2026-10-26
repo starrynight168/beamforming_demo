@@ -424,6 +424,21 @@ def can_reuse_flat_result(config_path, scene_dir, algorithm):
     return all(actual.get(name) == value for name, value in expected.items())
 
 
+def find_matching_ablation_run(output_root, expected_configs):
+    for run_root in sorted(Path(output_root).glob("ablation_*"), reverse=True):
+        config_dir = run_root / "configs"
+        config_paths = list(config_dir.glob("*.yaml"))
+        if not config_paths or any(path.stem not in expected_configs for path in config_paths):
+            continue
+        if all(
+            yaml.safe_load(path.read_text(encoding="utf-8"))
+            == expected_configs[path.stem]
+            for path in config_paths
+        ):
+            return run_root
+    return None
+
+
 def run_one(config_path, scene_id, output_root, keep_existing):
     """Execute run one."""
     scene_dir = Path(output_root) / scene_id
@@ -792,9 +807,32 @@ def main():
 
     def step_confirm():
         """Execute step confirm."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        state["run_id"] = f"ablation_{timestamp}"
-        state["run_root"] = state["output_root"] / state["run_id"]
+        expected_configs = {
+            value_scene_id(state["param_name"], value): build_config(
+                state["config"],
+                state["h5_path"],
+                state["sample_idx"],
+                state["algorithm"],
+                state["scope"],
+                state["param_name"],
+                value,
+                value_scene_id(state["param_name"], value),
+            )
+            for value in state["values"]
+        }
+        run_root = (
+            find_matching_ablation_run(state["output_root"], expected_configs)
+            if state["keep_existing"]
+            else None
+        )
+        if run_root is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            state["run_id"] = f"ablation_{timestamp}"
+            run_root = state["output_root"] / state["run_id"]
+        else:
+            state["run_id"] = run_root.name
+            print(f"继续已有消融运行: {run_root}")
+        state["run_root"] = run_root
         state["config_dir"] = state["run_root"] / "configs"
         print_title("消融计划")
         print(f"H5: {relative_to_root(state['h5_path'])}")
