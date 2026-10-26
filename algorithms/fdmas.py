@@ -49,13 +49,12 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class FDMASBeamformerIQ:
     """Represent FDMASBeamformerIQ."""
 
-    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad, options=None):
+    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, options=None):
         """Initialize the instance."""
         self.options = args if options is None else options
         self.height, self.width, self.N = len(z_grid), len(x_grid), n_elem
         self.x_grid = torch.from_numpy(x_grid).float().to(device)
         self.z_grid = torch.from_numpy(z_grid).float().to(device)
-        self.angles_rad = torch.from_numpy(angles_rad).float().to(device)
         self.pitch, self.fc, self.fs = pitch, float(fc), fs
         self.sc = fs / c
 
@@ -250,8 +249,6 @@ def main():
         c,
         fc,
         fs,
-        t0_sub,
-        angles_all,
     )
 
     print("Processing F-DMAS...")

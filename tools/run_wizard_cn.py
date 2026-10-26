@@ -256,6 +256,10 @@ def configured_choice_index(options, value, setting_name):
     raise ValueError(f"{setting_name} 配置值不受支持: {value}")
 
 
+def preserve_disabled_setting(state, name, configured_params, fallback):
+    state[name] = state.get(name, configured_params.get(name, fallback))
+
+
 def ask_multi_choice(prompt, options, default_keys):
     """Execute ask multi choice."""
     print(f"\n{prompt}")
@@ -287,6 +291,18 @@ def ask_multi_choice(prompt, options, default_keys):
         if ok and selected:
             return selected
         print("请选择至少一个合法算法。")
+
+
+def validate_algorithm_modules(algorithms):
+    if not isinstance(algorithms, list) or not algorithms:
+        raise ValueError("config.algorithms 必须是非空列表")
+    missing = [
+        algorithm
+        for algorithm in algorithms
+        if not (ROOT / "algorithms" / f"{algorithm}.py").is_file()
+    ]
+    if missing:
+        raise ValueError(f"config.algorithms 模块不存在: {missing}")
 
 
 def relative_to_root(path):
@@ -651,14 +667,16 @@ def main():
     def step_algorithms():
         """Execute step algorithms."""
         algorithm_options = list(ALGORITHMS.items())
+        default_algorithms = state.get(
+            "algorithms",
+            state["base_config"].get("algorithms", ["das"]),
+        )
+        validate_algorithm_modules(default_algorithms)
         explain(state["teaching"], "algorithm")
         state["algorithms"] = ask_multi_choice(
             "请选择成像方法",
             algorithm_options,
-            default_keys=state.get(
-                "algorithms",
-                state["base_config"].get("algorithms", ["das"]),
-            ),
+            default_keys=default_algorithms,
         )
 
     def step_algorithm_params():
@@ -748,8 +766,10 @@ def main():
                 strictly_greater=True,
             )
         else:
-            state["f_number"] = (state["base_config"].get("params", {}) or {}).get(
+            preserve_disabled_setting(
+                state,
                 "f_number",
+                state["base_config"].get("params", {}) or {},
                 1.5,
             )
 
@@ -777,8 +797,10 @@ def main():
                 minimum=0,
             )
         else:
-            state["tgc_alpha"] = (state["base_config"].get("params", {}) or {}).get(
+            preserve_disabled_setting(
+                state,
                 "tgc_alpha",
+                state["base_config"].get("params", {}) or {},
                 0.5,
             )
 

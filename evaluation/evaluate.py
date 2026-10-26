@@ -738,9 +738,11 @@ def target_resolution(
         return None
     masked = np.full_like(db_img, np.nanmin(db_img), dtype=np.float64)
     masked[target_mask] = db_img[target_mask]
-    if not np.any(np.isfinite(masked[target_mask])):
+    roi_values = masked[target_mask]
+    if not np.any(np.isfinite(roi_values)):
         return None
-    iz, ix = np.unravel_index(np.nanargmax(masked), masked.shape)
+    peak_idx = np.nanargmax(roi_values)
+    iz, ix = z_ids[peak_idx], x_ids[peak_idx]
     z_slice = slice(int(z_ids.min()), int(z_ids.max()) + 1)
     x_slice = slice(int(x_ids.min()), int(x_ids.max()) + 1)
     axial_profile = masked[z_slice, ix]

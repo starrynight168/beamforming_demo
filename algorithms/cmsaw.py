@@ -175,6 +175,10 @@ def cmsaw_weight_from_delayed_data(
         raise ValueError("delayed IQ 必须是 [A,height,width,C] 或 [height,width,C]")
 
     _, height, width, n_channels = data.shape
+    if depth_smooth_rows > height:
+        raise ValueError(
+            f"depth_smooth_rows={depth_smooth_rows} 超过图像深度 {height}",
+        )
     data_device = data.device
     z_grid = np.asarray(z_grid, dtype=np.float32)
     x_grid = np.asarray(x_grid, dtype=np.float32)
@@ -270,10 +274,6 @@ def cmsaw_weight_from_delayed_data(
 
         if depth_smooth_rows > 1:
             rows = depth_smooth_rows
-            if rows > height:
-                raise ValueError(
-                    f"depth_smooth_rows={depth_smooth_rows} 超过图像深度 {height}",
-                )
             coord = torch.arange(rows, device=data_device).float() - rows // 2
             kernel = torch.exp(
                 -0.5 * (coord / max(rows / 4.0, 1.0)) ** 2,
@@ -320,8 +320,6 @@ class CMSAWBeamformerIQ:
         c,
         fc,
         fs,
-        t0_all,
-        angles_rad,
         mv_dl=0.0,
         fbss=True,
         subarray_ratio=0.25,
@@ -347,6 +345,10 @@ class CMSAWBeamformerIQ:
         )
 
         self.z_grid = np.asarray(z_grid, dtype=np.float32)
+        if depth_smooth_rows > len(self.z_grid):
+            raise ValueError(
+                f"depth_smooth_rows={depth_smooth_rows} 超过图像深度 {len(self.z_grid)}",
+            )
         self.x_grid = np.asarray(x_grid, dtype=np.float32)
         self.n_elem = int(n_elem)
         self.pitch = float(pitch)
@@ -371,8 +373,6 @@ class CMSAWBeamformerIQ:
             self.c,
             self.fc,
             self.fs,
-            t0_all,
-            angles_rad,
             mv_dl=mv_dl,
             fbss=fbss,
             subarray_ratio=subarray_ratio,
@@ -522,8 +522,6 @@ def main():
         c,
         fc,
         fs,
-        t0_sub,
-        selected_angles,
         mv_dl=args.mv_dl,
         fbss=args.fbss,
         subarray_ratio=args.subarray_ratio,

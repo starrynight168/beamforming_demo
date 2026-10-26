@@ -18,7 +18,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from algorithms import das
-from algorithms.cmsaw import validate_cmsaw_params
+from algorithms.cmsaw import CMSAWBeamformerIQ, validate_cmsaw_params
 from algorithms.common import (
     aperture_window_1d,
     aperture_window_from_dx,
@@ -31,7 +31,11 @@ from algorithms.common import (
 )
 from run_one import can_reuse_existing, scene_has_gt
 from run_one import main as run_scene
-from tools.ablate_sound_speed import dense_grid_sweep, multi_section_search
+from tools.ablate_sound_speed import (
+    dense_grid_sweep,
+    multi_section_search,
+    sample_output_name,
+)
 from tools.run_ablation_cn import (
     can_reuse_flat_result,
     method_output_path,
@@ -44,18 +48,60 @@ from tools.run_wizard_cn import (
     ask_algorithm_param,
     configured_choice_index,
     inspect_h5,
+    preserve_disabled_setting,
     sample_can_be_evaluated,
     validate_algorithm_param,
+    validate_algorithm_modules,
 )
 
 
 class AlgorithmAuditTests(unittest.TestCase):
+    def test_cmsaw_rejects_depth_smoothing_larger_than_image_at_construction(self):
+        with self.assertRaisesRegex(ValueError, "超过图像深度"):
+            CMSAWBeamformerIQ(
+                np.array([0.0, 1.0]),
+                np.array([0.0]),
+                1,
+                0.3,
+                1540.0,
+                5e6,
+                20e6,
+                depth_smooth_rows=3,
+            )
+
+    def test_esbmv_force_gpu_eigh_rejects_cpu_device(self):
+        from algorithms import esbmv
+
+        with (
+            patch.object(esbmv, "device", torch.device("cpu")),
+            patch.object(esbmv, "args", None),
+            patch.object(
+                esbmv.parser,
+                "parse_args",
+                return_value=SimpleNamespace(force_gpu_eigh=True),
+            ),
+            self.assertRaisesRegex(ValueError, "requires CUDA"),
+        ):
+            esbmv.main()
+
     def test_ablation_uses_only_flattened_method_outputs(self):
         scene_dir = Path("run") / "scene"
         self.assertEqual(
             method_output_path(scene_dir, "das", "npy"),
             scene_dir / "das.npy",
         )
+
+    def test_sound_speed_output_name_comes_from_h5_sample_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.h5"
+            with h5py.File(path, "w") as handle:
+                handle.create_dataset(
+                    "config_yaml",
+                    data=yaml.safe_dump(
+                        {"source_samples": [{"id": "carotid_cross"}, {"id": "carotid_long"}]}
+                    ),
+                )
+                self.assertEqual(sample_output_name(handle, 1), "carotid_long")
 
     def test_wizard_rejects_unsupported_configured_choices(self):
         choices = [("rect", "rectangular"), ("hann", "Hann")]
@@ -64,6 +110,23 @@ class AlgorithmAuditTests(unittest.TestCase):
             configured_choice_index(choices, "old_window", "params.window")
         with self.assertRaisesRegex(ValueError, "das.aperture_mode.*不受支持"):
             ask_algorithm_param("das", "aperture_mode", "legacy")
+
+    def test_wizard_preserves_inactive_parameter_values(self):
+        state = {"f_number": 2.0, "tgc_alpha": 0.8}
+        configured = {"f_number": 1.5, "tgc_alpha": 0.5}
+        preserve_disabled_setting(state, "f_number", configured, 1.5)
+        preserve_disabled_setting(state, "tgc_alpha", configured, 0.5)
+        self.assertEqual(state, {"f_number": 2.0, "tgc_alpha": 0.8})
+
+    def test_wizard_rejects_missing_configured_algorithm_module(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "algorithms").mkdir()
+            (root / "algorithms" / "custom.py").touch()
+            with patch("tools.run_wizard_cn.ROOT", root):
+                validate_algorithm_modules(["custom"])
+                with self.assertRaisesRegex(ValueError, "config.algorithms 模块不存在"):
+                    validate_algorithm_modules(["missing"])
 
     def test_scene_rejects_truncated_ground_truth(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -425,7 +488,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                     ):
                         beamformer = das.DASBeamformerIQ(
                             np.array([1.5, 2.0, 2.5]), np.array([0.0]),
-                            1, 1.0, 1.0, 0.0, 1.0, np.zeros(1), angles,
+                            1, 1.0, 1.0, 0.0, 1.0,
                         )
                         i_output, q_output = beamformer(
                             i_data, q_data, angles, np.zeros(1), 1.0

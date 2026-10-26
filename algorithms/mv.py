@@ -79,8 +79,6 @@ class RowDynamicMVBeamformerIQ:
         c,
         fc,
         fs,
-        _t0_all,
-        angles_rad,
         mv_dl=0.01,
         fbss=True,
         subarray_ratio=0.5,
@@ -105,7 +103,6 @@ class RowDynamicMVBeamformerIQ:
             device,
         )
         self.__dict__.update(geometry)
-        self.angles_rad = torch.from_numpy(angles_rad).float().to(device)
         self.dl_factor = mv_dl
         self.use_fbss = fbss
         self.subarray_ratio = subarray_ratio
@@ -310,8 +307,6 @@ def main():
         c,
         fc,
         fs,
-        t0_sub,
-        angles_all,
         mv_dl=args.mv_dl,
         fbss=args.fbss,
         subarray_ratio=args.subarray_ratio,

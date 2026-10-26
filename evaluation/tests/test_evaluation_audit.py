@@ -22,6 +22,7 @@ from evaluation.evaluate import (
     picmus_reference_path,
     read_phantom,
     read_sample_meta,
+    target_resolution,
 )
 from evaluation.evaluate import (
     main as evaluate_main,
@@ -429,6 +430,27 @@ class EvaluationInputTests(unittest.TestCase):
             self.assertEqual(metadata["sample_name"], "renamed_sample")
             self.assertEqual(metadata["evaluation_protocol"], "picmus")
             self.assertEqual(len(metadata["contrast_rois"]), 9)
+
+    def test_flat_frame_peak_stays_inside_resolution_target_roi(self):
+        x_mm = np.linspace(-20, 20, 81)
+        z_mm = np.linspace(0, 60, 121)
+        target = {"x_mm": 0.0, "z_mm": 30.0}
+        label_map = np.zeros((len(z_mm), len(x_mm)), dtype=np.int32)
+        label_map[58:63, 38:43] = 1
+
+        result = target_resolution(
+            np.zeros_like(label_map, dtype=np.float64),
+            x_mm,
+            z_mm,
+            target,
+            window_mm=2.0,
+            target_idx=1,
+            label_map=label_map,
+        )
+
+        peak_x = np.flatnonzero(np.isclose(x_mm, result["peak_x_mm"]))[0]
+        peak_z = np.flatnonzero(np.isclose(z_mm, result["peak_z_mm"]))[0]
+        self.assertEqual(label_map[peak_z, peak_x], 1)
 
     def test_resolution_scene_smoke(self):
         with tempfile.TemporaryDirectory() as directory:

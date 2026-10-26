@@ -20,6 +20,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import yaml
 
 # Add project root and evaluation to path
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -70,6 +71,18 @@ def best_cached_result(evaluator):
     if not evaluator.cache:
         raise RuntimeError("No sound-speed evaluations were completed")
     return max(evaluator.cache.values(), key=lambda result: result["ssim"])
+
+
+def sample_output_name(hf, sample_idx):
+    config = yaml.safe_load(hf["config_yaml"][()])
+    sample_name = config["source_samples"][sample_idx]["id"]
+    if (
+        not isinstance(sample_name, str)
+        or Path(sample_name).name != sample_name
+        or sample_name in {".", ".."}
+    ):
+        raise ValueError("H5 source sample id must be a directory name")
+    return sample_name
 
 
 class SpeedOfSoundEvaluator:
@@ -146,6 +159,7 @@ class SpeedOfSoundEvaluator:
 
         # Multi-angle DAS reference (ground truth)
         with h5py.File(self.h5_path, "r") as hf:
+            self.sample_name = sample_output_name(hf, self.sample_idx)
             self.gt_display = db_to_display(
                 ground_truth_db(hf, self.sample_idx).squeeze(), self.dr
             )
@@ -218,8 +232,6 @@ class SpeedOfSoundEvaluator:
             c_key,
             self.fc,
             self.fs,
-            self.sel_t0,
-            self.sel_angles,
             mv_dl=self.mv_dl,
             fbss=self.fbss,
             subarray_ratio=self.subarray_ratio,
@@ -792,10 +804,7 @@ def main():
         overall_best = best_cached_result(evaluator)
 
     # 3. Output Figures and Data
-    sample_name = (
-        "carotid_cross" if args.sample_idx == 0 else f"carotid_sample_{args.sample_idx}"
-    )
-    out_dir = resolve_path(args.output_dir) / sample_name
+    out_dir = resolve_path(args.output_dir) / evaluator.sample_name
     plot_results(evaluator, history, overall_best, out_dir)
     save_results(evaluator, history, overall_best, final_bracket, out_dir)
 
