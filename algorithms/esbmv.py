@@ -20,6 +20,7 @@ from algorithms.common import (
     nonnegative_float,
     nonnegative_int,
     normalized_mv_weights,
+    mv_row_output,
     positive_odd_int,
     prepare_beamforming_input,
     print_physical_summary,
@@ -30,13 +31,14 @@ from algorithms.common import (
     time_start_tensor,
     unit_interval_float,
     validate_db_output,
+    validate_beamformer_input,
 )
 
 MAX_GPU_EIGH_SUBARRAY_SIZE = 32
 
 # ================= 命令行参数配置 =================
 parser = argparse.ArgumentParser(description="ESBMV+FBSS Beamforming")
-add_common_arguments(parser, window_help="子孔径预加权窗")
+add_common_arguments(parser, window_help="子阵空间平滑加权窗")
 
 # ---- MV 核心参数 ----
 parser.add_argument("--mv_dl", type=nonnegative_float, default=0.0, help="对角加载系数")
@@ -70,7 +72,7 @@ parser.add_argument(
     "--eig_threshold",
     type=closed_unit_interval_float,
     default=0.05,
-    help="自动选择时保留 lambda >= threshold * lambda_max 的特征向量",
+    help="自动选择时保留加载协方差中 lambda >= threshold * lambda_max 的特征向量",
 )
 parser.add_argument(
     "--force_gpu_eigh",
@@ -86,6 +88,21 @@ METHOD_NAME = "esbmv"
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def project_signal_subspace(covariance, weights, num_eig, threshold, force_gpu=False):
+    target_device = covariance.device
+    if target_device.type == "cuda" and covariance.shape[-1] > MAX_GPU_EIGH_SUBARRAY_SIZE and not force_gpu:
+        covariance = covariance.cpu()
+    eigvals, eigvecs = torch.linalg.eigh(covariance)
+    eigvals = eigvals.flip(-1).to(target_device)
+    eigvecs = eigvecs.flip(-1).to(target_device)
+    if num_eig > 0:
+        space = eigvecs[..., :min(num_eig, weights.shape[-2])]
+        return space @ (space.mH @ weights)
+    keep = eigvals >= threshold * eigvals[..., :1].clamp_min(0)
+    keep[..., 0] = True
+    return eigvecs @ ((eigvecs.mH @ weights) * keep.unsqueeze(-1))
 
 
 class RowDynamicMVBeamformerIQ:
@@ -112,7 +129,8 @@ class RowDynamicMVBeamformerIQ:
         options=None,
     ):
         """Initialize the instance."""
-        self.options = args if options is None else options
+        self.options = options if options is not None else (args if args is not None else parser.parse_args([]))
+        mv_dl = nonnegative_float(mv_dl)
         geometry = build_row_dynamic_geometry(
             z_grid,
             x_grid,
@@ -136,6 +154,7 @@ class RowDynamicMVBeamformerIQ:
 
     def __call__(self, i_data, q_data, selected_angles, t_starts, fs):
         """Run the callable operation."""
+        validate_beamformer_input(i_data, q_data, selected_angles, fs, self.fs, self.N)
         n_a = i_data.shape[0]
         i_tensor = torch.from_numpy(i_data.astype(np.float32)).to(device)
         q_tensor = torch.from_numpy(q_data.astype(np.float32)).to(device)
@@ -201,14 +220,13 @@ class RowDynamicMVBeamformerIQ:
                 x_active = torch.gather(
                     x_flat, 1, row["ch_idx_t"]
                 )  # [width, aperture_size, T]
-                if row["window"] is not None:
-                    x_active = x_active * row["window"].view(1, aperture_size, 1)
-
                 x_subarrays, covariance = spatial_temporal_covariance(
                     x_active,
                     subarray_size,
                     self.temporal_win,
                     self.use_fbss,
+                    spatial_weights=row["window"],
+                    normalize=True,
                 )
 
                 # ========== ESBMV 使用加载协方差矩阵;MVDR 求解也使用同一加载矩阵 ==========
@@ -231,45 +249,13 @@ class RowDynamicMVBeamformerIQ:
                 w_mv = normalized_mv_weights(covariance_loaded, ones_subarray)
 
                 # ========== ESBMV:将 MV 权重投影到信号子空间 ==========
-                if (
-                    subarray_size > MAX_GPU_EIGH_SUBARRAY_SIZE
-                    and not self.options.force_gpu_eigh
-                ):
-                    covariance_cpu = covariance_loaded.cpu()
-                    eigvals_cpu, eigvecs_cpu = torch.linalg.eigh(covariance_cpu)
-                    eigvals = eigvals_cpu.to(device)
-                    eigvecs = eigvecs_cpu.to(device)
-                else:
-                    eigvals, eigvecs = torch.linalg.eigh(covariance_loaded)
-
-                eigvals = eigvals.flip(-1).real
-                eigvecs = eigvecs.flip(-1)
-                if self.options.num_eig > 0:
-                    n_eig = max(1, min(self.options.num_eig, subarray_size))
-                    signal_space = eigvecs[:, :, :n_eig]
-                    w = signal_space @ (signal_space.mH @ w_mv)
-                else:
-                    keep = eigvals >= self.options.eig_threshold * eigvals[:, :1].clamp_min(
-                        1e-12,
-                    )
-                    keep[:, 0] = True
-                    coeff = eigvecs.mH @ w_mv
-                    w = eigvecs @ (coeff * keep.to(coeff.dtype).unsqueeze(-1))
-
-                w = w / (ones_subarray.mH @ w + 1e-12)
+                w = project_signal_subspace(
+                    covariance_loaded, w_mv, self.options.num_eig,
+                    self.options.eig_threshold, self.options.force_gpu_eigh,
+                )
 
                 # ========== 合成输出 ==========
-                t0 = self.temporal_win // 2
-                x_subarray_center = x_subarrays[
-                    :,
-                    :,
-                    :,
-                    t0,
-                ]  # [width, subarray_size, subarray_count]
-                x_mean = x_subarray_center.mean(dim=2).unsqueeze(
-                    -1
-                )  # [width, subarray_size, 1]
-                y_row_rx = torch.matmul(w.mH, x_mean)  # [width, 1, 1]
+                y_row_rx = mv_row_output(w, x_subarrays, x_active, valid_mask, row)
 
                 # 3. 发射端相位旋转 (2D)
                 phi_tx = 2.0 * np.pi * self.fc * (tx_row / fs)

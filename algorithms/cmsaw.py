@@ -30,7 +30,7 @@ from algorithms.common import (
 
 # ================= 命令行参数配置 =================
 parser = argparse.ArgumentParser(
-    description="CMSAW - Coherence-based Minimum Variance Adaptive Weighting",
+    description="CMSAW - Covariance Matrix-based Statistical Adaptive Weighting",
 )
 add_common_arguments(parser, select_help="角度选择: center, 0,1,2(逗号分隔)")
 
@@ -101,13 +101,15 @@ def validate_cmsaw_params(
 ):
     if not 0 < lmax_ratio <= 0.5 or min_subarray_len < 2:
         raise ValueError("Require lmax_ratio in (0, 0.5] and min_subarray_len >= 2")
+    if int(min_subarray_len) != min_subarray_len:
+        raise ValueError("min_subarray_len must be an integer")
     if not 0 <= delta_max <= 1 or not 0 < gamma <= 1 or not 0 < clip_percentile <= 100:
         raise ValueError(
             "Require delta_max in [0,1], gamma in (0,1], clip_percentile in (0,100]",
         )
-    if temporal_win < 1 or temporal_win % 2 == 0:
+    if temporal_win < 1 or int(temporal_win) != temporal_win or temporal_win % 2 == 0:
         raise ValueError("temporal_win must be a positive odd integer")
-    if depth_smooth_rows < 1 or depth_smooth_rows % 2 == 0:
+    if depth_smooth_rows < 1 or int(depth_smooth_rows) != depth_smooth_rows or depth_smooth_rows % 2 == 0:
         raise ValueError("depth_smooth_rows must be a positive odd integer")
 
 
@@ -169,15 +171,22 @@ def cmsaw_weight_from_delayed_data(
     return_lengths=False,
 ):
     """Compute one CMSAW map per angle and average the normalized maps."""
+    validate_cmsaw_params(
+        lmax_ratio, min_subarray_len, delta_max, gamma, clip_percentile, 1, depth_smooth_rows,
+    )
     if data.ndim == 3:
         data = data.unsqueeze(0)
     if data.ndim != 4 or data.shape[0] < 1:
         raise ValueError("delayed IQ 必须是 [A,height,width,C] 或 [height,width,C]")
+    if not torch.isfinite(data).all():
+        raise ValueError("delayed IQ contains NaN/Inf")
 
     _, height, width, n_channels = data.shape
     data_device = data.device
     z_grid = np.asarray(z_grid, dtype=np.float32)
     x_grid = np.asarray(x_grid, dtype=np.float32)
+    if z_grid.shape != (height,) or x_grid.shape != (width,) or n_channels < 1:
+        raise ValueError("delayed IQ shape must match the image grids and have channels")
     x_t = torch.from_numpy(x_grid).to(data_device)
     element_x = (
         torch.arange(n_channels, device=data_device) - (n_channels - 1) / 2.0
@@ -202,6 +211,8 @@ def cmsaw_weight_from_delayed_data(
     angle_weights = []
     angle_lengths = []
     for angle_data in data:
+        scale = angle_data.abs().amax().clamp_min(torch.finfo(angle_data.real.dtype).tiny)
+        angle_data = angle_data / scale
         sigma = torch.empty((height, width), dtype=torch.float32, device=data_device)
         active_rows = []
         k_rows = []
@@ -261,10 +272,8 @@ def cmsaw_weight_from_delayed_data(
                 diagonal = torch.diag_embed(
                     torch.diagonal(rotary, dim1=-2, dim2=-1),
                 )
-                matrix = torch.abs(
-                    rotary - delta[columns, None, None] * diagonal,
-                )
-                weight[iz, columns] = matrix.mean(dim=(-2, -1)) / (
+                matrix = rotary - delta[columns, None, None] * diagonal
+                weight[iz, columns] = matrix.mean(dim=(-2, -1)).abs() / (
                     matrix.std(dim=(-2, -1), unbiased=False) + 1e-12
                 )
 
@@ -289,8 +298,11 @@ def cmsaw_weight_from_delayed_data(
                 torch.nn.functional.conv2d(log_weight, kernel)[0, 0],
             )
 
-        weight /= torch.median(weight.clamp_min(1e-12))
-        weight.clamp_(max=torch.quantile(weight, clip_percentile / 100.0))
+        positive = weight[weight > 0]
+        if positive.numel():
+            reference = torch.median(positive)
+            limit = torch.quantile(positive, clip_percentile / 100.0)
+            weight = weight.clamp(max=limit) / reference
         weight.pow_(gamma)
         angle_weights.append(weight)
         angle_lengths.append(length_map)
@@ -335,7 +347,7 @@ class CMSAWBeamformerIQ:
         options=None,
     ):
         """Initialize the instance."""
-        self.options = args if options is None else options
+        self.options = options if options is not None else (args if args is not None else parser.parse_args([]))
         validate_cmsaw_params(
             lmax_ratio,
             min_subarray_len,

@@ -24,6 +24,7 @@ from algorithms.common import (
     save_algorithm_result,
     time_start_tensor,
     validate_db_output,
+    validate_beamformer_input,
 )
 
 # ================= 命令行参数配置 =================
@@ -47,11 +48,11 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class FDMASBeamformerIQ:
-    """Represent FDMASBeamformerIQ."""
+    """Form the analytic IQ second harmonic using distinct channel pair products."""
 
     def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad, options=None):
         """Initialize the instance."""
-        self.options = args if options is None else options
+        self.options = options if options is not None else (args if args is not None else parser.parse_args([]))
         self.height, self.width, self.N = len(z_grid), len(x_grid), n_elem
         self.x_grid = torch.from_numpy(x_grid).float().to(device)
         self.z_grid = torch.from_numpy(z_grid).float().to(device)
@@ -96,17 +97,19 @@ class FDMASBeamformerIQ:
         self.ch = torch.arange(n_elem, device=device).view(1, 1, -1)
 
     @staticmethod
-    def _complex_fdmas(i_aligned, q_aligned, weights, eps=1e-12):
-        """Execute  complex fdmas."""
+    def _complex_fdmas(i_aligned, q_aligned, weights):
+        """Average complex channel pairs after square-root amplitude compression."""
         z = torch.complex(i_aligned, q_aligned)
-        q = z / torch.sqrt(torch.abs(z) + eps)
+        tiny = torch.finfo(z.real.dtype).tiny
+        q = z / torch.sqrt(torch.abs(z).clamp_min(tiny))
         qw = q * weights
         pair_sum = 0.5 * (qw.sum(dim=-1).square() - qw.square().sum(dim=-1))
         pair_norm = 0.5 * (weights.sum(dim=-1).square() - weights.square().sum(dim=-1))
-        return pair_sum / torch.clamp(pair_norm, min=eps)
+        return pair_sum / torch.clamp(pair_norm, min=tiny)
 
     def __call__(self, i_data, q_data, selected_angles, t_starts, fs):
         """Run the callable operation."""
+        validate_beamformer_input(i_data, q_data, selected_angles, fs, self.fs, self.N)
         n_a = i_data.shape[0]
         n_s = i_data.shape[1]
         max_sample = float(n_s - 1)

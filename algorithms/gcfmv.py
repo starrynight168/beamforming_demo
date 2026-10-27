@@ -19,6 +19,8 @@ from algorithms.common import (
     nonnegative_float,
     nonnegative_int,
     normalized_mv_weights,
+    generalized_coherence_factor,
+    mv_row_output,
     positive_odd_int,
     prepare_beamforming_input,
     print_physical_summary,
@@ -29,11 +31,12 @@ from algorithms.common import (
     time_start_tensor,
     unit_interval_float,
     validate_db_output,
+    validate_beamformer_input,
 )
 
 # ================= 命令行参数配置 =================
 parser = argparse.ArgumentParser(description="GCF-MV Beamforming")
-add_common_arguments(parser, window_help="子孔径预加权窗")
+add_common_arguments(parser, window_help="子阵空间平滑加权窗")
 
 # ---- MV 核心参数 ----
 parser.add_argument("--mv_dl", type=nonnegative_float, default=0.0, help="对角加载系数")
@@ -102,7 +105,8 @@ class RowDynamicMVBeamformerIQ:
         options=None,
     ):
         """Initialize the instance."""
-        self.options = args if options is None else options
+        self.options = options if options is not None else (args if args is not None else parser.parse_args([]))
+        mv_dl = nonnegative_float(mv_dl)
         geometry = build_row_dynamic_geometry(
             z_grid,
             x_grid,
@@ -126,6 +130,7 @@ class RowDynamicMVBeamformerIQ:
 
     def __call__(self, i_data, q_data, selected_angles, t_starts, fs):
         """Run the callable operation."""
+        validate_beamformer_input(i_data, q_data, selected_angles, fs, self.fs, self.N)
         n_a = i_data.shape[0]
         i_tensor = torch.from_numpy(i_data.astype(np.float32)).to(device)
         q_tensor = torch.from_numpy(q_data.astype(np.float32)).to(device)
@@ -191,14 +196,13 @@ class RowDynamicMVBeamformerIQ:
                 x_active = torch.gather(
                     x_flat, 1, row["ch_idx_t"]
                 )  # [width, aperture_size, T]
-                if row["window"] is not None:
-                    x_active = x_active * row["window"].view(1, aperture_size, 1)
-
                 x_subarrays, covariance = spatial_temporal_covariance(
                     x_active,
                     subarray_size,
                     self.temporal_win,
                     self.use_fbss,
+                    spatial_weights=row["window"],
+                    normalize=True,
                 )
 
                 # ========== 对角加载 ==========
@@ -216,33 +220,11 @@ class RowDynamicMVBeamformerIQ:
                 w = normalized_mv_weights(covariance_loaded, ones_subarray)
 
                 # ========== 合成输出 ==========
-                t0 = self.temporal_win // 2
-                x_subarray_center = x_subarrays[
-                    :,
-                    :,
-                    :,
-                    t0,
-                ]  # [width, subarray_size, subarray_count]
-                x_mean = x_subarray_center.mean(dim=2).unsqueeze(
-                    -1
-                )  # [width, subarray_size, 1]
-                y_row_rx = torch.matmul(w.mH, x_mean)  # [width, 1, 1]
+                y_row_rx = mv_row_output(w, x_subarrays, x_active, valid_mask, row)
                 if self.options.gcf_power > 0:
-                    spatial_spectrum = torch.fft.fftshift(
-                        torch.fft.fft(x_mean.squeeze(-1), dim=1),
-                        dim=1,
+                    gcf = generalized_coherence_factor(
+                        x_active[..., self.temporal_win // 2], self.options.gcf_low_bins,
                     )
-                    power_spectrum = torch.abs(spatial_spectrum).square()
-                    center = subarray_size // 2
-                    low_bins = max(
-                        0, min(self.options.gcf_low_bins, center, subarray_size - center - 1)
-                    )
-                    low_energy = power_spectrum[
-                        :,
-                        center - low_bins : center + low_bins + 1,
-                    ].sum(dim=1)
-                    total_energy = power_spectrum.sum(dim=1) + 1e-12
-                    gcf = (low_energy / total_energy).clamp(0, 1)
                     y_row_rx = y_row_rx * torch.pow(
                         gcf.view(self.width, 1, 1),
                         self.options.gcf_power,

@@ -135,6 +135,9 @@ def merge_common_params(config):
         if not isinstance(params[name], bool):
             raise ValueError(f"config.params.{name} must be a boolean")
     params["select_angles"] = str(params["select_angles"])
+    for name, choices in (("window", WINDOW_CHOICES), ("interp", INTERP_CHOICES)):
+        if params[name] not in choices:
+            raise ValueError(f"config.params.{name} must be one of {choices}")
     return params
 
 
@@ -351,6 +354,8 @@ def prepare_beamforming_input(h5_path, sample_idx, select_str):
 
 def time_start_tensor(t_starts, n_angles, fs, device):
     values = np.asarray(t_starts, dtype=np.float32).reshape(-1)
+    if not np.isfinite(values).all():
+        raise ValueError("time starts must be finite")
     if values.size == 1:
         values = np.repeat(values, n_angles)
     if values.size != n_angles:
@@ -358,6 +363,20 @@ def time_start_tensor(t_starts, n_angles, fs, device):
             f"time starts must contain one value or exactly {n_angles} values, got {values.size}",
         )
     return torch.from_numpy(values).to(device) * fs
+
+
+def validate_beamformer_input(i_data, q_data, angles, fs, expected_fs, n_channels):
+    if i_data.shape != q_data.shape or i_data.ndim != 3 or min(i_data.shape) < 1:
+        raise ValueError("I/Q must have matching nonempty [angles,time,channels] shapes")
+    angles = np.asarray(angles)
+    if angles.ndim != 1 or angles.size != i_data.shape[0] or not np.isfinite(angles).all():
+        raise ValueError("selected_angles must match the IQ angle dimension and be finite")
+    if i_data.shape[2] != n_channels:
+        raise ValueError("IQ channel count does not match beamformer geometry")
+    if not np.isfinite(fs) or fs <= 0 or not np.isclose(fs, expected_fs, rtol=1e-6, atol=0):
+        raise ValueError("sampling frequency does not match beamformer geometry")
+    if not np.isfinite(i_data).all() or not np.isfinite(q_data).all():
+        raise ValueError("I/Q contains NaN/Inf")
 
 
 def envelope_to_db(i_output, q_output, z_grid, fc, tgc_enabled, tgc_alpha):
@@ -369,14 +388,21 @@ def envelope_to_db(i_output, q_output, z_grid, fc, tgc_enabled, tgc_alpha):
         )
     if not np.isfinite(i_output).all() or not np.isfinite(q_output).all():
         raise FloatingPointError("beamformer I/Q output contains NaN/Inf")
-    tgc = tgc_gain(z_grid, fc, tgc_alpha) if tgc_enabled else np.ones(len(z_grid))
-    envelope_sq = (i_output**2 + q_output**2) * (tgc[:, None] ** 2)
-    peak = float(np.max(envelope_sq))
-    if not np.isfinite(peak) or peak <= 0:
-        raise ValueError(
-            f"beamformer envelope peak must be finite and positive, got {peak}"
-        )
-    return 10.0 * np.log10(envelope_sq / peak + 1e-24)
+    z_grid = np.asarray(z_grid, dtype=np.float64)
+    if z_grid.ndim != 1 or z_grid.size != i_output.shape[0] or not np.isfinite(z_grid).all():
+        raise ValueError("z_grid must match the output depth dimension and be finite")
+    envelope = np.hypot(i_output.astype(np.float64), q_output.astype(np.float64))
+    if not np.any(envelope > 0):
+        raise ValueError("beamformer envelope peak must be finite and positive")
+    with np.errstate(divide="ignore"):
+        db = 20.0 * np.log10(envelope)
+    if tgc_enabled:
+        gain_db = tgc_alpha * (fc / 1e6) * (z_grid * 100) * 2.0
+        if not np.isfinite(gain_db).all():
+            raise ValueError("TGC gain must be finite")
+        db += gain_db[:, None]
+    db -= np.max(db)
+    return (10.0 * np.log10(10.0 ** (db / 10.0) + 1e-24)).astype(np.float32)
 
 
 def run_beamformer(beamformer, i_data, q_data, selected_angles, t0, fs, device):
@@ -423,6 +449,7 @@ def save_algorithm_result(
             method_dir / f"{method_name}_comparison.png",
             title,
             dr=args.dr,
+            method_name=method_name,
         )
     for suffix, values in (extra_arrays or {}).items():
         np.save(method_dir / f"{method_name}_{suffix}.npy", np.asarray(values))
@@ -635,7 +662,7 @@ def aperture_window_from_dx(dx, half_a, window_type, tukey_alpha=0.25, kaiser_be
         win = torch.i0(arg) / torch.i0(beta)
     else:
         raise ValueError(f"Unsupported window type: {window_type}")
-    weighted = win * in_aperture
+    weighted = win.clamp_min(0) * in_aperture
     return torch.where(
         in_aperture.sum(-1, keepdim=True) <= 2,
         in_aperture,
@@ -671,7 +698,7 @@ def aperture_window_1d(
     if window_type == "blackman":
         return (
             0.42 + 0.5 * torch.cos(torch.pi * x) + 0.08 * torch.cos(2.0 * torch.pi * x)
-        )
+        ).clamp_min(0)
     if window_type == "kaiser":
         beta = torch.as_tensor(kaiser_beta, dtype=dtype, device=device)
         arg = beta * torch.sqrt(torch.clamp(1.0 - ax.square(), min=0.0))
@@ -701,6 +728,10 @@ def build_row_dynamic_geometry(
     device,
 ):
     """Build shared geometry and row caches for MV-family beamformers."""
+    if temporal_win < 1 or temporal_win % 2 != 1:
+        raise ValueError("temporal_win must be a positive odd integer")
+    if not np.isfinite(subarray_ratio) or not 0 < subarray_ratio <= 1:
+        raise ValueError("subarray_ratio must be in (0,1]")
     height, width, n_channels = len(z_grid), len(x_grid), n_elem
     x_tensor = torch.from_numpy(x_grid).float().to(device)
     z_tensor = torch.from_numpy(z_grid).float().to(device)
@@ -740,7 +771,8 @@ def build_row_dynamic_geometry(
                 "subarray_size": subarray_size,
                 "subarray_count": subarray_count,
                 "ch_idx_t": ch_idx.unsqueeze(-1).expand(-1, -1, temporal_win),
-                "window": optional_aperture_window_1d(aperture_size, window, device),
+                "window": optional_aperture_window_1d(subarray_count, window, device),
+                "aperture_window": optional_aperture_window_1d(aperture_size, window, device),
                 "eye": torch.eye(
                     subarray_size,
                     dtype=torch.complex64,
@@ -773,17 +805,35 @@ def build_row_dynamic_geometry(
 
 
 def normalized_mv_weights(covariance, steering):
-    try:
-        solved = torch.linalg.solve(covariance, steering)
-    except RuntimeError:
-        solved = torch.linalg.pinv(covariance) @ steering
-    return solved / (steering.mH @ solved + 1e-12)
+    covariance = 0.5 * (covariance + covariance.mH)
+    dtype = covariance.real.dtype
+    scale = covariance.abs().amax(dim=(-2, -1), keepdim=True)
+    normalized = covariance / scale.clamp_min(torch.finfo(dtype).tiny)
+    size = covariance.shape[-1]
+    eye = torch.eye(size, dtype=covariance.dtype, device=covariance.device)
+    # A relative numerical floor also stabilizes zero user-specified loading.
+    normalized = normalized + (10 * size * torch.finfo(dtype).eps) * eye
+    solved = torch.linalg.solve(normalized, steering)
+    denominator = (steering.mH @ solved).real
+    weights = solved / denominator.clamp_min(torch.finfo(dtype).tiny)
+    return torch.where(scale > 0, weights, torch.zeros_like(weights))
 
 
-def spatial_temporal_covariance(x_active, subarray_size, temporal_win, use_fbss):
+def spatial_temporal_covariance(
+    x_active, subarray_size, temporal_win, use_fbss, spatial_weights=None, normalize=False,
+):
+    if x_active.shape[-1] != temporal_win:
+        raise ValueError("temporal_win must match the snapshot time dimension")
     x_subarrays = x_active.unfold(1, subarray_size, 1).permute(0, 3, 1, 2)
     snapshots = x_subarrays.shape[2] * temporal_win
     x_snapshots = x_subarrays.reshape(x_active.shape[0], subarray_size, snapshots)
+    if normalize:
+        scale = x_snapshots.abs().amax(dim=(-2, -1), keepdim=True)
+        x_snapshots = x_snapshots / scale.clamp_min(torch.finfo(x_active.real.dtype).tiny)
+    if spatial_weights is not None:
+        snapshot_weights = spatial_weights.repeat_interleave(temporal_win)
+        x_snapshots = x_snapshots * snapshot_weights.sqrt()
+        snapshots = snapshot_weights.sum()
     covariance_forward = torch.matmul(x_snapshots, x_snapshots.mH) / snapshots
     if use_fbss:
         covariance = 0.5 * (
@@ -792,6 +842,35 @@ def spatial_temporal_covariance(x_active, subarray_size, temporal_win, use_fbss)
     else:
         covariance = covariance_forward
     return x_subarrays, covariance
+
+
+def mv_row_output(weights, x_subarrays, x_active, valid_mask, row):
+    """Combine subarrays, falling back to valid-channel DAS for incomplete apertures."""
+    center = x_subarrays.shape[-1] // 2
+    values = x_subarrays[..., center]
+    if row["window"] is None:
+        mean = values.mean(dim=2)
+    else:
+        window = row["window"] / row["window"].sum()
+        mean = (values * window).sum(dim=2)
+    output = (weights.mH @ mean.unsqueeze(-1)).squeeze(-1).squeeze(-1)
+    valid = torch.gather(valid_mask[..., center], 1, row["ch_idx_t"][..., center])
+    fallback_weights = valid
+    if row["aperture_window"] is not None:
+        fallback_weights = fallback_weights * row["aperture_window"]
+    fallback_weights = fallback_weights / fallback_weights.sum(dim=1, keepdim=True).clamp_min(1e-12)
+    fallback = (x_active[..., center] * fallback_weights).sum(dim=1)
+    return torch.where(valid.bool().all(dim=1), output, fallback).view(-1, 1, 1)
+
+
+def generalized_coherence_factor(data, low_bins):
+    scale = data.abs().amax(dim=-1, keepdim=True)
+    data = data / scale.clamp_min(torch.finfo(data.real.dtype).tiny)
+    spectrum = torch.fft.fftshift(torch.fft.fft(data, dim=-1), dim=-1).abs().square()
+    center = data.shape[-1] // 2
+    low = spectrum[..., max(0, center - low_bins):min(data.shape[-1], center + low_bins + 1)].sum(dim=-1)
+    total = spectrum.sum(dim=-1)
+    return (low / total.clamp_min(torch.finfo(total.dtype).tiny)).clamp(0, 1)
 
 
 def _lagrange_weight(frac, offset, offsets):
@@ -1009,19 +1088,13 @@ def save_figure(
 
 def write_params(path, params):
     Path(path).write_text(
-        json.dumps(params, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(params, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
 
 
 def result_cache_signature(h5_path, method_name, parameters=None, *, extra_args=()):
     input_path = Path(resolve_project_path(h5_path, PROJECT_ROOT)).resolve(strict=True)
     input_stat = input_path.stat()
-    sources = {}
-    for source_path in algorithm_source_paths(method_name):
-        sources[str(source_path.resolve())] = hashlib.sha256(
-            source_path.read_bytes()
-        ).hexdigest()
-
     effective_parameters = dict(parameters or {})
     for index, argument in enumerate(extra_args):
         if not argument.startswith("--"):
@@ -1031,6 +1104,9 @@ def result_cache_signature(h5_path, method_name, parameters=None, *, extra_args=
             effective_parameters[name] = value
         elif index + 1 < len(extra_args) and not extra_args[index + 1].startswith("--"):
             effective_parameters[name] = extra_args[index + 1]
+    sources = {}
+    for source_path in algorithm_source_paths(method_name, effective_parameters.get("train_root")):
+        sources[str(source_path.resolve())] = hashlib.sha256(source_path.read_bytes()).hexdigest()
     dependencies = {}
     for name, value in effective_parameters.items():
         normalized_name = str(name).lower().replace("-", "_")
@@ -1065,7 +1141,7 @@ def result_cache_signature(h5_path, method_name, parameters=None, *, extra_args=
     }
 
 
-def algorithm_source_paths(method_name):
+def algorithm_source_paths(method_name, train_root=None):
     script_path = Path(__file__)
     mban_sources = (
         "eval_core/inference.py",
@@ -1088,9 +1164,10 @@ def algorithm_source_paths(method_name):
         "shared_core/signal_chain.py",
         "shared_core/splits.py",
     )
+    train_root = Path(resolve_project_path(train_root, PROJECT_ROOT)) if train_root else PROJECT_ROOT / "train"
     dependencies = {
         "cmsaw": (script_path.with_name("mv.py"),),
-        "mban": tuple(PROJECT_ROOT / "train" / source for source in mban_sources),
+        "mban": tuple(train_root / source for source in mban_sources),
     }
     return (
         script_path.with_name(f"{method_name}.py"),

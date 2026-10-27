@@ -26,6 +26,7 @@ from algorithms.common import (
     save_algorithm_result,
     time_start_tensor,
     validate_db_output,
+    validate_beamformer_input,
 )
 
 # ================= 命令行参数配置 =================
@@ -57,7 +58,7 @@ class DASBeamformerIQ:
 
     def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad, options=None):
         """Initialize the instance."""
-        self.options = args if options is None else options
+        self.options = options if options is not None else (args if args is not None else parser.parse_args([]))
         self.height, self.width, self.N = len(z_grid), len(x_grid), n_elem
         self.x_grid = torch.from_numpy(x_grid).float().to(device)
         self.z_grid = torch.from_numpy(z_grid).float().to(device)
@@ -78,15 +79,16 @@ class DASBeamformerIQ:
         )
 
         if self.options.aperture_mode == "geometry":
-            dx = x_mesh[..., None] - self.ep
-            half_a = aperture_half_width(
-                z_mesh[..., None],
-                self.options.f_number,
-                n_elem,
-                pitch,
-                self.options.dynamic_aperture,
-            )
-            win = aperture_window_from_dx(dx, half_a, self.options.window)
+            if self.options.dynamic_aperture:
+                dx = x_mesh[..., None] - self.ep
+                half_a = aperture_half_width(
+                    z_mesh[..., None], self.options.f_number, n_elem, pitch, True,
+                )
+                win = aperture_window_from_dx(dx, half_a, self.options.window)
+            else:
+                win = aperture_window_1d(n_elem, self.options.window, device).expand(
+                    self.height, self.width, -1,
+                )
         else:
             win = torch.zeros(
                 (self.height, self.width, self.N),
@@ -117,6 +119,7 @@ class DASBeamformerIQ:
 
     def __call__(self, i_data, q_data, selected_angles, t_starts, fs):
         """Run the callable operation."""
+        validate_beamformer_input(i_data, q_data, selected_angles, fs, self.fs, self.N)
         n_a = i_data.shape[0]
         n_s = i_data.shape[1]
         max_sample = float(n_s - 1)

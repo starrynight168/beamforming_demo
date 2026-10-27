@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -16,22 +17,29 @@ sys.path.insert(0, str(ROOT))
 
 from algorithms.common import (
     add_common_arguments,
+    add_io_arguments,
     parse_selected_angles,
     positive_int,
     resolve_project_path,
-    save_figure,
+    save_algorithm_result,
     validate_db_output,
 )
 
 TRAIN_DIR = ROOT / "train"
 
 METHOD_NAME = "mban"
-DEFAULT_CONFIG = TRAIN_DIR / "config.yaml"
-DEFAULT_HARDWARE_CONFIG = TRAIN_DIR / "hardware_eval.yaml"
 
 
-def load_evaluation_dependencies():
+def load_evaluation_dependencies(train_root=TRAIN_DIR):
     """Load the evaluation stack after command-line parsing."""
+    train_root = Path(train_root).resolve()
+    required = ("eval_core/inference.py", "eval_core/models.py", "shared_core/runtime.py")
+    if train_root.name != "train" or any(not (train_root / name).is_file() for name in required):
+        raise FileNotFoundError(
+            f"MBAN requires the training evaluation package at {train_root}; "
+            "use --train_root to select an existing train directory"
+        )
+    sys.path.insert(0, str(train_root.parent))
     from train.eval_core.inference import load_scene, reconstruct
     from train.eval_core.models import load_evaluation_model
 
@@ -43,13 +51,13 @@ def parse_args() -> argparse.Namespace:
         description="Run MBAN in the root beamforming comparison"
     )
     add_common_arguments(parser)
-    parser.add_argument("--h5_path", default="data/simulation.h5")
-    parser.add_argument("--h5_sample_idx", type=int, default=0)
-    parser.add_argument("--output_dir", default="results")
+    add_io_arguments(parser)
+    parser.set_defaults(interp="linear")
+    parser.add_argument("--train_root", type=Path, default=TRAIN_DIR)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--kind", required=True, choices=("fp32", "ptq", "qat"))
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--eval-config", type=Path, default=DEFAULT_HARDWARE_CONFIG)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--eval-config", type=Path)
     parser.add_argument("--profile", default="ideal")
     parser.add_argument("--micro_batch_size", type=positive_int, default=8192)
     parser.add_argument(
@@ -61,19 +69,27 @@ def parse_args() -> argparse.Namespace:
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
     args = parser.parse_args()
+    if args.window != "rect" or args.interp != "linear":
+        parser.error("MBAN uses learned receive weights and linear IQ sampling; require --window rect --interp linear")
+    args.train_root = Path(resolve_project_path(args.train_root, ROOT)).resolve()
+    args.config = Path(resolve_project_path(args.config, ROOT)).resolve() if args.config else args.train_root / "config.yaml"
+    args.eval_config = Path(resolve_project_path(args.eval_config, ROOT)).resolve() if args.eval_config else args.train_root / "hardware_eval.yaml"
     if args.kind == "ptq" and args.split_file is None:
         parser.error("--kind ptq requires --split-file")
+    if args.split_file is not None:
+        args.split_file = Path(resolve_project_path(args.split_file, ROOT)).resolve()
     return args
 
 
 def main() -> None:
     args = parse_args()
-    load_scene, reconstruct, load_evaluation_model = load_evaluation_dependencies()
+    load_scene, reconstruct, load_evaluation_model = load_evaluation_dependencies(args.train_root)
     h5_path = Path(resolve_project_path(args.h5_path, str(ROOT))).resolve()
     output_dir = Path(args.output_dir).resolve() / METHOD_NAME
     output_dir.mkdir(parents=True, exist_ok=True)
     with h5py.File(h5_path, "r") as handle:
         angle_values = np.asarray(handle["angles"][:], dtype=np.float32)
+        has_gt = "all_envdb_norm" in handle
     angle_indices, _ = parse_selected_angles(angle_values, args.select_angles)
     device = torch.device(args.device)
     data = load_scene(
@@ -81,7 +97,7 @@ def main() -> None:
     )
     spec = load_evaluation_model(
         METHOD_NAME,
-        Path(args.checkpoint).resolve(),
+        Path(resolve_project_path(args.checkpoint, ROOT)).resolve(),
         args.kind,
         device,
         config_path=args.config.resolve(),
@@ -93,6 +109,8 @@ def main() -> None:
         f_number=float(args.f_number),
         use_tgc=bool(args.tgc),
         tgc_alpha=float(args.tgc_alpha),
+        angle_selection="all",
+        angle_reduction="mean",
     )
     if args.kind == "ptq":
         from train.eval_core.calibration import calibrate_ptq_observers
@@ -103,7 +121,7 @@ def main() -> None:
             output=output_dir,
         )
         calibrate_ptq_observers(calibration_args, [spec], device)
-    image, _, _, _ = reconstruct(
+    image, _, _, elapsed = reconstruct(
         spec, data, device, args.micro_batch_size, collect_weight_stats=False
     )
     extent = [
@@ -113,15 +131,8 @@ def main() -> None:
         float(data.z_grid[0] * 1000.0),
     ]
     image = validate_db_output(image, (data.height, data.width), METHOD_NAME)
-    np.save(output_dir / f"{METHOD_NAME}.npy", image)
-    save_figure(
-        image,
-        extent,
-        output_dir / f"{METHOD_NAME}.png",
-        "MBAN",
-        dr=float(args.dr),
-        method_name=METHOD_NAME,
-    )
+    input_data = SimpleNamespace(extent_mm=extent, sample=SimpleNamespace(has_gt=has_gt))
+    save_algorithm_result(image, input_data, args, METHOD_NAME, "MBAN", elapsed)
     print(f"Saved {output_dir / f'{METHOD_NAME}.npy'}")
 
 
