@@ -149,6 +149,7 @@ class BeamformerRegressionTests(unittest.TestCase):
         torch.testing.assert_close(esbmv.project_signal_subspace(covariance, weights, 2, 0.0), weights)
 
     def test_gcf_uses_full_aperture_and_includes_even_length_nyquist_bin(self):
+        self.assertEqual(gcfmv.parser.parse_args([]).gcf_power, 1.0)
         data = torch.tensor([[1, -1]], dtype=torch.complex64)
         torch.testing.assert_close(generalized_coherence_factor(data, 0), torch.zeros(1))
         torch.testing.assert_close(generalized_coherence_factor(data, 1), torch.ones(1))

@@ -68,8 +68,8 @@ parser.add_argument(
 parser.add_argument(
     "--gcf_power",
     type=nonnegative_float,
-    default=2.0,
-    help="GCF后加权指数;0表示退化为MV",
+    default=1.0,
+    help="GCF后加权指数;1为标准GCF,0表示退化为MV",
 )
 
 add_io_arguments(parser)
