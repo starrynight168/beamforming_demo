@@ -399,30 +399,47 @@ def _joint_spatial_covariance(data, valid, axis, subarray_size, use_fbss, weight
     unfolded = data.unfold(axis, subarray_size, 1)
     valid_windows = valid.unfold(axis, subarray_size, 1).all(dim=-1)
     if axis == 2:
-        snapshots = unfolded.permute(0, 4, 1, 2, 3).reshape(data.shape[0], subarray_size, -1)
-        mask = valid_windows
         window_count = unfolded.shape[2]
-        weights_shape = (1, 1, window_count, 1)
-        repeats = (data.shape[0], data.shape[1], window_count, data.shape[3])
+        n_outer, n_inner = data.shape[1], data.shape[3]
     else:
-        snapshots = unfolded.permute(0, 4, 1, 2, 3).reshape(data.shape[0], subarray_size, -1)
-        mask = valid_windows
         window_count = unfolded.shape[1]
-        weights_shape = (1, window_count, 1, 1)
-        repeats = (data.shape[0], window_count, data.shape[2], data.shape[3])
-    if weights is None:
-        sample_weights = torch.ones(weights_shape, dtype=data.real.dtype, device=data.device)
-    else:
-        sample_weights = weights.view(weights_shape)
-    sample_weights = sample_weights.expand(repeats).reshape(data.shape[0], -1)
-    mask = mask.reshape(data.shape[0], -1).to(data.real.dtype)
-    sample_weights = sample_weights * mask
-    snapshots = snapshots / snapshots.abs().amax(dim=(-2, -1), keepdim=True).clamp_min(
+        n_outer, n_inner = data.shape[2], data.shape[3]
+    width = data.shape[0]
+    scale = data.abs().amax(dim=(1, 2, 3)).clamp_min(
         torch.finfo(data.real.dtype).tiny,
     )
-    snapshots = snapshots * sample_weights.sqrt().unsqueeze(1)
-    covariance = snapshots @ snapshots.mH
-    covariance = covariance / sample_weights.sum(dim=-1).clamp_min(1).view(-1, 1, 1)
+    covariance = torch.zeros(
+        (width, subarray_size, subarray_size), dtype=data.dtype, device=data.device,
+    )
+    denominator = torch.zeros(width, dtype=data.real.dtype, device=data.device)
+    for start in range(0, window_count, 16):
+        stop = min(start + 16, window_count)
+        count = stop - start
+        if axis == 2:
+            block = unfolded[:, :, start:stop]
+            snapshots = block.permute(0, 4, 1, 2, 3).reshape(width, subarray_size, -1)
+            mask = valid_windows[:, :, start:stop]
+            weights_shape = (1, 1, count, 1)
+            repeats = (width, n_outer, count, n_inner)
+        else:
+            block = unfolded[:, start:stop]
+            snapshots = block.permute(0, 4, 1, 2, 3).reshape(width, subarray_size, -1)
+            mask = valid_windows[:, start:stop]
+            weights_shape = (1, count, 1, 1)
+            repeats = (width, count, n_outer, n_inner)
+        if weights is None:
+            sample_weights = torch.ones(
+                weights_shape, dtype=data.real.dtype, device=data.device,
+            )
+        else:
+            sample_weights = weights[start:stop].view(weights_shape)
+        sample_weights = sample_weights.expand(repeats).reshape(width, -1)
+        sample_weights = sample_weights * mask.reshape(width, -1).to(data.real.dtype)
+        snapshots = snapshots / scale.view(width, 1, 1)
+        snapshots = snapshots * sample_weights.sqrt().unsqueeze(1)
+        covariance += snapshots @ snapshots.mH
+        denominator += sample_weights.sum(dim=-1)
+    covariance = covariance / denominator.clamp_min(1).view(-1, 1, 1)
     if use_fbss:
         covariance = 0.5 * (covariance + covariance.conj().flip(-1, -2))
     return covariance
