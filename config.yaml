@@ -50,6 +50,8 @@ algorithm_params:
     temporal_win: 9
     gcf_low_bins: 1
     gcf_power: 1.0
+    tx_subarray_ratio: null
+    gcf_tx_low_bins: null
 
   cmsaw:
     mv_dl: 0.0

@@ -16,11 +16,13 @@ from algorithms.common import (
     build_row_dynamic_geometry,
     envelope_to_db,
     interpolate_channel_samples,
+    interpolate_multi_angle_channel_samples,
     nonnegative_float,
     nonnegative_int,
     normalized_mv_weights,
     generalized_coherence_factor,
     mv_row_output,
+    optional_aperture_window_1d,
     positive_odd_int,
     prepare_beamforming_input,
     print_physical_summary,
@@ -70,6 +72,18 @@ parser.add_argument(
     type=nonnegative_float,
     default=1.0,
     help="GCF后加权指数;1为标准GCF,0表示退化为MV",
+)
+parser.add_argument(
+    "--tx_subarray_ratio",
+    type=unit_interval_float,
+    default=None,
+    help="多角度 Tx 子阵列比例;默认沿用 subarray_ratio",
+)
+parser.add_argument(
+    "--gcf_tx_low_bins",
+    type=nonnegative_int,
+    default=None,
+    help="多角度 Tx 方向 GCF 低频半宽;默认沿用 gcf_low_bins",
 )
 
 add_io_arguments(parser)
@@ -135,6 +149,10 @@ class RowDynamicMVBeamformerIQ:
         i_tensor = torch.from_numpy(i_data.astype(np.float32)).to(device)
         q_tensor = torch.from_numpy(q_data.astype(np.float32)).to(device)
         n_s = i_tensor.shape[1]
+        if n_a > 1:
+            return self._beamform_joint_2d(
+                i_tensor, q_tensor, np.asarray(selected_angles), t_starts, fs,
+            )
 
         half_win = self.temporal_win // 2
         offsets = torch.arange(-half_win, half_win + 1, device=device)
@@ -248,6 +266,186 @@ class RowDynamicMVBeamformerIQ:
         q_output = (q_beam_sum / n_a).cpu().numpy()
         return i_output, q_output
 
+    def _beamform_joint_2d(self, i_tensor, q_tensor, selected_angles, t_starts, fs):
+        n_angles = i_tensor.shape[0]
+        order = np.argsort(selected_angles)
+        angles = np.asarray(selected_angles, dtype=np.float64)[order]
+        spacing = np.diff(angles)
+        if np.any(spacing <= 0):
+            raise ValueError("2D GCF requires unique transmit angles")
+        median_spacing = float(np.median(spacing))
+        if np.max(np.abs(spacing - median_spacing)) > 0.2 * median_spacing:
+            raise ValueError(
+                "2D GCF requires approximately uniform transmit-angle spacing; "
+                "use all angles or a uniformly spaced selection",
+            )
+        order_t = torch.as_tensor(order, device=device)
+        i_tensor = i_tensor[order_t]
+        q_tensor = q_tensor[order_t]
+        starts = time_start_tensor(t_starts, n_angles, fs, device)[order_t]
+        cos_a = torch.as_tensor(np.cos(angles), dtype=torch.float32, device=device)
+        sin_a = torch.as_tensor(np.sin(angles), dtype=torch.float32, device=device)
+        half_win = self.temporal_win // 2
+        offsets = torch.arange(-half_win, half_win + 1, device=device).float()
+        max_sample = float(i_tensor.shape[1] - 1)
+        i_output = torch.zeros((self.height, self.width), device=device)
+        q_output = torch.zeros_like(i_output)
+        angle_index = torch.arange(n_angles, device=device).view(n_angles, 1, 1, 1)
+        channel_index = self.ch.expand(1, 1, self.N, 1)
+        tx_ratio = self.options.tx_subarray_ratio
+        if tx_ratio is None:
+            tx_ratio = self.subarray_ratio
+        tx_size = min(max(int(n_angles * tx_ratio), 2), n_angles)
+        tx_count = n_angles - tx_size + 1
+        tx_weights = optional_aperture_window_1d(
+            tx_count, self.options.window, device,
+        )
+        tx_eye = torch.eye(tx_size, dtype=torch.complex64, device=device).unsqueeze(0)
+        tx_bins = self.options.gcf_tx_low_bins
+        if tx_bins is None:
+            tx_bins = self.options.gcf_low_bins
+
+        for hz in range(self.height):
+            for x_start in range(0, self.width, 32):
+                x_stop = min(x_start + 32, self.width)
+                x_slice = slice(x_start, x_stop)
+                block_width = x_stop - x_start
+                tx_row = (
+                    self.z_mesh[hz, x_slice].unsqueeze(0) * self.sc * cos_a.unsqueeze(1)
+                    + self.x_mesh[hz, x_slice].unsqueeze(0) * self.sc * sin_a.unsqueeze(1)
+                )
+                drs = self.drs[hz, x_slice]
+                sample = (
+                    tx_row[:, :, None]
+                    + drs.unsqueeze(0)
+                    - starts.view(n_angles, 1, 1)
+                ).unsqueeze(-1) + offsets.view(1, 1, 1, -1)
+                valid = (sample >= 0) & (sample <= max_sample)
+                sample = sample.clamp(0.0, max_sample)
+                i_samples, q_samples = interpolate_multi_angle_channel_samples(
+                    i_tensor,
+                    q_tensor,
+                    sample,
+                    angle_index,
+                    channel_index,
+                    self.options.interp,
+                )
+                phi_tx = 2.0 * np.pi * self.fc * tx_row / fs
+                phi_rx = 2.0 * np.pi * self.fc * drs / fs
+                phi = phi_tx[:, :, None, None] + phi_rx.unsqueeze(0).unsqueeze(-1)
+                cos_phi, sin_phi = torch.cos(phi), torch.sin(phi)
+                i_aligned = i_samples * cos_phi - q_samples * sin_phi
+                q_aligned = i_samples * sin_phi + q_samples * cos_phi
+                data = torch.complex(i_aligned, q_aligned) * valid
+                row = self.row_cache[hz]
+                row_indices = row["ch_idx_t"][x_slice]
+                data = torch.gather(
+                    data,
+                    2,
+                    row_indices.unsqueeze(0).expand(n_angles, -1, -1, -1),
+                ).permute(1, 0, 2, 3)
+                valid = torch.gather(
+                    valid,
+                    2,
+                    row_indices.unsqueeze(0).expand(n_angles, -1, -1, -1),
+                ).permute(1, 0, 2, 3)
+
+                rx_size = row["subarray_size"]
+                rx_cov = _joint_spatial_covariance(
+                    data, valid, 2, rx_size, self.use_fbss, row["window"],
+                )
+                tx_cov = _joint_spatial_covariance(
+                    data, valid, 1, tx_size, self.use_fbss, tx_weights,
+                )
+                rx_cov = _load_joint_covariance(rx_cov, self.dl_factor, row["eye"])
+                tx_cov = _load_joint_covariance(tx_cov, self.dl_factor, tx_eye)
+                rx_steering = torch.ones(
+                    (block_width, rx_size, 1), dtype=torch.complex64, device=device,
+                )
+                tx_steering = torch.ones(
+                    (block_width, tx_size, 1), dtype=torch.complex64, device=device,
+                )
+                rx_mv = normalized_mv_weights(rx_cov, rx_steering)
+                tx_mv = normalized_mv_weights(tx_cov, tx_steering)
+
+                center = self.temporal_win // 2
+                rx_values = data[..., center].unfold(2, rx_size, 1)
+                rx_filtered = torch.einsum(
+                    "wl,wagr->wag", rx_mv.conj().squeeze(-1), rx_values,
+                )
+                tx_values = rx_filtered.unfold(1, tx_size, 1).permute(0, 1, 3, 2)
+                z_matrix = torch.einsum(
+                    "wl,wglr->wgr", tx_mv.conj().squeeze(-1), tx_values,
+                )
+                valid_rx = valid[..., center].unfold(2, rx_size, 1).all(dim=-1)
+                valid_both = valid_rx.unfold(1, tx_size, 1).all(dim=-1)
+                z_matrix = torch.where(valid_both, z_matrix, torch.zeros_like(z_matrix))
+                if self.options.gcf_power > 0:
+                    gcf = generalized_coherence_factor_2d(
+                        z_matrix, tx_bins, self.options.gcf_low_bins,
+                    )
+                    output = z_matrix.sum(dim=(-2, -1)) * torch.pow(
+                        gcf, self.options.gcf_power,
+                    )
+                else:
+                    output = z_matrix.sum(dim=(-2, -1))
+                i_output[hz, x_slice] = output.real
+                q_output[hz, x_slice] = output.imag
+
+        return i_output.cpu().numpy(), q_output.cpu().numpy()
+
+
+def _joint_spatial_covariance(data, valid, axis, subarray_size, use_fbss, weights):
+    unfolded = data.unfold(axis, subarray_size, 1)
+    valid_windows = valid.unfold(axis, subarray_size, 1).all(dim=-1)
+    if axis == 2:
+        snapshots = unfolded.permute(0, 4, 1, 2, 3).reshape(data.shape[0], subarray_size, -1)
+        mask = valid_windows
+        window_count = unfolded.shape[2]
+        weights_shape = (1, 1, window_count, 1)
+        repeats = (data.shape[0], data.shape[1], window_count, data.shape[3])
+    else:
+        snapshots = unfolded.permute(0, 4, 1, 2, 3).reshape(data.shape[0], subarray_size, -1)
+        mask = valid_windows
+        window_count = unfolded.shape[1]
+        weights_shape = (1, window_count, 1, 1)
+        repeats = (data.shape[0], window_count, data.shape[2], data.shape[3])
+    if weights is None:
+        sample_weights = torch.ones(weights_shape, dtype=data.real.dtype, device=data.device)
+    else:
+        sample_weights = weights.view(weights_shape)
+    sample_weights = sample_weights.expand(repeats).reshape(data.shape[0], -1)
+    mask = mask.reshape(data.shape[0], -1).to(data.real.dtype)
+    sample_weights = sample_weights * mask
+    snapshots = snapshots / snapshots.abs().amax(dim=(-2, -1), keepdim=True).clamp_min(
+        torch.finfo(data.real.dtype).tiny,
+    )
+    snapshots = snapshots * sample_weights.sqrt().unsqueeze(1)
+    covariance = snapshots @ snapshots.mH
+    covariance = covariance / sample_weights.sum(dim=-1).clamp_min(1).view(-1, 1, 1)
+    if use_fbss:
+        covariance = 0.5 * (covariance + covariance.conj().flip(-1, -2))
+    return covariance
+
+
+def _load_joint_covariance(covariance, dl_factor, eye):
+    trace = covariance.diagonal(dim1=-2, dim2=-1).real.sum(-1)
+    return covariance + (dl_factor / covariance.shape[-1]) * trace.view(-1, 1, 1) * eye
+
+
+def generalized_coherence_factor_2d(data, tx_low_bins, rx_low_bins):
+    scale = data.abs().amax(dim=(-2, -1), keepdim=True)
+    data = data / scale.clamp_min(torch.finfo(data.real.dtype).tiny)
+    spectrum = torch.fft.fftshift(
+        torch.fft.fft2(data, dim=(-2, -1)), dim=(-2, -1),
+    ).abs().square()
+    tx_center, rx_center = spectrum.shape[-2] // 2, spectrum.shape[-1] // 2
+    tx_slice = slice(max(0, tx_center - tx_low_bins), min(spectrum.shape[-2], tx_center + tx_low_bins + 1))
+    rx_slice = slice(max(0, rx_center - rx_low_bins), min(spectrum.shape[-1], rx_center + rx_low_bins + 1))
+    low = spectrum[..., tx_slice, rx_slice].sum(dim=(-2, -1))
+    total = spectrum.sum(dim=(-2, -1))
+    return (low / total.clamp_min(torch.finfo(total.dtype).tiny)).clamp(0, 1)
+
 
 # ================= 主程序 =================
 def main():
@@ -272,6 +470,20 @@ def main():
     )
     angles_all, z_grid, x_grid = sample.angles, sample.z_grid, sample.x_grid
     selected_angles = input_data.selected_angles
+    beamforming_mode = "1D_RX" if len(selected_angles) == 1 else "2D_JTR"
+    tx_subarray_ratio = (
+        args.tx_subarray_ratio
+        if args.tx_subarray_ratio is not None
+        else args.subarray_ratio
+    )
+    gcf_tx_low_bins = (
+        args.gcf_tx_low_bins
+        if args.gcf_tx_low_bins is not None
+        else args.gcf_low_bins
+    )
+    args.beamforming_mode = beamforming_mode
+    args.tx_subarray_ratio_effective = tx_subarray_ratio
+    args.gcf_tx_low_bins_effective = gcf_tx_low_bins
     i_sub, q_sub, t0_sub = input_data.i_data, input_data.q_data, input_data.t0
     has_gt = sample.has_gt
     height, width = len(z_grid), len(x_grid)
@@ -310,6 +522,9 @@ def main():
             ("Temporal win", args.temporal_win),
             ("GCF bins", args.gcf_low_bins),
             ("GCF power", args.gcf_power),
+            ("Beamforming mode", beamforming_mode),
+            ("Tx subarray ratio", tx_subarray_ratio),
+            ("Tx GCF bins", gcf_tx_low_bins),
             ("Window", args.window.upper()),
             ("Interp", args.interp),
             ("TGC", "Enabled" if args.tgc else "Disabled"),
@@ -336,7 +551,7 @@ def main():
     )
 
     print(
-        f"Processing GCF-MV (DL={args.mv_dl}, GCF bins={args.gcf_low_bins}, power={args.gcf_power})...",
+        f"Processing GCF-MV {beamforming_mode} (DL={args.mv_dl}, GCF bins={args.gcf_low_bins}, power={args.gcf_power})...",
     )
     i_out, q_out, dt = run_beamformer(
         bf,
@@ -352,6 +567,7 @@ def main():
 
     # ========== 生成图标题(所有参数简写) ==========
     title_parts = [
+        beamforming_mode,
         f"F{args.f_number}",
         f"DL{args.mv_dl}",
         f"sub{args.subarray_ratio}",
@@ -361,6 +577,10 @@ def main():
         f"GCFb{args.gcf_low_bins}",
         f"GCFp{args.gcf_power:g}",
     ]
+    if len(selected_angles) > 1:
+        title_parts.extend(
+            [f"txsub{tx_subarray_ratio:g}", f"GCFtx{gcf_tx_low_bins}"],
+        )
     # 角度信息
     if len(selected_angles) == 1:
         title_parts.append(f"{np.degrees(selected_angles[0]):.1f}°")

@@ -24,6 +24,7 @@ from algorithms.common import (
     normalized_mv_weights,
     spatial_temporal_covariance,
 )
+from algorithms.gcfmv import generalized_coherence_factor_2d
 
 
 class BeamformerRegressionTests(unittest.TestCase):
@@ -165,6 +166,17 @@ class BeamformerRegressionTests(unittest.TestCase):
         expected = channels.sum() ** 2 / (8 * np.sum(channels ** 2))
         np.testing.assert_allclose(i_gcf, i_mv * expected, atol=1e-6)
 
+    def test_2d_gcf_uses_the_centered_tx_rx_frequency_rectangle(self):
+        coherent = torch.ones((2, 4, 8), dtype=torch.complex64)
+        torch.testing.assert_close(generalized_coherence_factor_2d(coherent, 0, 0), torch.ones(2))
+        alternating = torch.tensor([[1, -1], [-1, 1]], dtype=torch.complex64)
+        torch.testing.assert_close(
+            generalized_coherence_factor_2d(alternating[None], 0, 0), torch.zeros(1),
+        )
+        factors = generalized_coherence_factor_2d(torch.randn(3, 5, 7, dtype=torch.complex64), 1, 2)
+        self.assertTrue(torch.isfinite(factors).all())
+        self.assertTrue(((factors >= 0) & (factors <= 1)).all())
+
     def test_cmsaw_sparse_signal_survives_percentile_clipping(self):
         data = torch.zeros((1, 4, 20, 8), dtype=torch.complex64)
         data[0, 1, 10] = 1.0
@@ -297,6 +309,17 @@ class BeamformerRegressionTests(unittest.TestCase):
                     self.assertTrue((root / method / f"{method}.png").is_file())
                     params = json.loads((root / method / "params.json").read_text(encoding="utf-8"))
                     self.assertIn("cache_signature", params)
+                    if module is gcfmv:
+                        self.assertEqual(params["beamforming_mode"], "2D_JTR")
+
+            command = [sys.executable, "-m", "algorithms.gcfmv",
+                       "--h5_path", str(source), "--output_dir", str(root),
+                       "--select_angles", "1", "--no_tgc", "--no_dynamic_aperture"]
+            result = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],
+                                    capture_output=True, text=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            params = json.loads((root / "gcfmv" / "params.json").read_text(encoding="utf-8"))
+            self.assertEqual(params["beamforming_mode"], "1D_RX")
 
 
 if __name__ == "__main__":

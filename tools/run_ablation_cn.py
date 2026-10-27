@@ -62,6 +62,8 @@ ALGORITHM_PARAM_DESCRIPTIONS = {
     "eig_threshold": "ESBMV 特征阈值。影响信号子空间选择。",
     "gcf_low_bins": "GCF 低频 bin 数。影响相干因子估计。",
     "gcf_power": "GCF 权重幂次。越大,相干性影响越强。",
+    "tx_subarray_ratio": "多角度 Tx 子阵长度比例;默认沿用 subarray_ratio。",
+    "gcf_tx_low_bins": "多角度 Tx 方向 GCF 低频 bin 半宽;默认沿用 gcf_low_bins。",
     "lmax_ratio": "CMSAW 权重参数。影响自适应加权强度。",
     "min_subarray_len": "CMSAW 最小子阵长度。",
     "delta_max": "CMSAW 权重变化上限。",
@@ -80,6 +82,8 @@ PARAM_VALUE_LABELS = {
     "window": "window",
     "interp": "interp",
     "aperture_mode": "aperture",
+    "tx_subarray_ratio": "txsub",
+    "gcf_tx_low_bins": "gcf_tx",
 }
 
 CATEGORICAL_PARAM_CHOICES = {
@@ -211,6 +215,16 @@ def validate_values(param_name, default_value, values):
         if not all(isinstance(value, bool) for value in values):
             raise ValueError("这个参数是开关量,只能填 true/false 或 是/否。")
         return reject_duplicates(values)
+
+    if param_name == "tx_subarray_ratio" and not all(
+        isinstance(value, (int, float)) and 0 < float(value) <= 1
+        for value in values
+    ):
+        raise ValueError("tx_subarray_ratio 必须位于 (0,1]。")
+    if param_name == "gcf_tx_low_bins" and not all(
+        isinstance(value, int) and value >= 0 for value in values
+    ):
+        raise ValueError("gcf_tx_low_bins 必须是非负整数。")
 
     if isinstance(default_value, (int, float)) and not isinstance(default_value, bool):
         if not all(
