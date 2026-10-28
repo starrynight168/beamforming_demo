@@ -112,6 +112,9 @@ class RowDynamicMVBeamformerIQ:
         self.use_fbss = fbss
         self.subarray_ratio = subarray_ratio
         self.temporal_win = temporal_win
+        self._covariance_windows = {
+            row["aperture_size"]: row["window"] for row in self.row_cache
+        }
 
     def __call__(self, i_data, q_data, selected_angles, t_starts, fs):
         """Run the callable operation."""
@@ -181,12 +184,11 @@ class RowDynamicMVBeamformerIQ:
                 x_active = torch.gather(
                     x_flat, 1, row["ch_idx_t"]
                 )  # [width, aperture_size, T]
-                x_subarrays, covariance = spatial_temporal_covariance(
+                x_subarrays, covariance = self.estimate_covariance(
                     x_active,
                     subarray_size,
                     self.temporal_win,
                     self.use_fbss,
-                    spatial_weights=row["window"],
                 )
 
                 # ========== 对角加载 ==========
@@ -224,14 +226,25 @@ class RowDynamicMVBeamformerIQ:
         q_output = (q_beam_sum / n_a).cpu().numpy()
         return i_output, q_output
 
+    def estimate_covariance(self, x_active, subarray_size, temporal_win, use_fbss):
+        return spatial_temporal_covariance(
+            x_active, subarray_size, temporal_win, use_fbss,
+            spatial_weights=self._covariance_windows[x_active.shape[1]],
+        )
+
 
 # ================= 主程序 =================
-def main():
+def main(
+    beamformer_class=RowDynamicMVBeamformerIQ,
+    method_name=METHOD_NAME,
+    method_label="MV",
+    covariance_label="Subarray auto-covariance",
+):
     """Run the command-line workflow."""
     global args
     args = parser.parse_args()
     h5_path = resolve_project_path(args.h5_path, PROJECT_ROOT)
-    output_dir = f"{args.output_dir}/{METHOD_NAME}"
+    output_dir = f"{args.output_dir}/{method_name}"
 
     input_data = prepare_beamforming_input(
         h5_path,
@@ -257,7 +270,7 @@ def main():
     depth_max = z_grid[-1]
 
     print_physical_summary(
-        method_name=METHOD_NAME,
+        method_name=method_name,
         h5_path=h5_path,
         sample_idx=args.h5_sample_idx,
         output_dir=output_dir,
@@ -278,6 +291,7 @@ def main():
         selected_angles=selected_angles,
         has_gt=has_gt,
         parameters=[
+            ("Covariance estimator", covariance_label),
             ("F-Number", args.f_number),
             ("Aperture", "Dynamic" if args.dynamic_aperture else "Fixed Full"),
             ("FBSS", "Enabled" if args.fbss else "Disabled"),
@@ -293,7 +307,7 @@ def main():
     )
 
     # 初始化标准 MV + FBSS 波束合成器
-    bf = RowDynamicMVBeamformerIQ(
+    bf = beamformer_class(
         z_grid,
         x_grid,
         n_elem,
@@ -307,9 +321,10 @@ def main():
         fbss=args.fbss,
         subarray_ratio=args.subarray_ratio,
         temporal_win=args.temporal_win,
+        options=args,
     )
 
-    print(f"Processing MV (DL={args.mv_dl})...")
+    print(f"Processing {method_label} (DL={args.mv_dl})...")
     i_out, q_out, dt = run_beamformer(
         bf,
         i_sub,
@@ -320,7 +335,7 @@ def main():
         device,
     )
     mv_db = envelope_to_db(i_out, q_out, z_grid, fc, args.tgc, args.tgc_alpha)
-    mv_db = validate_db_output(mv_db, (height, width), METHOD_NAME)
+    mv_db = validate_db_output(mv_db, (height, width), method_name)
 
     # ========== 生成图标题(所有参数简写) ==========
     title_parts = [
@@ -357,12 +372,12 @@ def main():
         mv_db,
         input_data,
         args,
-        METHOD_NAME,
+        method_name,
         title_params,
         dt,
     )
 
-    print(f"  GPU Time: {dt:.2f}s | Saved -> {METHOD_NAME}")
+    print(f"  GPU Time: {dt:.2f}s | Saved -> {method_name}")
     print(f"\nDone | Output: {method_dir}")
 
 

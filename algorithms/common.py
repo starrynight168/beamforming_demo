@@ -813,10 +813,15 @@ def normalized_mv_weights(covariance, steering):
     eye = torch.eye(size, dtype=covariance.dtype, device=covariance.device)
     # A relative numerical floor also stabilizes zero user-specified loading.
     normalized = normalized + (10 * size * torch.finfo(dtype).eps) * eye
-    solved = torch.linalg.solve(normalized, steering)
+    try:
+        solved = torch.linalg.solve(normalized, steering)
+    except RuntimeError:
+        solved = torch.linalg.pinv(normalized) @ steering
     denominator = (steering.mH @ solved).real
-    weights = solved / denominator.clamp_min(torch.finfo(dtype).tiny)
-    return torch.where(scale > 0, weights, torch.zeros_like(weights))
+    nonzero = denominator.abs() > torch.finfo(dtype).tiny
+    safe_denominator = torch.where(nonzero, denominator, torch.ones_like(denominator))
+    weights = solved / safe_denominator
+    return torch.where((scale > 0) & nonzero, weights, torch.zeros_like(weights))
 
 
 def spatial_temporal_covariance(

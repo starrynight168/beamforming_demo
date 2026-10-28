@@ -69,12 +69,12 @@ parser.add_argument(
 )
 parser.add_argument("--min_subarray_len", type=int, default=2, help="最小子阵列长度")
 parser.add_argument("--delta_max", type=float, default=1.0, help="对角线缩放因子最大值")
-parser.add_argument("--gamma", type=float, default=0.5, help="权重幂次")
+parser.add_argument("--gamma", type=float, default=1.0, help="可选权重幂次;1 保留原始 CMSAW MSR")
 parser.add_argument(
     "--clip_percentile",
     type=float,
-    default=90.0,
-    help="权重裁剪百分位数",
+    default=100.0,
+    help="可选权重裁剪百分位数;100 禁用裁剪",
 )
 parser.add_argument(
     "--depth_smooth_rows",
@@ -170,7 +170,7 @@ def cmsaw_weight_from_delayed_data(
     depth_smooth_rows,
     return_lengths=False,
 ):
-    """Compute one CMSAW map per angle and average the normalized maps."""
+    """Compute CMSAW MSR maps on IQ receive apertures, with optional postprocessing."""
     validate_cmsaw_params(
         lmax_ratio, min_subarray_len, delta_max, gamma, clip_percentile, 1, depth_smooth_rows,
     )
@@ -298,12 +298,13 @@ def cmsaw_weight_from_delayed_data(
                 torch.nn.functional.conv2d(log_weight, kernel)[0, 0],
             )
 
-        positive = weight[weight > 0]
-        if positive.numel():
-            reference = torch.median(positive)
-            limit = torch.quantile(positive, clip_percentile / 100.0)
-            weight = weight.clamp(max=limit) / reference
-        weight.pow_(gamma)
+        if clip_percentile < 100:
+            positive = weight[weight > 0]
+            if positive.numel():
+                limit = torch.quantile(positive, clip_percentile / 100.0)
+                weight = weight.clamp(max=limit)
+        if gamma != 1:
+            weight.pow_(gamma)
         angle_weights.append(weight)
         angle_lengths.append(length_map)
 
@@ -341,8 +342,8 @@ class CMSAWBeamformerIQ:
         lmax_ratio=0.5,
         min_subarray_len=2,
         delta_max=1.0,
-        gamma=0.5,
-        clip_percentile=90.0,
+        gamma=1.0,
+        clip_percentile=100.0,
         depth_smooth_rows=1,
         options=None,
     ):

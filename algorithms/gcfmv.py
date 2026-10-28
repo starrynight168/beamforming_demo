@@ -447,7 +447,9 @@ def _joint_spatial_covariance(data, valid, axis, subarray_size, use_fbss, weight
         snapshots = snapshots * sample_weights.sqrt().unsqueeze(1)
         covariance += snapshots @ snapshots.mH
         denominator += sample_weights.sum(dim=-1)
-    covariance = covariance / denominator.clamp_min(1).view(-1, 1, 1)
+    covariance = covariance / denominator.clamp_min(
+        torch.finfo(data.real.dtype).tiny,
+    ).view(-1, 1, 1)
     if use_fbss:
         covariance = 0.5 * (covariance + covariance.conj().flip(-1, -2))
     return covariance
