@@ -33,7 +33,7 @@ from algorithms.common import (
 )
 from run_one import can_reuse_existing, scene_has_gt
 from run_one import main as run_scene
-from tools.ablate_sound_speed import (
+from tools.core.ablate_sound_speed import (
     SpeedOfSoundEvaluator,
     dense_grid_sweep,
     multi_section_search,
@@ -206,7 +206,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                 return np.ones((2, 2)), np.zeros((2, 2))
 
         with patch(
-            "tools.ablate_sound_speed.mv.RowDynamicMVBeamformerIQ",
+            "tools.core.ablate_sound_speed.mv.RowDynamicMVBeamformerIQ",
             FakeBeamformer,
         ):
             result = evaluator.evaluate_c(1500.0)
