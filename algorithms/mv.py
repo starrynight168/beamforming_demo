@@ -187,7 +187,6 @@ class RowDynamicMVBeamformerIQ:
                     self.temporal_win,
                     self.use_fbss,
                     spatial_weights=row["window"],
-                    normalize=True,
                 )
 
                 # ========== 对角加载 ==========
