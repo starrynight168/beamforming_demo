@@ -103,9 +103,13 @@ class FDMASBeamformerIQ:
         tiny = torch.finfo(z.real.dtype).tiny
         q = z / torch.sqrt(torch.abs(z).clamp_min(tiny))
         qw = q * weights
-        pair_sum = 0.5 * (qw.sum(dim=-1).square() - qw.square().sum(dim=-1))
-        pair_norm = 0.5 * (weights.sum(dim=-1).square() - weights.square().sum(dim=-1))
-        return pair_sum / torch.clamp(pair_norm, min=tiny)
+        pair_sum = (qw[..., 1:] * qw[..., :-1].cumsum(dim=-1)).sum(dim=-1)
+        pair_norm = (
+            weights[..., 1:] * weights[..., :-1].cumsum(dim=-1)
+        ).sum(dim=-1)
+        return torch.where(
+            pair_norm > 0, pair_sum / pair_norm.clamp_min(tiny), torch.zeros_like(pair_sum),
+        )
 
     def __call__(self, i_data, q_data, selected_angles, t_starts, fs):
         """Run the callable operation."""

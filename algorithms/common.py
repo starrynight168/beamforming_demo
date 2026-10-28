@@ -825,11 +825,13 @@ def spatial_temporal_covariance(
     if x_active.shape[-1] != temporal_win:
         raise ValueError("temporal_win must match the snapshot time dimension")
     x_subarrays = x_active.unfold(1, subarray_size, 1).permute(0, 3, 1, 2)
-    snapshots = x_subarrays.shape[2] * temporal_win
-    x_snapshots = x_subarrays.reshape(x_active.shape[0], subarray_size, snapshots)
+    covariance_subarrays = x_subarrays
     if normalize:
-        scale = x_snapshots.abs().amax(dim=(-2, -1), keepdim=True)
-        x_snapshots = x_snapshots / scale.clamp_min(torch.finfo(x_active.real.dtype).tiny)
+        scale = x_active.abs().amax(dim=(-2, -1), keepdim=True)
+        normalized = x_active / scale.clamp_min(torch.finfo(x_active.real.dtype).tiny)
+        covariance_subarrays = normalized.unfold(1, subarray_size, 1).permute(0, 3, 1, 2).contiguous()
+    snapshots = x_subarrays.shape[2] * temporal_win
+    x_snapshots = covariance_subarrays.reshape(x_active.shape[0], subarray_size, snapshots)
     if spatial_weights is not None:
         snapshot_weights = spatial_weights.repeat_interleave(temporal_win)
         x_snapshots = x_snapshots * snapshot_weights.sqrt()

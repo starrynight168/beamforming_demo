@@ -21,6 +21,7 @@ from algorithms.common import (
     envelope_to_db,
     generalized_coherence_factor,
     merge_common_params,
+    mv_row_output,
     normalized_mv_weights,
     spatial_temporal_covariance,
 )
@@ -113,6 +114,16 @@ class BeamformerRegressionTests(unittest.TestCase):
                 with self.subTest(module=module.METHOD_NAME), self.assertRaises(ValueError):
                     bf(samples, np.zeros_like(samples), np.array(angles), np.zeros(1), frequency)
 
+    def test_mv_fallback_keeps_valid_channels_at_zero_taper_weights(self):
+        data = torch.tensor([[[3 + 2j], [0], [0]]], dtype=torch.complex64)
+        valid = torch.tensor([[[1.0], [0.0], [0.0]]])
+        row = dict(window=None, aperture_window=torch.tensor([0.0, 1.0, 0.0]),
+                   ch_idx_t=torch.arange(3).view(1, 3, 1))
+        subarrays = data.unfold(1, 3, 1).permute(0, 3, 1, 2)
+        weights = torch.full((1, 3, 1), 1 / 3, dtype=torch.complex64)
+        output = mv_row_output(weights, subarrays, data, valid, row)
+        torch.testing.assert_close(output.squeeze(), torch.tensor(3 + 2j))
+
     def test_mv_solver_is_scale_invariant_and_regularizes_rank_deficiency(self):
         steering = torch.ones((1, 2, 1), dtype=torch.complex64)
         covariance = torch.diag(torch.tensor([2.0, 1.0], dtype=torch.complex64))[None]
@@ -177,6 +188,61 @@ class BeamformerRegressionTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(factors).all())
         self.assertTrue(((factors >= 0) & (factors <= 1)).all())
 
+    def test_joint_mv_applies_receive_and_transmit_weights(self):
+        values = np.array([[1, 2, 4, 8], [3, 5, 7, 11], [13, 17, 19, 23]], dtype=np.float32)
+        signal = np.broadcast_to(values[:, None], (3, 16, 4)).copy()
+        angles = np.array([-0.1, 0.0, 0.1], dtype=np.float32)
+        rx = torch.tensor([[[0.2], [0.8]]], dtype=torch.complex64)
+        tx = torch.tensor([[[0.3], [0.7]]], dtype=torch.complex64)
+        with patch.object(gcfmv, "device", torch.device("cpu")):
+            bf = self.beamformer(gcfmv, self.options(gcfmv, gcf_power=0.0), channels=4)
+            with patch.object(gcfmv, "normalized_mv_weights", side_effect=(rx, tx)):
+                i, q = bf(signal, np.zeros_like(signal), angles, np.zeros(3), 1.0)
+        rx_values = 0.2 * values[:, :-1] + 0.8 * values[:, 1:]
+        expected = (0.3 * rx_values[:-1] + 0.7 * rx_values[1:]).sum()
+        np.testing.assert_allclose(i, expected, rtol=1e-6)
+        np.testing.assert_allclose(q, 0.0, atol=1e-6)
+
+    def test_joint_mv_is_independent_of_column_block_size(self):
+        rng = np.random.default_rng(37)
+        signal = (rng.normal(size=(3, 16, 8)) + 1j * rng.normal(size=(3, 16, 8))).astype(np.complex64)
+        angles = np.array([-0.1, 0.0, 0.1], dtype=np.float32)
+        with patch.object(gcfmv, "device", torch.device("cpu")):
+            bf = self.beamformer(gcfmv, self.options(gcfmv), x=np.linspace(-0.3, 0.3, 40),
+                                 temporal_win=3)
+            with patch.object(gcfmv, "_JOINT_SNAPSHOT_TARGET_BYTES", 1):
+                blocked = bf(signal.real, signal.imag, angles, np.zeros(3), 1.0)
+            whole = bf(signal.real, signal.imag, angles, np.zeros(3), 1.0)
+        for actual, expected in zip(blocked, whole):
+            np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+    def test_joint_covariance_matches_valid_weighted_snapshots(self):
+        generator = torch.Generator().manual_seed(47)
+        data = torch.randn((2, 3, 4, 3), generator=generator, dtype=torch.complex64)
+        valid = torch.ones_like(data, dtype=torch.bool)
+        valid[0, 0, 0, 0] = False
+        valid[1, 2, 3, 2] = False
+        data = data * valid
+        scaled = data / data.abs().amax(dim=(1, 2, 3), keepdim=True)
+        for axis, weights in ((1, torch.tensor([0.25, 1.0])),
+                              (2, torch.tensor([1.0, 0.2, 0.7]))):
+            expected = torch.zeros((2, 2, 2), dtype=torch.complex64)
+            totals = torch.zeros(2)
+            for pixel in range(2):
+                for start, weight in enumerate(weights):
+                    for outer in range(data.shape[3 - axis]):
+                        for time in range(3):
+                            index = (pixel, slice(start, start + 2), outer, time) if axis == 1 else (pixel, outer, slice(start, start + 2), time)
+                            if valid[index].all():
+                                vector = scaled[index]
+                                expected[pixel] += weight * vector[:, None] * vector.conj()[None, :]
+                                totals[pixel] += weight
+            expected /= totals[:, None, None]
+            for fbss in (False, True):
+                actual = gcfmv._joint_spatial_covariance(data, valid, axis, 2, fbss, weights)
+                target = 0.5 * (expected + expected.conj().flip(-1, -2)) if fbss else expected
+                torch.testing.assert_close(actual, target)
+
     def test_cmsaw_sparse_signal_survives_percentile_clipping(self):
         data = torch.zeros((1, 4, 20, 8), dtype=torch.complex64)
         data[0, 1, 10] = 1.0
@@ -207,6 +273,18 @@ class BeamformerRegressionTests(unittest.TestCase):
             torch.testing.assert_close(output / scale, torch.tensor([np.exp(2j * phase)], dtype=torch.complex64))
         zero = torch.zeros((1, 1))
         torch.testing.assert_close(fdmas.FDMASBeamformerIQ._complex_fdmas(zero, zero, torch.ones_like(zero)), zero.to(torch.complex64).squeeze(-1))
+
+    def test_fdmas_preserves_pairs_with_imbalanced_weights(self):
+        signal = torch.tensor([[1.0, 4.0]])
+        for weights in ([[1.0, 1e-8]], [[1e-8, 1.0]]):
+            actual = fdmas.FDMASBeamformerIQ._complex_fdmas(
+                signal, torch.zeros_like(signal), torch.tensor(weights),
+            )
+            torch.testing.assert_close(actual, torch.tensor([2 + 0j]))
+        actual = fdmas.FDMASBeamformerIQ._complex_fdmas(
+            signal, torch.zeros_like(signal), torch.tensor([[1.0, 0.0]]),
+        )
+        torch.testing.assert_close(actual, torch.zeros(1, dtype=torch.complex64))
 
     def test_fdmas_compounds_two_angles_with_second_harmonic_tx_phase(self):
         z, x, fs, fc = 1.3, 0.4, 10.0, 1.0

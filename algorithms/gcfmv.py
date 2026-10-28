@@ -93,6 +93,7 @@ METHOD_NAME = "gcfmv"
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_JOINT_SNAPSHOT_TARGET_BYTES = 64 * 1024**2
 
 
 class RowDynamicMVBeamformerIQ:
@@ -306,8 +307,18 @@ class RowDynamicMVBeamformerIQ:
             tx_bins = self.options.gcf_low_bins
 
         for hz in range(self.height):
-            for x_start in range(0, self.width, 32):
-                x_stop = min(x_start + 32, self.width)
+            row = self.row_cache[hz]
+            rx_size = row["subarray_size"]
+            snapshot_elements = max(
+                rx_size * min(row["subarray_count"], 16) * n_angles * self.temporal_win,
+                tx_size * min(tx_count, 16) * row["aperture_size"] * self.temporal_win,
+                n_angles * self.N * self.temporal_win,
+            )
+            column_block = min(
+                self.width, max(32, _JOINT_SNAPSHOT_TARGET_BYTES // (8 * snapshot_elements)),
+            )
+            for x_start in range(0, self.width, column_block):
+                x_stop = min(x_start + column_block, self.width)
                 x_slice = slice(x_start, x_stop)
                 block_width = x_stop - x_start
                 tx_row = (
@@ -337,7 +348,6 @@ class RowDynamicMVBeamformerIQ:
                 i_aligned = i_samples * cos_phi - q_samples * sin_phi
                 q_aligned = i_samples * sin_phi + q_samples * cos_phi
                 data = torch.complex(i_aligned, q_aligned) * valid
-                row = self.row_cache[hz]
                 row_indices = row["ch_idx_t"][x_slice]
                 data = torch.gather(
                     data,
@@ -350,7 +360,6 @@ class RowDynamicMVBeamformerIQ:
                     row_indices.unsqueeze(0).expand(n_angles, -1, -1, -1),
                 ).permute(1, 0, 2, 3)
 
-                rx_size = row["subarray_size"]
                 rx_cov = _joint_spatial_covariance(
                     data, valid, 2, rx_size, self.use_fbss, row["window"],
                 )
@@ -371,7 +380,7 @@ class RowDynamicMVBeamformerIQ:
                 center = self.temporal_win // 2
                 rx_values = data[..., center].unfold(2, rx_size, 1)
                 rx_filtered = torch.einsum(
-                    "wl,wagr->wag", rx_mv.conj().squeeze(-1), rx_values,
+                    "wr,wagr->wag", rx_mv.conj().squeeze(-1), rx_values,
                 )
                 tx_values = rx_filtered.unfold(1, tx_size, 1).permute(0, 1, 3, 2)
                 z_matrix = torch.einsum(
@@ -396,7 +405,11 @@ class RowDynamicMVBeamformerIQ:
 
 
 def _joint_spatial_covariance(data, valid, axis, subarray_size, use_fbss, weights):
-    unfolded = data.unfold(axis, subarray_size, 1)
+    width = data.shape[0]
+    scale = data.abs().amax(dim=(1, 2, 3), keepdim=True).clamp_min(
+        torch.finfo(data.real.dtype).tiny,
+    )
+    unfolded = (data / scale).unfold(axis, subarray_size, 1)
     valid_windows = valid.unfold(axis, subarray_size, 1).all(dim=-1)
     if axis == 2:
         window_count = unfolded.shape[2]
@@ -404,10 +417,6 @@ def _joint_spatial_covariance(data, valid, axis, subarray_size, use_fbss, weight
     else:
         window_count = unfolded.shape[1]
         n_outer, n_inner = data.shape[2], data.shape[3]
-    width = data.shape[0]
-    scale = data.abs().amax(dim=(1, 2, 3)).clamp_min(
-        torch.finfo(data.real.dtype).tiny,
-    )
     covariance = torch.zeros(
         (width, subarray_size, subarray_size), dtype=data.dtype, device=data.device,
     )
@@ -435,7 +444,6 @@ def _joint_spatial_covariance(data, valid, axis, subarray_size, use_fbss, weight
             sample_weights = weights[start:stop].view(weights_shape)
         sample_weights = sample_weights.expand(repeats).reshape(width, -1)
         sample_weights = sample_weights * mask.reshape(width, -1).to(data.real.dtype)
-        snapshots = snapshots / scale.view(width, 1, 1)
         snapshots = snapshots * sample_weights.sqrt().unsqueeze(1)
         covariance += snapshots @ snapshots.mH
         denominator += sample_weights.sum(dim=-1)
