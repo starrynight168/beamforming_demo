@@ -855,10 +855,20 @@ def mv_row_output(weights, x_subarrays, x_active, valid_mask, row):
         mean = (values * window).sum(dim=2)
     output = (weights.mH @ mean.unsqueeze(-1)).squeeze(-1).squeeze(-1)
     valid = torch.gather(valid_mask[..., center], 1, row["ch_idx_t"][..., center])
-    fallback_weights = valid
+    fallback_weights = valid.to(x_active.real.dtype)
     if row["aperture_window"] is not None:
-        fallback_weights = fallback_weights * row["aperture_window"]
-    fallback_weights = fallback_weights / fallback_weights.sum(dim=1, keepdim=True).clamp_min(1e-12)
+        windowed_weights = fallback_weights * row["aperture_window"]
+        windowed_sum = windowed_weights.sum(dim=1, keepdim=True)
+        valid_sum = fallback_weights.sum(dim=1, keepdim=True)
+        fallback_weights = torch.where(
+            windowed_sum > 0,
+            windowed_weights / windowed_sum.clamp_min(1e-12),
+            fallback_weights / valid_sum.clamp_min(1e-12),
+        )
+    else:
+        fallback_weights = fallback_weights / fallback_weights.sum(
+            dim=1, keepdim=True
+        ).clamp_min(1e-12)
     fallback = (x_active[..., center] * fallback_weights).sum(dim=1)
     return torch.where(valid.bool().all(dim=1), output, fallback).view(-1, 1, 1)
 
