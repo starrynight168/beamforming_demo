@@ -2,11 +2,43 @@ import unittest
 
 import torch
 
-from algorithms import cmsaw, gcfmv
+from algorithms import ccmv, cmsaw, gcfmv
 from algorithms.common import normalized_mv_weights
 
 
 class PaperFormulaTests(unittest.TestCase):
+    def test_cross_subarray_covariance_matches_explicit_distinct_pairs(self):
+        generator = torch.Generator().manual_seed(13)
+        data = torch.randn((2, 6, 3), dtype=torch.complex128, generator=generator)
+        subarrays = data.unfold(1, 3, 1).permute(0, 3, 1, 2)
+        for weights in (None, torch.tensor([0.0, 0.25, 1.0, 0.5], dtype=torch.float64),
+                        torch.full((4,), 1e-12, dtype=torch.float64)):
+            b = torch.ones(4, dtype=torch.float64) if weights is None else weights
+            expected = torch.zeros((2, 3, 3), dtype=data.dtype)
+            denominator = 0.0
+            for i in range(4):
+                for j in range(4):
+                    if i != j:
+                        expected += b[i] * b[j] * (subarrays[:, :, i] @ subarrays[:, :, j].mH)
+                        denominator += b[i] * b[j] * 3
+            expected /= denominator
+            for fbss in (False, True):
+                raw, actual = ccmv.cross_subarray_covariance(data, 3, 3, fbss, weights)
+                reference = 0.5 * (expected + expected.conj().flip(-1, -2)) if fbss else expected
+                torch.testing.assert_close(raw, subarrays)
+                torch.testing.assert_close(actual, reference)
+                torch.testing.assert_close(actual, actual.mH)
+
+    def test_cross_subarray_covariance_rejects_undefined_estimates(self):
+        data = torch.ones((1, 4, 3), dtype=torch.complex64)
+        cases = ((4, 3, None), (2, 1, None), (2, 3, torch.ones(2)),
+                 (2, 3, torch.tensor([0.0, 1.0, 0.0])),
+                 (2, 3, torch.tensor([1.0, -1.0, 1.0])))
+        for length, temporal_win, weights in cases:
+            with self.subTest(length=length, temporal_win=temporal_win, weights=weights):
+                with self.assertRaises(ValueError):
+                    ccmv.cross_subarray_covariance(data, length, temporal_win, False, weights)
+
     def test_inverse_normalization_preserves_denominator_sign(self):
         covariance = torch.diag(torch.tensor([-2.0, -1.0], dtype=torch.complex64))[None]
         steering = torch.ones((1, 2, 1), dtype=torch.complex64)

@@ -53,10 +53,10 @@ def parse_args() -> argparse.Namespace:
     add_common_arguments(parser)
     add_io_arguments(parser)
     parser.set_defaults(interp="linear")
-    parser.add_argument("--train_root", type=Path, default=TRAIN_DIR)
+    parser.add_argument("--train_root", type=Path)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--kind", required=True, choices=("fp32", "ptq", "qat"))
-    parser.add_argument("--config", type=Path)
+    parser.add_argument("--config", type=Path, help="Runtime config; defaults to the checkpoint effective_config.json when available")
     parser.add_argument("--eval-config", type=Path)
     parser.add_argument("--profile", default="ideal")
     parser.add_argument("--micro_batch_size", type=positive_int, default=8192)
@@ -71,9 +71,28 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.window != "rect" or args.interp != "linear":
         parser.error("MBAN uses learned receive weights and linear IQ sampling; require --window rect --interp linear")
-    args.train_root = Path(resolve_project_path(args.train_root, ROOT)).resolve()
-    args.config = Path(resolve_project_path(args.config, ROOT)).resolve() if args.config else args.train_root / "config.yaml"
-    args.eval_config = Path(resolve_project_path(args.eval_config, ROOT)).resolve() if args.eval_config else args.train_root / "hardware_eval.yaml"
+    args.checkpoint = Path(resolve_project_path(args.checkpoint, ROOT)).resolve()
+    if args.train_root is not None:
+        args.train_root = Path(resolve_project_path(args.train_root, ROOT)).resolve()
+    else:
+        required = ("eval_core/inference.py", "eval_core/models.py", "shared_core/runtime.py")
+        candidates = [*args.checkpoint.parents, TRAIN_DIR]
+        args.train_root = next(
+            (folder for folder in candidates if folder.name == "train"
+             and all((folder / item).is_file() for item in required)),
+            TRAIN_DIR,
+        )
+    snapshot = args.checkpoint.parent / "effective_config.json"
+    args.config = (
+        Path(resolve_project_path(args.config, ROOT)).resolve() if args.config else
+        snapshot if snapshot.is_file() and args.eval_config is None else args.train_root / "config.yaml"
+    )
+    if args.eval_config is not None:
+        args.eval_config = Path(resolve_project_path(args.eval_config, ROOT)).resolve()
+        if args.config.suffix.lower() == ".json":
+            parser.error("effective_config.json restores saved hardware profiles; use a YAML --config with --eval-config")
+    elif args.config.suffix.lower() != ".json":
+        args.eval_config = args.train_root / "hardware_eval.yaml"
     if args.kind == "ptq" and args.split_file is None:
         parser.error("--kind ptq requires --split-file")
     if args.split_file is not None:
@@ -83,6 +102,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    print(f"MBAN runtime config: {args.config}")
     load_scene, reconstruct, load_evaluation_model = load_evaluation_dependencies(args.train_root)
     h5_path = Path(resolve_project_path(args.h5_path, str(ROOT))).resolve()
     output_dir = Path(args.output_dir).resolve() / METHOD_NAME
@@ -101,7 +121,7 @@ def main() -> None:
         args.kind,
         device,
         config_path=args.config.resolve(),
-        hardware_config_path=args.eval_config.resolve(),
+        hardware_config_path=args.eval_config.resolve() if args.eval_config is not None else None,
         profile=args.profile,
     )
     spec.runtime.update(

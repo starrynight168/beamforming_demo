@@ -14,7 +14,7 @@ import h5py
 import numpy as np
 import torch
 
-from algorithms import cmsaw, das, esbmv, fdmas, gcfmv, mban, mv, template_algorithm
+from algorithms import ccmv, cmsaw, das, esbmv, fdmas, gcfmv, mban, mv, template_algorithm
 from algorithms.common import (
     WINDOW_CHOICES,
     algorithm_source_paths,
@@ -29,7 +29,7 @@ from algorithms.gcfmv import generalized_coherence_factor_2d
 
 
 class BeamformerRegressionTests(unittest.TestCase):
-    modules = (das, mv, esbmv, gcfmv, fdmas, cmsaw)
+    modules = (das, mv, ccmv, esbmv, gcfmv, fdmas, cmsaw)
 
     def options(self, module, **changes):
         options = module.parser.parse_args([])
@@ -44,9 +44,10 @@ class BeamformerRegressionTests(unittest.TestCase):
         cls = (module.DASBeamformerIQ if module is das else
                module.FDMASBeamformerIQ if module is fdmas else
                module.CMSAWBeamformerIQ if module is cmsaw else
+               module.RowDynamicCCMVBeamformerIQ if module is ccmv else
                module.RowDynamicMVBeamformerIQ)
         parameters = dict(options=options)
-        if module in (mv, esbmv, gcfmv, cmsaw):
+        if module in (mv, ccmv, esbmv, gcfmv, cmsaw):
             parameters.update(temporal_win=1, subarray_ratio=0.5, mv_dl=0.0)
         parameters.update(changes)
         return cls(np.array(z), np.array(x), channels, 1.0, 1.0, 0.0, 1.0,
@@ -318,6 +319,45 @@ class BeamformerRegressionTests(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 mban.parse_args()
 
+    def test_ccmv_honors_its_device_independently_of_mv(self):
+        with patch.object(ccmv, "device", torch.device("cpu")), patch.object(mv, "device", torch.device("meta")):
+            bf = self.beamformer(ccmv, self.options(ccmv))
+            signal = np.ones((1, 16, 8), dtype=np.float32)
+            i, q = bf(signal, np.zeros_like(signal), np.zeros(1), np.zeros(1), 1.0)
+        np.testing.assert_allclose(i, 1.0, atol=2e-4)
+        np.testing.assert_allclose(q, 0.0, atol=1e-6)
+
+    def test_mban_restores_checkpoint_snapshot_and_respects_explicit_config(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            train_root = root / "project" / "train"
+            for name in ("eval_core/inference.py", "eval_core/models.py", "shared_core/runtime.py"):
+                path = train_root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            checkpoint = train_root / "results" / "best.pth"
+            checkpoint.parent.mkdir(parents=True)
+            snapshot = checkpoint.with_name("effective_config.json")
+            snapshot.write_text("{}", encoding="utf-8")
+            argv = ["mban", "--checkpoint", str(checkpoint), "--kind", "fp32"]
+            with patch("sys.argv", argv):
+                options = mban.parse_args()
+            self.assertEqual(options.train_root, train_root)
+            self.assertEqual(options.config, snapshot)
+            self.assertIsNone(options.eval_config)
+            custom = root / "custom.yaml"
+            with patch("sys.argv", argv + ["--config", str(custom)]):
+                options = mban.parse_args()
+            self.assertEqual(options.config, custom)
+            self.assertEqual(options.eval_config, train_root / "hardware_eval.yaml")
+            with patch("sys.argv", argv + ["--eval-config", str(custom)]):
+                options = mban.parse_args()
+            self.assertEqual(options.config, train_root / "config.yaml")
+            self.assertEqual(options.eval_config, custom)
+            with patch("sys.argv", argv + ["--config", str(snapshot), "--eval-config", str(custom)]):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    mban.parse_args()
+
     def test_mban_saves_parameters_and_tracks_external_training_sources(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -373,7 +413,7 @@ class BeamformerRegressionTests(unittest.TestCase):
                            "--h5_path", str(source), "--output_dir", str(root),
                            "--select_angles", "all", "--no_tgc", "--no_dynamic_aperture",
                            "--window", "hann", "--interp", "linear"]
-                if module in (mv, esbmv, gcfmv, cmsaw):
+                if module in (mv, ccmv, esbmv, gcfmv, cmsaw):
                     command += ["--subarray_ratio", "0.5", "--temporal_win", "3"]
                 with self.subTest(method=method):
                     result = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],

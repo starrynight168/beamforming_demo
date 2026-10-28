@@ -91,6 +91,7 @@ class RowDynamicMVBeamformerIQ:
     ):
         """Initialize the instance."""
         self.options = options if options is not None else (args if args is not None else parser.parse_args([]))
+        self.device = self.get_device()
         mv_dl = nonnegative_float(mv_dl)
         geometry = build_row_dynamic_geometry(
             z_grid,
@@ -105,7 +106,7 @@ class RowDynamicMVBeamformerIQ:
             self.options.window,
             subarray_ratio,
             temporal_win,
-            device,
+            self.device,
         )
         self.__dict__.update(geometry)
         self.dl_factor = mv_dl
@@ -120,23 +121,23 @@ class RowDynamicMVBeamformerIQ:
         """Run the callable operation."""
         validate_beamformer_input(i_data, q_data, selected_angles, fs, self.fs, self.N)
         n_a = i_data.shape[0]
-        i_tensor = torch.from_numpy(i_data.astype(np.float32)).to(device)
-        q_tensor = torch.from_numpy(q_data.astype(np.float32)).to(device)
+        i_tensor = torch.from_numpy(i_data.astype(np.float32)).to(self.device)
+        q_tensor = torch.from_numpy(q_data.astype(np.float32)).to(self.device)
         n_s = i_tensor.shape[1]
 
         half_win = self.temporal_win // 2
-        offsets = torch.arange(-half_win, half_win + 1, device=device)
+        offsets = torch.arange(-half_win, half_win + 1, device=self.device)
         offsets_f = offsets.float().view(1, 1, -1)
-        cos_a = torch.from_numpy(np.cos(selected_angles).astype(np.float32)).to(device)
-        sin_a = torch.from_numpy(np.sin(selected_angles).astype(np.float32)).to(device)
-        t_starts_t = time_start_tensor(t_starts, n_a, fs, device)
+        cos_a = torch.from_numpy(np.cos(selected_angles).astype(np.float32)).to(self.device)
+        sin_a = torch.from_numpy(np.sin(selected_angles).astype(np.float32)).to(self.device)
+        t_starts_t = time_start_tensor(t_starts, n_a, fs, self.device)
         max_sample = float(n_s - 1)
 
         i_beam_sum = torch.zeros(
-            (self.height, self.width), dtype=torch.float32, device=device
+            (self.height, self.width), dtype=torch.float32, device=self.device
         )
         q_beam_sum = torch.zeros(
-            (self.height, self.width), dtype=torch.float32, device=device
+            (self.height, self.width), dtype=torch.float32, device=self.device
         )
 
         # 1. 预计算接收端相位旋转因子 (全网格 3D)
@@ -226,6 +227,9 @@ class RowDynamicMVBeamformerIQ:
         q_output = (q_beam_sum / n_a).cpu().numpy()
         return i_output, q_output
 
+    def get_device(self):
+        return device
+
     def estimate_covariance(self, x_active, subarray_size, temporal_win, use_fbss):
         return spatial_temporal_covariance(
             x_active, subarray_size, temporal_win, use_fbss,
@@ -239,10 +243,11 @@ def main(
     method_name=METHOD_NAME,
     method_label="MV",
     covariance_label="Subarray auto-covariance",
+    argument_parser=None,
 ):
     """Run the command-line workflow."""
     global args
-    args = parser.parse_args()
+    args = (parser if argument_parser is None else argument_parser).parse_args()
     h5_path = resolve_project_path(args.h5_path, PROJECT_ROOT)
     output_dir = f"{args.output_dir}/{method_name}"
 

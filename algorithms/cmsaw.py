@@ -170,7 +170,7 @@ def cmsaw_weight_from_delayed_data(
     depth_smooth_rows,
     return_lengths=False,
 ):
-    """Compute CMSAW MSR maps on IQ receive apertures, with optional postprocessing."""
+    """Compute CMSAW weights for delayed channel data."""
     validate_cmsaw_params(
         lmax_ratio, min_subarray_len, delta_max, gamma, clip_percentile, 1, depth_smooth_rows,
     )
@@ -315,14 +315,7 @@ def cmsaw_weight_from_delayed_data(
 
 
 class CMSAWBeamformerIQ:
-    """Pack-time CMSAW teacher interface.
-
-    CMSAW 本身是基于 MV baseline 的显示域/幅值加权方法;这里为了统一 H5 GT 打包接口,
-    采用“MV 复数 IQ x CMSAW 实值权重”的定义:
-      - 相位沿用 MV baseline;
-      - 幅值按 CMSAW coherence 权重调整;
-      - 返回 i_output, q_output,供 pack_EPFL.py 后续统一生成 envdb。
-    """
+    """Apply covariance-based adaptive weights to the MV output."""
 
     def __init__(
         self,
@@ -503,7 +496,6 @@ def main():
         selected_angles=selected_angles,
         has_gt=has_gt,
         parameters=[
-            ("MV phase", "in-memory MV"),
             ("F-Number", args.f_number),
             ("Aperture", "Dynamic" if args.dynamic_aperture else "Fixed Full"),
             ("FBSS", "Enabled" if args.fbss else "Disabled"),

@@ -1,6 +1,7 @@
 algorithms:
   - das
   - mv
+  - ccmv
   - esbmv
   - gcfmv
   - cmsaw
@@ -9,6 +10,7 @@ algorithms:
 algorithm_labels:
   das: DAS
   mv: MV
+  ccmv: CC-MV
   esbmv: ESBMV
   gcfmv: GCF-MV
   cmsaw: CMSAW
@@ -30,6 +32,12 @@ algorithm_params:
     aperture_mode: discrete
 
   mv:
+    mv_dl: 0.0
+    fbss: true
+    subarray_ratio: 0.25
+    temporal_win: 9
+
+  ccmv:
     mv_dl: 0.0
     fbss: true
     subarray_ratio: 0.25

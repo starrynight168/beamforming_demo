@@ -48,11 +48,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class FDMASBeamformerIQ:
-    """IQ pair-product DMAS; ``fdmas`` is the compatibility entrypoint.
-
-    The IQ formula follows DOI 10.1109/TUFFC.2025.3586377, Eq. (17).
-    It is not the RF signed-square-root and band-pass implementation of F-DMAS.
-    """
+    """Delay-multiply-and-sum beamformer for channel IQ."""
 
     def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad, options=None):
         """Initialize the instance."""

@@ -9,10 +9,13 @@
 本工程目前支持并实现了以下波束合成算法：
 - **DAS (Delay and Sum)**: 延迟相加法，最基础、高效的经典波束合成方法。支持离散通道孔径与连续几何孔径模式。
 - **MV (Minimum Variance)**: 最小方差自适应波束合成，基于数据自适应计算空间加权矢量，显著提升图像分辨率与对比度。
+- **CCMV (Cross-covariance MV)**: 利用不同重叠子阵间的交叉统计量估计矩阵的 MV 方法。
 - **ESBMV (Eigenspace-Based Minimum Variance)**: 特征空间最小方差法，通过对协方差矩阵进行特征分解并投影到信号子空间，增强 MV 的稳健性。
 - **GCF-MV (Generalized Coherence Factor - Minimum Variance)**: 广义相干因子自适应波束合成，利用 GCF 压制旁瓣和噪声。
 - **F-DMAS (Filtered Delay Multiply and Sum)**: 滤波延迟相乘相加法，通过孔径内对信号进行两两相乘处理，有效降低主瓣宽度并抑制旁瓣。
-- **CMSAW (Coherence-based MV variant)**: 基于自适应相干权重的最小方差流式优化方法，在大角度复合 CPI 下兼顾画质与显存占用。
+- **CMSAW (Covariance Matrix-based Statistical Adaptive Weighting)**: 根据修改协方差矩阵的统计量计算权重，并作用于 MV 输出。
+
+各算法的介绍、IQ 数据定义与论文差异见 [算法 README](algorithms/README.md)。
 
 ---
 
