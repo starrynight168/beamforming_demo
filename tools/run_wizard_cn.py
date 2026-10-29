@@ -40,7 +40,7 @@ def append_run_log(entry):
 ALGORITHMS = {
     "das": "DAS:最基础、最快,适合入门观察",
     "mv": "MV:自适应波束合成,速度较慢",
-    "ccmv": "CC-MV:不同子阵间交叉协方差的 MV",
+    "ccmv": "CC-MV:全配对子阵交叉协方差的 MV",
     "esbmv": "ESBMV:MV 的特征空间版本,速度较慢",
     "gcfmv": "GCF-MV:带相干因子的 MV",
     "cmsaw": "CMSAW:基于 MV 相位的内存加权方法",

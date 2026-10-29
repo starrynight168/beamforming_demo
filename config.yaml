@@ -38,7 +38,7 @@ algorithm_params:
     temporal_win: 9
 
   ccmv:
-    mv_dl: 0.0
+    mv_dl: 0.1
     fbss: true
     subarray_ratio: 0.25
     temporal_win: 9

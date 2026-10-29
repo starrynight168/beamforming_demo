@@ -58,6 +58,26 @@ class BeamformerRegressionTests(unittest.TestCase):
             with self.subTest(module=module.METHOD_NAME), patch.object(module, "args", None):
                 self.beamformer(module, None)
 
+    def test_ccmv_reuses_mv_parameters_and_dynamic_geometry(self):
+        self.assertIs(ccmv.RowDynamicCCMVBeamformerIQ.__call__, mv.RowDynamicMVBeamformerIQ.__call__)
+        expected = vars(mv.parser.parse_args([])).copy()
+        actual = vars(ccmv.parser.parse_args([])).copy()
+        self.assertEqual(expected.pop("mv_dl"), 0.0)
+        self.assertEqual(actual.pop("mv_dl"), 0.1)
+        self.assertEqual(actual, expected)
+        geometry = (np.array([0.002, 0.012, 0.03]), np.array([-0.001, 0.0, 0.001]),
+                    128, 0.0003, 1540.0, 5e6, 20e6, np.zeros(1), np.zeros(1))
+        parameters = {"mv_dl": 0.1, **{name: actual[name] for name in ("fbss", "subarray_ratio", "temporal_win")}}
+        baseline = mv.RowDynamicMVBeamformerIQ(*geometry, options=mv.parser.parse_args([]), **parameters)
+        cross = ccmv.RowDynamicCCMVBeamformerIQ(*geometry, options=ccmv.parser.parse_args([]), **parameters)
+        sizes = []
+        for left, right in zip(baseline.row_cache, cross.row_cache):
+            sizes.append(right["aperture_size"])
+            for name in ("aperture_size", "subarray_size", "subarray_count"):
+                self.assertEqual(left[name], right[name])
+            torch.testing.assert_close(left["ch_idx_t"], right["ch_idx_t"])
+        self.assertGreater(len(set(sizes)), 1)
+
     def test_config_rejects_unsupported_default_choices(self):
         for name in ("window", "interp"):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, name):

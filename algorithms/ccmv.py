@@ -1,4 +1,4 @@
-"""Cross-subarray MV using ordered pairs of distinct overlapping subarrays."""
+"""Hasegawa 2020, Eq. (9), with full subarray sampling (Delta_n=1)."""
 
 from copy import deepcopy
 from pathlib import Path
@@ -15,6 +15,7 @@ METHOD_NAME = "ccmv"
 device = mv.device
 parser = deepcopy(mv.parser)
 parser.description = "CC-MV Beamforming"
+parser.set_defaults(mv_dl=0.1)
 args = None
 
 
@@ -26,32 +27,35 @@ def cross_subarray_covariance(
     if not 1 <= subarray_size <= x_active.shape[1]:
         raise ValueError("subarray_size must fit the active aperture")
     x_subarrays = x_active.unfold(1, subarray_size, 1).permute(0, 3, 1, 2)
-    width, length, count, time_count = x_subarrays.shape
-    if count < 2:
-        raise ValueError("CC-MV requires at least two overlapping subarrays; reduce subarray_ratio")
-    weighted = x_subarrays
-    denominator = count * (count - 1) * time_count
+    count = x_subarrays.shape[2]
+    mean_subarray = x_subarrays.mean(dim=2)
     if spatial_weights is not None:
         if spatial_weights.shape != (count,):
             raise ValueError("spatial_weights must contain one weight per subarray")
         if not torch.isfinite(spatial_weights).all() or (spatial_weights < 0).any():
             raise ValueError("spatial_weights must be finite and nonnegative")
-        denominator = 2 * (
-            spatial_weights[1:] * spatial_weights[:-1].cumsum(dim=0)
-        ).sum() * time_count
-        if denominator <= 0:
-            raise ValueError("CC-MV requires at least two nonzero subarray weights; use rect")
-        weighted = x_subarrays * spatial_weights.view(1, 1, count, 1)
-    previous = weighted.cumsum(dim=2)[:, :, :-1].reshape(width, length, -1)
-    following = weighted[:, :, 1:].reshape(width, length, -1)
-    pairs = previous @ following.mH
-    covariance = (pairs + pairs.mH) / denominator
+        if spatial_weights.sum() <= 0:
+            raise ValueError("CC-MV requires a positive subarray weight sum")
+        weights = spatial_weights / spatial_weights.sum()
+        mean_subarray = (x_subarrays * weights.view(1, 1, count, 1)).sum(dim=2)
+    covariance = (mean_subarray @ mean_subarray.mH) / temporal_win
     if use_fbss:
         covariance = 0.5 * (covariance + covariance.conj().flip(-1, -2))
     return x_subarrays, covariance
 
 
 class RowDynamicCCMVBeamformerIQ(mv.RowDynamicMVBeamformerIQ):
+    def __init__(
+        self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad,
+        mv_dl=0.1, fbss=True, subarray_ratio=0.5, temporal_win=1, options=None,
+    ):
+        options = options if options is not None else parser.parse_args([])
+        super().__init__(
+            z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad,
+            mv_dl=mv_dl, fbss=fbss, subarray_ratio=subarray_ratio,
+            temporal_win=temporal_win, options=options,
+        )
+
     def get_device(self):
         return device
 
@@ -67,7 +71,7 @@ def main():
         beamformer_class=RowDynamicCCMVBeamformerIQ,
         method_name=METHOD_NAME,
         method_label="CC-MV",
-        covariance_label="Cross-subarray covariance (i != j)",
+        covariance_label="Hasegawa 2020 Eq. (9), Delta_n=1 (including self-pairs)",
         argument_parser=parser,
     )
 
