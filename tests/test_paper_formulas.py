@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from algorithms import ccmv, cmsaw, gcfmv
+from algorithms import ccmv, cmsaw, mv
 from algorithms.common import normalized_mv_weights
 
 
@@ -77,15 +77,47 @@ class PaperFormulaTests(unittest.TestCase):
     def test_joint_covariance_divides_by_actual_fractional_weight_sum(self):
         data = torch.tensor([[[[1.0], [2.0]], [[0.0], [0.0]]]], dtype=torch.complex64)
         valid = torch.tensor([[[[True], [True]], [[False], [False]]]])
-        covariance = gcfmv._joint_spatial_covariance(
+        covariance = mv.joint_spatial_covariance(
             data, valid, 2, 2, False, torch.tensor([0.25]),
         )
         expected = torch.tensor([[[0.25, 0.5], [0.5, 1.0]]], dtype=torch.complex64)
         torch.testing.assert_close(covariance, expected)
-        empty = gcfmv._joint_spatial_covariance(
+        empty = mv.joint_spatial_covariance(
             data * 0, valid & False, 2, 2, False, torch.tensor([0.25]),
         )
         torch.testing.assert_close(empty, torch.zeros_like(expected))
+
+    def test_cross_joint_covariance_averages_full_pairs_on_each_axis(self):
+        data = torch.randn((2, 3, 4, 2), dtype=torch.complex128,
+                           generator=torch.Generator().manual_seed(2020))
+        valid = torch.ones_like(data, dtype=torch.bool)
+        valid[0, 1, 1, 0] = False
+        data *= valid
+        scaled = data / data.abs().amax(dim=(1, 2, 3), keepdim=True)
+        for axis in (1, 2):
+            weights = torch.arange(1, data.shape[axis], dtype=torch.float64) * 0.1
+            expected = torch.zeros((2, 2, 2), dtype=data.dtype)
+            for pixel in range(2):
+                count = 0
+                for outer in range(data.shape[3-axis]):
+                    for time in range(2):
+                        vectors = []
+                        b = []
+                        for start, weight in enumerate(weights):
+                            index = (pixel, slice(start, start+2), outer, time) if axis == 1 else (pixel, outer, slice(start, start+2), time)
+                            if valid[index].all():
+                                vectors.append(scaled[index])
+                                b.append(weight)
+                        if vectors:
+                            for i, left in enumerate(vectors):
+                                for j, right in enumerate(vectors):
+                                    expected[pixel] += b[i]*b[j]*left[:, None]*right.conj()[None, :] / sum(b)**2
+                            count += 1
+                expected[pixel] /= count
+            for fbss in (False, True):
+                actual = mv.joint_spatial_covariance(data, valid, axis, 2, fbss, weights, cross=True)
+                target = 0.5*(expected+expected.conj().flip(-1, -2)) if fbss else expected
+                torch.testing.assert_close(actual, target)
 
     def test_cmsaw_default_keeps_raw_paper_msr(self):
         options = cmsaw.parser.parse_args([])

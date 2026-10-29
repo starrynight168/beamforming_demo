@@ -32,18 +32,21 @@ algorithm_params:
     aperture_mode: discrete
 
   mv:
+    mv_axis: rx
     mv_dl: 0.0
     fbss: true
     subarray_ratio: 0.25
     temporal_win: 9
 
   ccmv:
+    mv_axis: rx
     mv_dl: 0.1
     fbss: true
     subarray_ratio: 0.25
     temporal_win: 9
 
   esbmv:
+    mv_axis: rx
     mv_dl: 0.0
     fbss: true
     subarray_ratio: 0.25
@@ -52,6 +55,7 @@ algorithm_params:
     eig_threshold: 0.05
 
   gcfmv:
+    mv_axis: rx
     mv_dl: 0.0
     fbss: true
     subarray_ratio: 0.25
@@ -62,6 +66,7 @@ algorithm_params:
     gcf_tx_low_bins: null
 
   cmsaw:
+    mv_axis: rx
     mv_dl: 0.0
     fbss: true
     subarray_ratio: 0.25

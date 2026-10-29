@@ -65,6 +65,11 @@ class RowDynamicCCMVBeamformerIQ(mv.RowDynamicMVBeamformerIQ):
             spatial_weights=self._covariance_windows[x_active.shape[1]],
         )
 
+    def estimate_joint_covariance(self, data, valid, axis, subarray_size, weights):
+        return mv.joint_spatial_covariance(
+            data, valid, axis, subarray_size, self.use_fbss, weights, cross=True,
+        )
+
 
 def main():
     mv.main(

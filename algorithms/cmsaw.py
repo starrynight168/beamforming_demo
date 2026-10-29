@@ -1,6 +1,6 @@
 """Provide Python utilities for cmsaw."""
 
-import argparse
+from copy import deepcopy
 import sys
 from pathlib import Path
 
@@ -10,56 +10,24 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from algorithms import mv
 from algorithms.common import (
-    add_common_arguments,
-    add_io_arguments,
     aperture_window_1d,
     dynamic_aperture_channel_count,
     envelope_to_db,
     interpolate_multi_angle_channel_samples,
-    nonnegative_float,
     positive_odd_int,
     prepare_beamforming_input,
     print_physical_summary,
     resolve_project_path,
     run_beamformer,
     save_algorithm_result,
-    unit_interval_float,
     validate_db_output,
 )
 
 # ================= 命令行参数配置 =================
-parser = argparse.ArgumentParser(
-    description="CMSAW - Covariance Matrix-based Statistical Adaptive Weighting",
-)
-add_common_arguments(parser, select_help="角度选择: center, 0,1,2(逗号分隔)")
-
-# ---- MV参数(用于相位基线) ----
-parser.add_argument(
-    "--mv_dl",
-    type=nonnegative_float,
-    default=0.0,
-    help="MV 对角加载系数",
-)
-parser.add_argument(
-    "--subarray_ratio",
-    type=unit_interval_float,
-    default=0.25,
-    help="MV 子阵列比例",
-)
-parser.add_argument(
-    "--temporal_win",
-    type=positive_odd_int,
-    default=9,
-    help="MV 时间平均窗口",
-)
-parser.add_argument(
-    "--fbss",
-    action="store_true",
-    default=True,
-    help="MV 启用FBSS",
-)
-parser.add_argument("--no_fbss", dest="fbss", action="store_false", help="MV 禁用FBSS")
+parser = deepcopy(mv.parser)
+parser.description = "CMSAW Beamforming"
 # ---- CMSAW 核心参数 ----
 parser.add_argument(
     "--lmax_ratio",
@@ -83,7 +51,6 @@ parser.add_argument(
     help="深度平滑行数 (1=禁用)",
 )
 
-add_io_arguments(parser, save_gt_help="保存GT对比图")
 args = None
 
 METHOD_NAME = "cmsaw"
@@ -366,10 +333,7 @@ class CMSAWBeamformerIQ:
         self.clip_percentile = float(clip_percentile)
         self.depth_smooth_rows = int(depth_smooth_rows)
 
-        from algorithms import mv as mv_module
-
-        self.mv_module = mv_module
-        self.mv_bf = self.mv_module.RowDynamicMVBeamformerIQ(
+        self.mv_bf = mv.RowDynamicMVBeamformerIQ(
             self.z_grid,
             self.x_grid,
             self.n_elem,
@@ -496,6 +460,7 @@ def main():
         selected_angles=selected_angles,
         has_gt=has_gt,
         parameters=[
+            ("MV axis", args.mv_axis),
             ("F-Number", args.f_number),
             ("Aperture", "Dynamic" if args.dynamic_aperture else "Fixed Full"),
             ("FBSS", "Enabled" if args.fbss else "Disabled"),

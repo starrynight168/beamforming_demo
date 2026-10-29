@@ -217,6 +217,9 @@ def ask_algorithm_param(algorithm, name, default):
     """Ask for one method-specific parameter using its algorithm CLI type."""
     label = ALGORITHM_PARAM_HELP.get(name, name)
     prompt = f"[{algorithm}] {name} - {label}"
+    if name == "mv_axis":
+        options = [("rx", "rx:接收端 MV"), ("tx", "tx:接收DAS后发射端 MV"), ("joint", "joint:收发联合 MV")]
+        return ask_choice(prompt, options, default_index=configured_choice_index(options, default, f"{algorithm}.{name}"))
     if name == "aperture_mode":
         options = [
             ("discrete", "discrete:离散通道孔径,适合公平对照"),

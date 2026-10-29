@@ -1185,6 +1185,8 @@ def algorithm_source_paths(method_name, train_root=None):
     train_root = Path(resolve_project_path(train_root, PROJECT_ROOT)) if train_root else PROJECT_ROOT / "train"
     dependencies = {
         "ccmv": (script_path.with_name("mv.py"),),
+        "esbmv": (script_path.with_name("mv.py"),),
+        "gcfmv": (script_path.with_name("mv.py"),),
         "cmsaw": (script_path.with_name("mv.py"),),
         "mban": tuple(train_root / source for source in mban_sources),
     }

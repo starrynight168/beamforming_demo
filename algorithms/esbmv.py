@@ -1,6 +1,6 @@
 """Provide Python utilities for esbmv."""
 
-import argparse
+from copy import deepcopy
 import sys
 from pathlib import Path
 
@@ -10,57 +10,24 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from algorithms import mv
 from algorithms.common import (
-    add_common_arguments,
-    add_io_arguments,
-    build_row_dynamic_geometry,
     closed_unit_interval_float,
     envelope_to_db,
-    interpolate_channel_samples,
-    nonnegative_float,
     nonnegative_int,
-    normalized_mv_weights,
-    mv_row_output,
-    positive_odd_int,
     prepare_beamforming_input,
     print_physical_summary,
     resolve_project_path,
     run_beamformer,
     save_algorithm_result,
-    spatial_temporal_covariance,
-    time_start_tensor,
-    unit_interval_float,
     validate_db_output,
-    validate_beamformer_input,
 )
 
 MAX_GPU_EIGH_SUBARRAY_SIZE = 32
 
 # ================= 命令行参数配置 =================
-parser = argparse.ArgumentParser(description="ESBMV+FBSS Beamforming")
-add_common_arguments(parser, window_help="子阵空间平滑加权窗")
-
-# ---- MV 核心参数 ----
-parser.add_argument("--mv_dl", type=nonnegative_float, default=0.0, help="对角加载系数")
-parser.add_argument(
-    "--fbss",
-    action="store_true",
-    default=True,
-    help="启用前向-后向空间平滑",
-)
-parser.add_argument("--no_fbss", dest="fbss", action="store_false", help="禁用 FBSS")
-parser.add_argument(
-    "--subarray_ratio",
-    type=unit_interval_float,
-    default=0.25,
-    help="子阵列比例 subarray_size = aperture_size * ratio",
-)
-parser.add_argument(
-    "--temporal_win",
-    type=positive_odd_int,
-    default=9,
-    help="协方差时间平均窗口,必须为正奇数;1 表示关闭",
-)
+parser = deepcopy(mv.parser)
+parser.description = "ESBMV Beamforming"
 # ---- ESBMV 子空间参数 ----
 parser.add_argument(
     "--num_eig",
@@ -81,7 +48,6 @@ parser.add_argument(
     help="强制在 GPU 上进行特征值分解",
 )
 
-add_io_arguments(parser)
 args = None
 
 METHOD_NAME = "esbmv"
@@ -105,175 +71,21 @@ def project_signal_subspace(covariance, weights, num_eig, threshold, force_gpu=F
     return eigvecs @ ((eigvecs.mH @ weights) * keep.unsqueeze(-1))
 
 
-class RowDynamicMVBeamformerIQ:
-    """ESBMV + FBSS 自适应波束形成器.
+class RowDynamicMVBeamformerIQ(mv.RowDynamicMVBeamformerIQ):
+    normalize_covariance = True
 
-    固定使用 positive IQ 相位补偿.
-    """
+    def get_options(self):
+        return args if args is not None else parser.parse_args([])
 
-    def __init__(
-        self,
-        z_grid,
-        x_grid,
-        n_elem,
-        pitch,
-        c,
-        fc,
-        fs,
-        _t0_all,
-        angles_rad,
-        mv_dl=0.01,
-        fbss=True,
-        subarray_ratio=0.5,
-        temporal_win=1,
-        options=None,
-    ):
-        """Initialize the instance."""
-        self.options = options if options is not None else (args if args is not None else parser.parse_args([]))
-        mv_dl = nonnegative_float(mv_dl)
-        geometry = build_row_dynamic_geometry(
-            z_grid,
-            x_grid,
-            n_elem,
-            pitch,
-            c,
-            fc,
-            fs,
-            self.options.f_number,
-            self.options.dynamic_aperture,
-            self.options.window,
-            subarray_ratio,
-            temporal_win,
-            device,
+    def get_device(self):
+        return device
+
+    def solve_weights(self, covariance, steering):
+        weights = super().solve_weights(covariance, steering)
+        return project_signal_subspace(
+            covariance, weights, self.options.num_eig,
+            self.options.eig_threshold, self.options.force_gpu_eigh,
         )
-        self.__dict__.update(geometry)
-        self.dl_factor = mv_dl
-        self.use_fbss = fbss
-        self.subarray_ratio = subarray_ratio
-        self.temporal_win = temporal_win
-
-    def __call__(self, i_data, q_data, selected_angles, t_starts, fs):
-        """Run the callable operation."""
-        validate_beamformer_input(i_data, q_data, selected_angles, fs, self.fs, self.N)
-        n_a = i_data.shape[0]
-        i_tensor = torch.from_numpy(i_data.astype(np.float32)).to(device)
-        q_tensor = torch.from_numpy(q_data.astype(np.float32)).to(device)
-        n_s = i_tensor.shape[1]
-
-        half_win = self.temporal_win // 2
-        offsets = torch.arange(-half_win, half_win + 1, device=device)
-        offsets_f = offsets.float().view(1, 1, -1)
-        cos_a = torch.from_numpy(np.cos(selected_angles).astype(np.float32)).to(device)
-        sin_a = torch.from_numpy(np.sin(selected_angles).astype(np.float32)).to(device)
-        t_starts_t = time_start_tensor(t_starts, n_a, fs, device)
-        max_sample = float(n_s - 1)
-
-        i_beam_sum = torch.zeros(
-            (self.height, self.width), dtype=torch.float32, device=device
-        )
-        q_beam_sum = torch.zeros(
-            (self.height, self.width), dtype=torch.float32, device=device
-        )
-
-        # 1. 预计算接收端相位旋转因子 (全网格 3D)
-        phi_rx_global = 2.0 * np.pi * self.fc * (self.drs / fs)
-        cos_rx_global = torch.cos(phi_rx_global)
-        sin_rx_global = torch.sin(phi_rx_global)
-
-        for i in range(n_a):
-            i_angle = i_tensor[i]
-            q_angle = q_tensor[i]
-
-            for hz in range(self.height):
-                tx_row = (
-                    self.z_mesh[hz] * self.sc * cos_a[i]
-                    + self.x_mesh[hz] * self.sc * sin_a[i]
-                )
-                sample_no_t0 = tx_row.unsqueeze(-1) + self.drs[hz]
-                sample_center = sample_no_t0 - t_starts_t[i]
-                sample = sample_center.unsqueeze(-1) + offsets_f
-                valid_mask = ((sample >= 0) & (sample <= max_sample)).float()
-                sample.clamp_(0.0, max_sample)
-
-                i_samples, q_samples = interpolate_channel_samples(
-                    i_angle,
-                    q_angle,
-                    sample,
-                    self.ch,
-                    self.options.interp,
-                )
-
-                # 2. 接收端相位旋转 (3D)
-                cos_rx = cos_rx_global[hz].unsqueeze(-1)
-                sin_rx = sin_rx_global[hz].unsqueeze(-1)
-                i_rx = i_samples * cos_rx - q_samples * sin_rx
-                q_rx = i_samples * sin_rx + q_samples * cos_rx
-
-                x_flat = torch.complex(i_rx, q_rx) * valid_mask
-                row = self.row_cache[hz]
-                aperture_size, subarray_size, _subarray_count = (
-                    row["aperture_size"],
-                    row["subarray_size"],
-                    row["subarray_count"],
-                )
-
-                x_active = torch.gather(
-                    x_flat, 1, row["ch_idx_t"]
-                )  # [width, aperture_size, T]
-                x_subarrays, covariance = spatial_temporal_covariance(
-                    x_active,
-                    subarray_size,
-                    self.temporal_win,
-                    self.use_fbss,
-                    spatial_weights=row["window"],
-                    normalize=True,
-                )
-
-                # ========== ESBMV 使用加载协方差矩阵;MVDR 求解也使用同一加载矩阵 ==========
-                covariance_signal = 0.5 * (covariance + covariance.mH)
-
-                # ========== 对角加载 ==========
-                trace = covariance_signal.diagonal(dim1=-2, dim2=-1).real.sum(
-                    -1
-                )  # [width]
-                covariance_loaded = (
-                    covariance_signal
-                    + (self.dl_factor / subarray_size)
-                    * trace.view(self.width, 1, 1)
-                    * row["eye"]
-                )
-
-                # ========== 标准 MVDR 求解 ==========
-                ones_subarray = row["ones"]
-
-                w_mv = normalized_mv_weights(covariance_loaded, ones_subarray)
-
-                # ========== ESBMV:将 MV 权重投影到信号子空间 ==========
-                w = project_signal_subspace(
-                    covariance_loaded, w_mv, self.options.num_eig,
-                    self.options.eig_threshold, self.options.force_gpu_eigh,
-                )
-
-                # ========== 合成输出 ==========
-                y_row_rx = mv_row_output(w, x_subarrays, x_active, valid_mask, row)
-
-                # 3. 发射端相位旋转 (2D)
-                phi_tx = 2.0 * np.pi * self.fc * (tx_row / fs)
-                cos_tx = torch.cos(phi_tx).view(self.width, 1, 1)
-                sin_tx = torch.sin(phi_tx).view(self.width, 1, 1)
-
-                y_row = torch.complex(
-                    y_row_rx.real * cos_tx - y_row_rx.imag * sin_tx,
-                    y_row_rx.real * sin_tx + y_row_rx.imag * cos_tx,
-                )
-
-                y_row_2d = y_row.squeeze(-1).squeeze(-1)
-                i_beam_sum[hz].add_(y_row_2d.real)
-                q_beam_sum[hz].add_(y_row_2d.imag)
-
-        i_output = (i_beam_sum / n_a).cpu().numpy()
-        q_output = (q_beam_sum / n_a).cpu().numpy()
-        return i_output, q_output
 
 
 # ================= 主程序 =================
@@ -329,6 +141,7 @@ def main():
         selected_angles=selected_angles,
         has_gt=has_gt,
         parameters=[
+            ("MV axis", args.mv_axis),
             ("F-Number", args.f_number),
             ("Aperture", "Dynamic" if args.dynamic_aperture else "Fixed Full"),
             ("FBSS", "Enabled" if args.fbss else "Disabled"),

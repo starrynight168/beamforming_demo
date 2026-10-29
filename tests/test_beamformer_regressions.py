@@ -216,22 +216,83 @@ class BeamformerRegressionTests(unittest.TestCase):
         rx = torch.tensor([[[0.2], [0.8]]], dtype=torch.complex64)
         tx = torch.tensor([[[0.3], [0.7]]], dtype=torch.complex64)
         with patch.object(gcfmv, "device", torch.device("cpu")):
-            bf = self.beamformer(gcfmv, self.options(gcfmv, gcf_power=0.0), channels=4)
-            with patch.object(gcfmv, "normalized_mv_weights", side_effect=(rx, tx)):
+            bf = self.beamformer(gcfmv, self.options(gcfmv, mv_axis="joint", gcf_power=0.0), channels=4)
+            with patch.object(mv, "normalized_mv_weights", side_effect=(rx, tx)):
                 i, q = bf(signal, np.zeros_like(signal), angles, np.zeros(3), 1.0)
         rx_values = 0.2 * values[:, :-1] + 0.8 * values[:, 1:]
         expected = (0.3 * rx_values[:-1] + 0.7 * rx_values[1:]).sum()
         np.testing.assert_allclose(i, expected, rtol=1e-6)
         np.testing.assert_allclose(q, 0.0, atol=1e-6)
 
+    def test_rx_gcf_compounds_independent_angles_without_switching_method(self):
+        rng = np.random.default_rng(71)
+        signal = (rng.normal(size=(3, 16, 8)) + 1j * rng.normal(size=(3, 16, 8))).astype(np.complex64)
+        angles = np.array([-0.17, 0.0, 0.11], dtype=np.float32)
+        bf = self.beamformer(gcfmv, self.options(gcfmv))
+        combined = bf(signal.real, signal.imag, angles, np.zeros(3), 1.0)
+        separate = [bf(signal[i:i+1].real, signal[i:i+1].imag, angles[i:i+1], np.zeros(1), 1.0)
+                    for i in range(3)]
+        for actual, expected in zip(combined, np.mean(separate, axis=0)):
+            np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+    def test_tx_mv_uses_receive_das_then_transmit_subarray_average(self):
+        values = np.array([[1, 2, 4, 8], [3, 5, 7, 11], [13, 17, 19, 23]], dtype=np.float32)
+        signal = np.broadcast_to(values[:, None], (3, 16, 4)).copy()
+        angles = np.array([-0.1, 0.0, 0.1], dtype=np.float32)
+        tx = torch.tensor([[[0.3], [0.7]]], dtype=torch.complex64)
+        with patch.object(gcfmv, "device", torch.device("cpu")):
+            for window in ("rect", "hann"):
+                for power in (0.0, 1.0):
+                    bf = self.beamformer(gcfmv, self.options(gcfmv, mv_axis="tx", window=window,
+                        gcf_power=power, gcf_tx_low_bins=0), channels=4)
+                    with patch.object(mv, "normalized_mv_weights", return_value=tx) as solve:
+                        i, q = bf(signal, np.zeros_like(signal), angles, np.zeros(3), 1.0)
+                    self.assertEqual(solve.call_count, 1)
+                    rx_window = bf.row_cache[0]["aperture_window"]
+                    aperture = np.ones(4) if rx_window is None else rx_window.numpy()
+                    received = (values * aperture).sum(-1) / aperture.sum()
+                    outputs = 0.3 * received[:-1] + 0.7 * received[1:]
+                    gcf = outputs.sum() ** 2 / (2 * np.sum(outputs ** 2))
+                    np.testing.assert_allclose(i, outputs.mean() * gcf ** power, rtol=1e-6)
+                    np.testing.assert_allclose(q, 0.0, atol=1e-6)
+
+    def test_tx_and_joint_reject_single_angle_instead_of_changing_method(self):
+        signal = np.ones((1, 16, 8), dtype=np.float32)
+        for axis in ("tx", "joint"):
+            bf = self.beamformer(gcfmv, self.options(gcfmv, mv_axis=axis))
+            with self.assertRaisesRegex(ValueError, "at least two"):
+                bf(signal, np.zeros_like(signal), np.zeros(1), np.zeros(1), 1.0)
+
+    def test_mv_variants_share_all_paths_and_preserve_coherent_signal(self):
+        signal = np.ones((3, 64, 8), dtype=np.float32)
+        angles = np.array([-0.1, 0.0, 0.1], dtype=np.float32)
+        for module in (mv, ccmv, esbmv, gcfmv, cmsaw):
+            for axis in ("rx", "tx", "joint"):
+                with self.subTest(algorithm=module.METHOD_NAME, axis=axis):
+                    bf = self.beamformer(module, self.options(module, mv_axis=axis), mv_dl=0.1)
+                    engine = bf.mv_bf if module is cmsaw else bf
+                    self.assertIs(type(engine).__call__, mv.RowDynamicMVBeamformerIQ.__call__)
+                    i, q = bf(signal, np.zeros_like(signal), angles, np.zeros(3), 1.0)
+                    gain = 10 if module is gcfmv and axis == "joint" else 1
+                    np.testing.assert_allclose(i, gain, atol=3e-4)
+                    np.testing.assert_allclose(q, 0.0, atol=1e-6)
+
+    def test_esbmv_projects_weights_on_both_axes_in_joint_mode(self):
+        signal = np.ones((3, 64, 8), dtype=np.float32)
+        angles = np.array([-0.1, 0.0, 0.1], dtype=np.float32)
+        bf = self.beamformer(esbmv, self.options(esbmv, mv_axis="joint"), mv_dl=0.1)
+        with patch.object(esbmv, "project_signal_subspace", wraps=esbmv.project_signal_subspace) as project:
+            bf(signal, np.zeros_like(signal), angles, np.zeros(3), 1.0)
+        self.assertEqual([call.args[0].shape[-1] for call in project.call_args_list], [4, 2])
+
     def test_joint_mv_is_independent_of_column_block_size(self):
         rng = np.random.default_rng(37)
         signal = (rng.normal(size=(3, 16, 8)) + 1j * rng.normal(size=(3, 16, 8))).astype(np.complex64)
         angles = np.array([-0.1, 0.0, 0.1], dtype=np.float32)
         with patch.object(gcfmv, "device", torch.device("cpu")):
-            bf = self.beamformer(gcfmv, self.options(gcfmv), x=np.linspace(-0.3, 0.3, 40),
+            bf = self.beamformer(gcfmv, self.options(gcfmv, mv_axis="joint"), x=np.linspace(-0.3, 0.3, 40),
                                  temporal_win=3)
-            with patch.object(gcfmv, "_JOINT_SNAPSHOT_TARGET_BYTES", 1):
+            with patch.object(mv, "_JOINT_SNAPSHOT_TARGET_BYTES", 1):
                 blocked = bf(signal.real, signal.imag, angles, np.zeros(3), 1.0)
             whole = bf(signal.real, signal.imag, angles, np.zeros(3), 1.0)
         for actual, expected in zip(blocked, whole):
@@ -260,7 +321,7 @@ class BeamformerRegressionTests(unittest.TestCase):
                                 totals[pixel] += weight
             expected /= totals[:, None, None]
             for fbss in (False, True):
-                actual = gcfmv._joint_spatial_covariance(data, valid, axis, 2, fbss, weights)
+                actual = mv.joint_spatial_covariance(data, valid, axis, 2, fbss, weights)
                 target = 0.5 * (expected + expected.conj().flip(-1, -2)) if fbss else expected
                 torch.testing.assert_close(actual, target)
 
@@ -448,7 +509,7 @@ class BeamformerRegressionTests(unittest.TestCase):
                     params = json.loads((root / method / "params.json").read_text(encoding="utf-8"))
                     self.assertIn("cache_signature", params)
                     if module is gcfmv:
-                        self.assertEqual(params["beamforming_mode"], "2D_JTR")
+                        self.assertEqual(params["beamforming_mode"], "1D_RX")
 
             command = [sys.executable, "-m", "algorithms.gcfmv",
                        "--h5_path", str(source), "--output_dir", str(root),
@@ -458,6 +519,14 @@ class BeamformerRegressionTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             params = json.loads((root / "gcfmv" / "params.json").read_text(encoding="utf-8"))
             self.assertEqual(params["beamforming_mode"], "1D_RX")
+            for axis, mode in (("tx", "1D_TX"), ("joint", "2D_JTR")):
+                command[command.index("--select_angles") + 1] = "all"
+                result = subprocess.run(command + ["--mv_axis", axis],
+                    cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=120)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                params = json.loads((root / "gcfmv" / "params.json").read_text(encoding="utf-8"))
+                self.assertEqual(params["mv_axis"], axis)
+                self.assertEqual(params["beamforming_mode"], mode)
 
 
 if __name__ == "__main__":
