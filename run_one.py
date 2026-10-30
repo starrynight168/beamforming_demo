@@ -184,6 +184,8 @@ def build_algorithm_cmd(args, config, scene, algorithm, scene_dir):
         str(scene_dir),
         "--select_angles",
         str(params["select_angles"]),
+        "--signal_domain",
+        str(params["signal_domain"]),
         "--f_number",
         str(params["f_number"]),
         "--dr",
@@ -207,14 +209,14 @@ def build_algorithm_cmd(args, config, scene, algorithm, scene_dir):
     return cmd
 
 
-def load_grid_and_gt(h5_path, sample_idx, has_gt):
+def load_grid_and_gt(h5_path, sample_idx, has_gt, signal_domain="iq"):
     """Load grid and gt."""
     with h5py.File(h5_path, "r") as hf:
         x_grid = hf["x_grid"][:].astype(np.float32)
         z_grid = hf["z_grid"][:].astype(np.float32)
         gt = None
-        if has_gt and "all_envdb_norm" in hf:
-            gt = ground_truth_db(hf, sample_idx)
+        if has_gt:
+            gt = ground_truth_db(hf, sample_idx, signal_domain=signal_domain)
     for name, grid in (("x_grid", x_grid), ("z_grid", z_grid)):
         if (
             grid.ndim != 1
@@ -240,11 +242,14 @@ def load_grid_and_gt(h5_path, sample_idx, has_gt):
     return extent_mm, gt
 
 
-def scene_has_gt(scene):
+def scene_has_gt(scene, signal_domain="iq"):
     """Execute scene has gt."""
     h5_path = resolve_path(scene["h5_path"])
     sample_idx = int(scene["sample_idx"])
     with h5py.File(h5_path, "r") as hf:
+        if signal_domain != "iq" or "all_multi_I" not in hf:
+            from algorithms.common import load_from_h5
+            return load_from_h5(h5_path, sample_idx, signal_domain).has_gt
         if "all_envdb_norm" not in hf:
             return False
         gt_shape = hf["all_envdb_norm"].shape
@@ -441,7 +446,7 @@ def main():
         if not args.no_evaluate else None
     )
     methods = select_algorithms(config, args.algorithms)
-    has_gt = scene_has_gt(scene)
+    has_gt = scene_has_gt(scene, config["params"]["signal_domain"])
     labels = validate_algorithm_labels(config, methods, has_gt)
     scene_dir = resolve_path(args.output_root) / scene["id"]
     scene_dir.mkdir(parents=True, exist_ok=True)
@@ -474,6 +479,7 @@ def main():
         resolve_path(scene["h5_path"]),
         int(scene["sample_idx"]),
         has_gt,
+        signal_domain=params["signal_domain"],
     )
     with h5py.File(resolve_path(scene["h5_path"]), "r") as hf:
         expected_shape = (int(hf["z_grid"].size), int(hf["x_grid"].size))
@@ -543,7 +549,7 @@ def main():
     elif not args.no_evaluate and evaluation_context is None:
         print("Skip evaluation: non-PICMUS sample.")
     elif not args.no_evaluate:
-        print("Skip evaluation: H5 没有 all_envdb_norm ground truth.")
+        print(f"Skip evaluation: H5 没有 {params['signal_domain']} 域的显示 GT。")
 
     print(f"\nDone: {scene_dir}")
     if individual_dir is not None:
