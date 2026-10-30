@@ -521,6 +521,29 @@ class EvaluationInputTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "样本数必须与 all_multi_I 一致"):
                 read_sample_meta(path, sample_idx=1)
 
+    def test_sample_metadata_supports_rf_only_h5_and_rf_display_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rf_only.h5"
+            config = {
+                "dataset": {"phantom_mode": "in_vivo", "phantom_source": "in_vivo"},
+                "source_samples": {"encoding": "root_labels_with_path_template", "count": 1,
+                                   "acquisition_id_dataset": "/acquisition_id",
+                                   "phantom_mode": "in_vivo", "phantom_source": "in_vivo"},
+                "generation": {
+                    "ground_truth": {"algorithm": "mv", "signal_domain": "rf", "dataset": "/mv_rf_db"},
+                    "training_targets": {"domain_targets": {"rf": {"mv": {"db": "/mv_rf_db"}}}},
+                },
+            }
+            with h5py.File(path, "w") as handle:
+                handle["acquisition_id"] = np.array([b"rf_sample"])
+                handle["rf"] = np.zeros((1, 1, 8, 2), np.float32)
+                handle["mv_rf_db"] = np.zeros((1, 1, 2, 2), np.float16)
+                handle["config_yaml"] = yaml.safe_dump(config)
+            meta = read_sample_meta(path, sample_idx=0)
+            self.assertEqual(meta["sample_name"], "rf_sample")
+            self.assertTrue(meta["has_gt"])
+            self.assertIsNone(load_picmus_context(path, sample_idx=0))
+
     def test_picmus_config_rejects_non_object_evaluation_settings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.h5"

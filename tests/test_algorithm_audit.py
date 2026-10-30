@@ -292,7 +292,9 @@ class AlgorithmAuditTests(unittest.TestCase):
             h5_path = root / "input.h5"
             h5_path.write_bytes(b"input")
             with patch("algorithms.common.PROJECT_ROOT", root):
-                for source_path in algorithm_source_paths("mban")[2:]:
+                for source_path in algorithm_source_paths("mban"):
+                    if not source_path.is_relative_to(root):
+                        continue
                     source_path.parent.mkdir(parents=True, exist_ok=True)
                     source_path.write_text(source_path.name, encoding="utf-8")
                 before = result_cache_signature("input.h5", "mban")
@@ -394,6 +396,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                     {
                         "scene": scene,
                         "params": {
+                            "signal_domain": "iq",
                             "select_angles": "1",
                             "f_number": 1.5,
                             "dr": 60.0,
@@ -542,7 +545,7 @@ class AlgorithmAuditTests(unittest.TestCase):
             ):
                 with self.subTest(aperture=aperture, interpolation=interpolation):
                     args = argparse.Namespace(
-                        aperture_mode=aperture, dynamic_aperture=False, f_number=1.5,
+                        signal_domain="iq", aperture_mode=aperture, dynamic_aperture=False, f_number=1.5,
                         window="rect", row_block=1, interp=interpolation,
                     )
                     with (

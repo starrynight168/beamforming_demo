@@ -108,6 +108,7 @@ def main():
         resolve_project_path(args.h5_path, PROJECT_ROOT),
         args.h5_sample_idx,
         args.select_angles,
+        signal_domain=args.signal_domain,
     )
     sample = input_data.sample
 

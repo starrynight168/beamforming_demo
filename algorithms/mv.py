@@ -14,7 +14,8 @@ from algorithms.common import (
     add_common_arguments,
     add_io_arguments,
     build_row_dynamic_geometry,
-    envelope_to_db,
+    beamforming_depth_grid,
+    beamformed_image_db,
     interpolate_channel_samples,
     interpolate_multi_angle_channel_samples,
     optional_aperture_window_1d,
@@ -80,7 +81,7 @@ _JOINT_SNAPSHOT_TARGET_BYTES = 64 * 1024**2
 class RowDynamicMVBeamformerIQ:
     """标准 MV + FBSS 自适应波束形成器.
 
-    固定使用 positive IQ 相位补偿.
+    IQ 使用 positive 相位补偿；实数 RF 和解析 RF 直接按传播时间取样。
     """
 
     normalize_covariance = False
@@ -101,10 +102,15 @@ class RowDynamicMVBeamformerIQ:
         subarray_ratio=0.5,
         temporal_win=1,
         options=None,
+        signal_domain=None,
     ):
         """Initialize the instance."""
         self.options = options if options is not None else self.get_options()
+        signal_domain = getattr(self.options, "signal_domain", "iq") if signal_domain is None else signal_domain
         self.mv_axis = getattr(self.options, "mv_axis", "rx")
+        if signal_domain not in ("iq", "rf", "analytic_rf"):
+            raise ValueError("signal_domain must be iq, rf or analytic_rf")
+        self.signal_domain = signal_domain
         self.device = self.get_device()
         mv_dl = nonnegative_float(mv_dl)
         geometry = build_row_dynamic_geometry(
@@ -134,6 +140,8 @@ class RowDynamicMVBeamformerIQ:
     def __call__(self, i_data, q_data, selected_angles, t_starts, fs):
         """Run the callable operation."""
         validate_beamformer_input(i_data, q_data, selected_angles, fs, self.fs, self.N)
+        if self.signal_domain == "rf" and np.any(q_data != 0):
+            raise ValueError("Real RF requires an all-zero imaginary component")
         n_a = i_data.shape[0]
         i_tensor = torch.from_numpy(i_data.astype(np.float32)).to(self.device)
         q_tensor = torch.from_numpy(q_data.astype(np.float32)).to(self.device)
@@ -161,9 +169,10 @@ class RowDynamicMVBeamformerIQ:
         )
 
         # 1. 预计算接收端相位旋转因子 (全网格 3D)
-        phi_rx_global = 2.0 * np.pi * self.fc * (self.drs / fs)
-        cos_rx_global = torch.cos(phi_rx_global)
-        sin_rx_global = torch.sin(phi_rx_global)
+        if self.signal_domain == "iq":
+            phi_rx_global = 2.0 * np.pi * self.fc * (self.drs / fs)
+            cos_rx_global = torch.cos(phi_rx_global)
+            sin_rx_global = torch.sin(phi_rx_global)
 
         for i in range(n_a):
             i_angle = i_tensor[i]
@@ -189,10 +198,13 @@ class RowDynamicMVBeamformerIQ:
                 )
 
                 # 2. 接收端相位旋转 (3D)
-                cos_rx = cos_rx_global[hz].unsqueeze(-1)
-                sin_rx = sin_rx_global[hz].unsqueeze(-1)
-                i_rx = i_samples * cos_rx - q_samples * sin_rx
-                q_rx = i_samples * sin_rx + q_samples * cos_rx
+                if self.signal_domain == "iq":
+                    cos_rx = cos_rx_global[hz].unsqueeze(-1)
+                    sin_rx = sin_rx_global[hz].unsqueeze(-1)
+                    i_rx = i_samples * cos_rx - q_samples * sin_rx
+                    q_rx = i_samples * sin_rx + q_samples * cos_rx
+                else:
+                    i_rx, q_rx = i_samples, q_samples
 
                 x_flat = torch.complex(i_rx, q_rx) * valid_mask
                 row = self.row_cache[hz]
@@ -231,14 +243,16 @@ class RowDynamicMVBeamformerIQ:
                 y_row_rx = self.weight_rx_output(y_row_rx, x_active)
 
                 # 3. 发射端相位旋转 (2D)
-                phi_tx = 2.0 * np.pi * self.fc * (tx_row / fs)
-                cos_tx = torch.cos(phi_tx).view(self.width, 1, 1)
-                sin_tx = torch.sin(phi_tx).view(self.width, 1, 1)
-
-                y_row = torch.complex(
-                    y_row_rx.real * cos_tx - y_row_rx.imag * sin_tx,
-                    y_row_rx.real * sin_tx + y_row_rx.imag * cos_tx,
-                )
+                if self.signal_domain == "iq":
+                    phi_tx = 2.0 * np.pi * self.fc * (tx_row / fs)
+                    cos_tx = torch.cos(phi_tx).view(self.width, 1, 1)
+                    sin_tx = torch.sin(phi_tx).view(self.width, 1, 1)
+                    y_row = torch.complex(
+                        y_row_rx.real * cos_tx - y_row_rx.imag * sin_tx,
+                        y_row_rx.real * sin_tx + y_row_rx.imag * cos_tx,
+                    )
+                else:
+                    y_row = y_row_rx
 
                 y_row_2d = y_row.squeeze(-1).squeeze(-1)
                 i_beam_sum[hz].add_(y_row_2d.real)
@@ -319,12 +333,15 @@ class RowDynamicMVBeamformerIQ:
                     channel_index,
                     self.options.interp,
                 )
-                phi_tx = 2.0 * np.pi * self.fc * tx_row / fs
-                phi_rx = 2.0 * np.pi * self.fc * drs / fs
-                phi = phi_tx[:, :, None, None] + phi_rx.unsqueeze(0).unsqueeze(-1)
-                cos_phi, sin_phi = torch.cos(phi), torch.sin(phi)
-                i_aligned = i_samples * cos_phi - q_samples * sin_phi
-                q_aligned = i_samples * sin_phi + q_samples * cos_phi
+                if self.signal_domain == "iq":
+                    phi_tx = 2.0 * np.pi * self.fc * tx_row / fs
+                    phi_rx = 2.0 * np.pi * self.fc * drs / fs
+                    phi = phi_tx[:, :, None, None] + phi_rx.unsqueeze(0).unsqueeze(-1)
+                    cos_phi, sin_phi = torch.cos(phi), torch.sin(phi)
+                    i_aligned = i_samples * cos_phi - q_samples * sin_phi
+                    q_aligned = i_samples * sin_phi + q_samples * cos_phi
+                else:
+                    i_aligned, q_aligned = i_samples, q_samples
                 data = torch.complex(i_aligned, q_aligned) * valid
                 row_indices = row["ch_idx_t"][x_slice]
                 data = torch.gather(
@@ -492,6 +509,7 @@ def main(
         h5_path,
         args.h5_sample_idx,
         args.select_angles,
+        signal_domain=args.signal_domain,
     )
     sample = input_data.sample
     c, fc, fs, pitch, n_elem = (
@@ -502,6 +520,7 @@ def main(
         sample.n_elem,
     )
     angles_all, z_grid, x_grid = sample.angles, sample.z_grid, sample.x_grid
+    compute_z = beamforming_depth_grid(z_grid, c, fs, args.signal_domain)
     selected_angles = input_data.selected_angles
     i_sub, q_sub, t0_sub = input_data.i_data, input_data.q_data, input_data.t0
     has_gt = sample.has_gt
@@ -533,6 +552,8 @@ def main(
         selected_angles=selected_angles,
         has_gt=has_gt,
         parameters=[
+            ("Signal domain", args.signal_domain),
+            ("Computed depth rows", len(compute_z)),
             ("MV axis", args.mv_axis),
             ("Covariance estimator", covariance_label),
             ("F-Number", args.f_number),
@@ -551,7 +572,7 @@ def main(
 
     # 初始化标准 MV + FBSS 波束合成器
     bf = beamformer_class(
-        z_grid,
+        compute_z,
         x_grid,
         n_elem,
         pitch,
@@ -577,7 +598,7 @@ def main(
         fs,
         device,
     )
-    mv_db = envelope_to_db(i_out, q_out, z_grid, fc, args.tgc, args.tgc_alpha)
+    mv_db = beamformed_image_db(i_out, q_out, compute_z, z_grid, fc, args.tgc, args.tgc_alpha, args.signal_domain)
     mv_db = validate_db_output(mv_db, (height, width), method_name)
 
     # ========== 生成图标题(所有参数简写) ==========

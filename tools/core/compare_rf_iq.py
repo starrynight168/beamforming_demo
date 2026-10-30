@@ -73,7 +73,7 @@ def rf_mv_signed_and_envelope(raw, x, z, angle, fs, c, pitch, t0, loading, ratio
     dz = c / (2.0 * fs)
     z_dense = np.arange(float(z[0]), float(z[-1]) + 0.5 * dz, dz, dtype=np.float32)
     signed_dense = rf_mv(raw, x, z_dense, angle, fs, c, pitch, t0, loading, ratio, temporal_win, device, f_number, dynamic_aperture, interp, fbss)
-    envelope_dense = np.abs(hilbert(signed_dense, axis=0))
+    envelope_dense = np.abs(hilbert(signed_dense, N=2 * len(signed_dense), axis=0)[:len(signed_dense)])
     right = np.searchsorted(z_dense, z, side="right").clip(1, len(z_dense) - 1)
     left = right - 1
     fraction = ((z - z_dense[left]) / (z_dense[right] - z_dense[left])).astype(np.float32)

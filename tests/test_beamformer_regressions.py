@@ -356,6 +356,30 @@ class BeamformerRegressionTests(unittest.TestCase):
         zero = torch.zeros((1, 1))
         torch.testing.assert_close(fdmas.FDMASBeamformerIQ._complex_fdmas(zero, zero, torch.ones_like(zero)), zero.to(torch.complex64).squeeze(-1))
 
+    def test_fdmas_rf_filter_selects_second_harmonic_and_checks_sampling_rate(self):
+        fs, fc, count = 40e6, 5e6, 1024
+        z = 0.005 + np.arange(count, dtype=np.float32) * 1540.0 / (2 * fs)
+        options = self.options(fdmas, signal_domain="rf")
+        bf = fdmas.FDMASBeamformerIQ(
+            z, np.array([0.0]), 4, 0.0003, 1540.0, fc, fs,
+            np.zeros(1), np.zeros(1), options=options,
+        )
+        t = np.arange(count) / fs
+        signal = np.cos(2 * np.pi * 2 * fc * t) + np.cos(2 * np.pi * 0.5 * fc * t)
+        filtered = bf._filter_rf_output(signal[:, None])[128:-128, 0]
+        time = t[128:-128]
+        passband_amplitude = abs(2 * np.mean(filtered * np.exp(-2j * np.pi * 2 * fc * time)))
+        stopband_amplitude = abs(2 * np.mean(filtered * np.exp(-2j * np.pi * 0.5 * fc * time)))
+        self.assertGreater(passband_amplitude, 0.8)
+        self.assertLess(stopband_amplitude, passband_amplitude * 0.05)
+        with self.assertRaisesRegex(ValueError, "Nyquist"):
+            fdmas.design_rf_fdmas_filter(fc, 20e6)
+        with self.assertRaisesRegex(ValueError, "5fc"):
+            fdmas.FDMASBeamformerIQ(
+                z, np.array([0.0]), 4, 0.0003, 1540.0, fc, 24e6,
+                np.zeros(1), np.zeros(1), options=options,
+            )
+
     def test_fdmas_preserves_pairs_with_imbalanced_weights(self):
         signal = torch.tensor([[1.0, 4.0]])
         for weights in ([[1.0, 1e-8]], [[1e-8, 1.0]]):
@@ -443,7 +467,9 @@ class BeamformerRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             train_root = root / "train"
-            for source in algorithm_source_paths("mban", train_root)[2:]:
+            for source in algorithm_source_paths("mban", train_root):
+                if not source.is_relative_to(train_root):
+                    continue
                 source.parent.mkdir(parents=True, exist_ok=True)
                 source.write_text("source", encoding="utf-8")
             h5_path = root / "input.h5"
@@ -451,12 +477,12 @@ class BeamformerRegressionTests(unittest.TestCase):
                 handle["angles"] = [0.0]
             grid = torch.tensor([0.0, 1.0])
             scene = SimpleNamespace(x_grid=grid, z_grid=grid, height=2, width=2)
-            model = SimpleNamespace(runtime={})
+            model = SimpleNamespace(runtime={}, signal_domain="iq")
             load_scene, load_model = Mock(return_value=scene), Mock(return_value=model)
             reconstruct = Mock(return_value=(np.array([[0.0, -5.0], [-10.0, -20.0]]), {}, [], 0.5))
             argv = ["mban", "--checkpoint", str(root / "model.pt"), "--kind", "fp32",
                     "--h5_path", str(h5_path), "--output_dir", str(root), "--train_root", str(train_root)]
-            with patch("sys.argv", argv), patch.object(mban, "load_evaluation_dependencies", return_value=(load_scene, reconstruct, load_model)), patch("algorithms.common.save_figure"), contextlib.redirect_stdout(io.StringIO()):
+            with patch("sys.argv", argv), patch.object(mban, "load_evaluation_dependencies", return_value=(load_scene, reconstruct, load_model)), patch("algorithms.common.load_from_h5", return_value=SimpleNamespace(angles=np.array([0.]), has_gt=False)), patch("algorithms.common.save_figure"), contextlib.redirect_stdout(io.StringIO()):
                 mban.main()
             params = json.loads((root / "mban" / "params.json").read_text(encoding="utf-8"))
             self.assertEqual(params["runtime_sec"], 0.5)
@@ -488,6 +514,16 @@ class BeamformerRegressionTests(unittest.TestCase):
                     "x_grid": np.linspace(-0.0006, 0.0006, 5),
                 }.items():
                     handle[key] = value
+                handle["config_yaml"] = (
+                    "generation:\n"
+                    "  storage:\n"
+                    "    inputs:\n"
+                    "      iq:\n"
+                    "        dtype: float32\n"
+                    "        normalize: true\n"
+                    "  ground_truth: {}\n"
+                    "  training_targets: {}\n"
+                )
             for module in self.modules:
                 method = module.METHOD_NAME
                 command = [sys.executable, "-m", f"algorithms.{method}",

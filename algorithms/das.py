@@ -17,7 +17,8 @@ from algorithms.common import (
     aperture_window_1d,
     aperture_window_from_dx,
     dynamic_aperture_channel_count,
-    envelope_to_db,
+    beamforming_depth_grid,
+    beamformed_image_db,
     interpolate_channel_samples,
     prepare_beamforming_input,
     print_physical_summary,
@@ -59,6 +60,7 @@ class DASBeamformerIQ:
     def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad, options=None):
         """Initialize the instance."""
         self.options = options if options is not None else (args if args is not None else parser.parse_args([]))
+        self.signal_domain = self.options.signal_domain
         self.height, self.width, self.N = len(z_grid), len(x_grid), n_elem
         self.x_grid = torch.from_numpy(x_grid).float().to(device)
         self.z_grid = torch.from_numpy(z_grid).float().to(device)
@@ -120,6 +122,8 @@ class DASBeamformerIQ:
     def __call__(self, i_data, q_data, selected_angles, t_starts, fs):
         """Run the callable operation."""
         validate_beamformer_input(i_data, q_data, selected_angles, fs, self.fs, self.N)
+        if self.signal_domain == "rf" and np.any(q_data != 0):
+            raise ValueError("RF 输入的虚部必须为零")
         n_a = i_data.shape[0]
         n_s = i_data.shape[1]
         max_sample = float(n_s - 1)
@@ -156,7 +160,7 @@ class DASBeamformerIQ:
                 (z1 - z0, self.width), dtype=torch.float32, device=device
             )
 
-            phi_rx = 2.0 * np.pi * self.fc * (drs_b / fs)
+            phi_rx = 2.0 * np.pi * self.fc * (drs_b / fs) if self.signal_domain == "iq" else torch.zeros_like(drs_b)
             cos_rx = torch.cos(phi_rx)
             sin_rx = torch.sin(phi_rx)
 
@@ -183,7 +187,7 @@ class DASBeamformerIQ:
                 i_sum = (i_rx * valid_w).sum(dim=-1)
                 q_sum = (q_rx * valid_w).sum(dim=-1)
 
-                phi_tx = 2.0 * np.pi * self.fc * (tx_samples / fs)
+                phi_tx = 2.0 * np.pi * self.fc * (tx_samples / fs) if self.signal_domain == "iq" else torch.zeros_like(tx_samples)
                 cos_tx = torch.cos(phi_tx)
                 sin_tx = torch.sin(phi_tx)
                 i_block.add_(i_sum * cos_tx - q_sum * sin_tx)
@@ -207,6 +211,7 @@ def main():
         h5_path,
         args.h5_sample_idx,
         args.select_angles,
+        signal_domain=args.signal_domain,
     )
     sample = input_data.sample
     selected_angles = input_data.selected_angles
@@ -218,6 +223,7 @@ def main():
         sample.n_elem,
     )
     z_grid, x_grid = sample.z_grid, sample.x_grid
+    compute_z = beamforming_depth_grid(z_grid, c, fs, args.signal_domain)
     i_sub, q_sub, t0_sub = input_data.i_data, input_data.q_data, input_data.t0
     angles_all = sample.angles
     has_gt = sample.has_gt
@@ -247,6 +253,8 @@ def main():
         selected_angles=selected_angles,
         has_gt=has_gt,
         parameters=[
+            ("Signal domain", args.signal_domain),
+            ("Computed depth rows", len(compute_z)),
             ("F-Number", args.f_number),
             ("Aperture", "Dynamic" if args.dynamic_aperture else "Fixed Full"),
             ("Aperture mode", args.aperture_mode),
@@ -258,7 +266,7 @@ def main():
         ],
     )
 
-    bf = DASBeamformerIQ(z_grid, x_grid, n_elem, pitch, c, fc, fs, t0_sub, angles_all)
+    bf = DASBeamformerIQ(compute_z, x_grid, n_elem, pitch, c, fc, fs, t0_sub, angles_all)
 
     print("Processing DAS...")
     i_out, q_out, dt = run_beamformer(
@@ -270,7 +278,7 @@ def main():
         fs,
         device,
     )
-    das_db = envelope_to_db(i_out, q_out, z_grid, fc, args.tgc, args.tgc_alpha)
+    das_db = beamformed_image_db(i_out, q_out, compute_z, z_grid, fc, args.tgc, args.tgc_alpha, args.signal_domain)
     das_db = validate_db_output(das_db, (height, width), METHOD_NAME)
 
     # ========== 生成图标题(所有参数简写) ==========

@@ -181,15 +181,37 @@ def h5_embedded_config(hf):
 def read_sample_meta(h5_path, sample_idx):
     """Read sample meta."""
     with h5py.File(h5_path, "r") as hf:
-        n_samples = int(hf["all_multi_I"].shape[0])
+        sample_axis = "all_multi_I" if "all_multi_I" in hf else "acquisition_id"
+        n_samples = int(hf[sample_axis].shape[0])
         if not 0 <= sample_idx < n_samples:
             raise IndexError(f"sample index {sample_idx} is outside [0, {n_samples - 1}]")
-        has_gt = "all_envdb_norm" in hf
-        if has_gt:
+        config = h5_embedded_config(hf)
+        generation = config.get("generation", {})
+        ground_truth = generation.get("ground_truth", {})
+        targets = generation.get("training_targets", {})
+        domain = ground_truth.get("signal_domain", "iq")
+        domain = "iq" if domain == "baseband_iq" else domain
+        algorithm = ground_truth.get("algorithm")
+        entry = targets.get("domain_targets", {}).get(domain, {}).get(algorithm, {})
+        target_paths = [entry.get("db"), entry.get("envelope")]
+        if domain == "rf":
+            target_paths.append(targets.get("rf_envelope_targets", {}).get(algorithm))
+        if domain != "rf":
+            pair = entry.get("signal")
+            if pair is None:
+                section = "complex_iq_targets" if domain == "iq" else "analytic_rf_targets"
+                saved = targets.get(section, {}).get(algorithm, {})
+                pair = {"real": saved.get("i" if domain == "iq" else "real"),
+                        "imag": saved.get("q" if domain == "iq" else "imag")}
+            target_paths.extend(pair.values())
+        if ground_truth.get("dataset"):
+            target_paths.append(ground_truth["dataset"])
+        has_gt = any(path and str(path).lstrip("/") in hf for path in target_paths)
+        has_gt |= domain == "iq" and "domain_targets" not in targets and "all_envdb_norm" in hf
+        if "all_envdb_norm" in hf:
             gt_shape = hf["all_envdb_norm"].shape
             if not gt_shape or gt_shape[0] != n_samples:
-                raise ValueError("all_envdb_norm 样本数必须与 all_multi_I 一致")
-        config = h5_embedded_config(hf)
+                raise ValueError(f"all_envdb_norm 样本数必须与 {sample_axis} 一致")
         dataset_meta = config.get("dataset", {})
         if dataset_meta is None:
             dataset_meta = {}
@@ -212,7 +234,7 @@ def read_sample_meta(h5_path, sample_idx):
         if (
             isinstance(source_samples, dict)
             and source_samples.get("encoding") == "root_labels_with_path_template"
-            and source_samples.get("count") == hf["all_multi_I"].shape[0]
+            and source_samples.get("count") == n_samples
         ):
             id_dataset = str(source_samples.get("acquisition_id_dataset", "/acquisition_id"))
             if id_dataset not in hf or not 0 <= sample_idx < hf[id_dataset].shape[0]:

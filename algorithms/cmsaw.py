@@ -14,7 +14,8 @@ from algorithms import mv
 from algorithms.common import (
     aperture_window_1d,
     dynamic_aperture_channel_count,
-    envelope_to_db,
+    beamforming_depth_grid,
+    beamformed_image_db,
     interpolate_multi_angle_channel_samples,
     positive_odd_int,
     prepare_beamforming_input,
@@ -113,7 +114,8 @@ def delayed_iq(sample, angle_idx, interp):
         interp,
     )
 
-    phase_rx = 2.0 * torch.pi * sample["fc"] * (receive / sample["c"])
+    phase_rx = (2.0 * torch.pi * sample["fc"] * (receive / sample["c"])
+                if sample.get("signal_domain", "iq") == "iq" else torch.zeros_like(receive))
     cos_rx = torch.cos(phase_rx)[None]
     sin_rx = torch.sin(phase_rx)[None]
     aligned_i = i * cos_rx - q * sin_rx
@@ -309,6 +311,7 @@ class CMSAWBeamformerIQ:
     ):
         """Initialize the instance."""
         self.options = options if options is not None else (args if args is not None else parser.parse_args([]))
+        self.signal_domain = self.options.signal_domain
         validate_cmsaw_params(
             lmax_ratio,
             min_subarray_len,
@@ -369,6 +372,7 @@ class CMSAWBeamformerIQ:
             "c": self.c,
             "fc": self.fc,
             "pitch": self.pitch,
+            "signal_domain": self.signal_domain,
         }
         angle_weights = []
         angle_lengths = []
@@ -421,6 +425,7 @@ def main():
         h5_path,
         args.h5_sample_idx,
         args.select_angles,
+        signal_domain=args.signal_domain,
     )
     sample = input_data.sample
     c, fc, fs, pitch, n_elem = (
@@ -431,6 +436,7 @@ def main():
         sample.n_elem,
     )
     angles_all, z_grid, x_grid = sample.angles, sample.z_grid, sample.x_grid
+    compute_z = beamforming_depth_grid(z_grid, c, fs, args.signal_domain)
     selected_angles = input_data.selected_angles
     i_sub, q_sub, t0_sub = input_data.i_data, input_data.q_data, input_data.t0
     has_gt = sample.has_gt
@@ -460,6 +466,8 @@ def main():
         selected_angles=selected_angles,
         has_gt=has_gt,
         parameters=[
+            ("Signal domain", args.signal_domain),
+            ("Computed depth rows", len(compute_z)),
             ("MV axis", args.mv_axis),
             ("F-Number", args.f_number),
             ("Aperture", "Dynamic" if args.dynamic_aperture else "Fixed Full"),
@@ -485,7 +493,7 @@ def main():
         f"Processing CMSAW (Lmax={args.lmax_ratio}aperture_size, gamma={args.gamma})..."
     )
     mv_bf = CMSAWBeamformerIQ(
-        z_grid,
+        compute_z,
         x_grid,
         n_elem,
         pitch,
@@ -515,10 +523,14 @@ def main():
             fs,
             device,
         )
-    output = envelope_to_db(i_out, q_out, z_grid, fc, args.tgc, args.tgc_alpha)
+    output = beamformed_image_db(i_out, q_out, compute_z, z_grid, fc, args.tgc, args.tgc_alpha, args.signal_domain)
     output = validate_db_output(output, (height, width), METHOD_NAME)
     weight_np = mv_bf.last_weight.cpu().numpy().astype(np.float32)
     dynamic_l_np = mv_bf.last_lengths.cpu().numpy()
+    if args.signal_domain == "rf":
+        weight_np = np.column_stack([np.interp(z_grid, compute_z, column) for column in weight_np.T]).astype(np.float32)
+        rows = np.abs(compute_z[None, :] - z_grid[:, None]).argmin(axis=1)
+        dynamic_l_np = dynamic_l_np[:, rows]
 
     # ========== 生成图标题(所有参数简写) ==========
     title_parts = [

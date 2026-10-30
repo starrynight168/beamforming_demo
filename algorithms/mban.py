@@ -52,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     )
     add_common_arguments(parser)
     add_io_arguments(parser)
+    parser.set_defaults(signal_domain=None)
     parser.set_defaults(interp="linear")
     parser.add_argument("--train_root", type=Path)
     parser.add_argument("--checkpoint", required=True)
@@ -107,14 +108,7 @@ def main() -> None:
     h5_path = Path(resolve_project_path(args.h5_path, str(ROOT))).resolve()
     output_dir = Path(args.output_dir).resolve() / METHOD_NAME
     output_dir.mkdir(parents=True, exist_ok=True)
-    with h5py.File(h5_path, "r") as handle:
-        angle_values = np.asarray(handle["angles"][:], dtype=np.float32)
-        has_gt = "all_envdb_norm" in handle
-    angle_indices, _ = parse_selected_angles(angle_values, args.select_angles)
     device = torch.device(args.device)
-    data = load_scene(
-        h5_path, args.h5_sample_idx, gt_key=None, angle_indices=angle_indices
-    )
     spec = load_evaluation_model(
         METHOD_NAME,
         Path(resolve_project_path(args.checkpoint, ROOT)).resolve(),
@@ -124,6 +118,16 @@ def main() -> None:
         hardware_config_path=args.eval_config.resolve() if args.eval_config is not None else None,
         profile=args.profile,
     )
+    if args.signal_domain is not None and args.signal_domain != spec.signal_domain:
+        raise ValueError(f"checkpoint 使用 {spec.signal_domain}，不能按 {args.signal_domain} 推理")
+    args.signal_domain = spec.signal_domain
+    from algorithms.common import load_from_h5
+
+    sample = load_from_h5(h5_path, args.h5_sample_idx, signal_domain=args.signal_domain)
+    angle_indices, _ = parse_selected_angles(sample.angles, args.select_angles)
+    has_gt = sample.has_gt
+    data = load_scene(h5_path, args.h5_sample_idx, gt_key=None,
+                      angle_indices=angle_indices, signal_domain=args.signal_domain)
     spec.runtime.update(
         dynamic_aperture=bool(args.dynamic_aperture),
         f_number=float(args.f_number),

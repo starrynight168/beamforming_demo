@@ -12,7 +12,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from algorithms import mv
 from algorithms.common import (
-    envelope_to_db,
+    beamforming_depth_grid,
+    beamformed_image_db,
     nonnegative_float,
     nonnegative_int,
     generalized_coherence_factor,
@@ -107,6 +108,7 @@ def main():
         h5_path,
         args.h5_sample_idx,
         args.select_angles,
+        signal_domain=args.signal_domain,
     )
     sample = input_data.sample
     c, fc, fs, pitch, n_elem = (
@@ -117,6 +119,7 @@ def main():
         sample.n_elem,
     )
     angles_all, z_grid, x_grid = sample.angles, sample.z_grid, sample.x_grid
+    compute_z = beamforming_depth_grid(z_grid, c, fs, args.signal_domain)
     selected_angles = input_data.selected_angles
     beamforming_mode = {"rx": "1D_RX", "tx": "1D_TX", "joint": "2D_JTR"}[args.mv_axis]
     tx_subarray_ratio = (
@@ -162,6 +165,8 @@ def main():
         selected_angles=selected_angles,
         has_gt=has_gt,
         parameters=[
+            ("Signal domain", args.signal_domain),
+            ("Computed depth rows", len(compute_z)),
             ("F-Number", args.f_number),
             ("Aperture", "Dynamic" if args.dynamic_aperture else "Fixed Full"),
             ("FBSS", "Enabled" if args.fbss else "Disabled"),
@@ -183,7 +188,7 @@ def main():
 
     # 初始化 GCF-MV + FBSS 波束合成器
     bf = RowDynamicMVBeamformerIQ(
-        z_grid,
+        compute_z,
         x_grid,
         n_elem,
         pitch,
@@ -210,7 +215,7 @@ def main():
         fs,
         device,
     )
-    mv_db = envelope_to_db(i_out, q_out, z_grid, fc, args.tgc, args.tgc_alpha)
+    mv_db = beamformed_image_db(i_out, q_out, compute_z, z_grid, fc, args.tgc, args.tgc_alpha, args.signal_domain)
     mv_db = validate_db_output(mv_db, (height, width), METHOD_NAME)
 
     # ========== 生成图标题(所有参数简写) ==========

@@ -17,6 +17,7 @@ algorithm_labels:
   fdmas: F-DMAS
 
 params:
+  signal_domain: iq
   select_angles: "1"
   f_number: 1.5
   dr: 60

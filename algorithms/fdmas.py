@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy.signal import filtfilt, firwin
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -15,7 +16,8 @@ from algorithms.common import (
     add_io_arguments,
     aperture_window_1d,
     dynamic_aperture_channel_count,
-    envelope_to_db,
+    beamforming_depth_grid,
+    beamformed_image_db,
     interpolate_channel_samples,
     prepare_beamforming_input,
     print_physical_summary,
@@ -29,7 +31,7 @@ from algorithms.common import (
 
 # ================= 命令行参数配置 =================
 parser = argparse.ArgumentParser(
-    description="F-DMAS Beamforming - Baseband IQ Data (H5)",
+    description="F-DMAS beamforming for RF, analytic RF, and IQ data (H5)",
 )
 add_common_arguments(parser)
 add_io_arguments(parser, save_gt_help="保存GT对比图")
@@ -42,22 +44,40 @@ parser.add_argument(
 args = None
 
 METHOD_NAME = "fdmas"
+RF_FILTER_TAPS = 33
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class FDMASBeamformerIQ:
-    """Delay-multiply-and-sum beamformer for channel IQ."""
+    """Filtered delay-multiply-and-sum beamformer for channel signals."""
 
     def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad, options=None):
         """Initialize the instance."""
         self.options = options if options is not None else (args if args is not None else parser.parse_args([]))
+        self.signal_domain = self.options.signal_domain
         self.height, self.width, self.N = len(z_grid), len(x_grid), n_elem
         self.x_grid = torch.from_numpy(x_grid).float().to(device)
         self.z_grid = torch.from_numpy(z_grid).float().to(device)
         self.pitch, self.fc, self.fs = pitch, float(fc), fs
         self.sc = fs / c
+        self.rf_filter = None
+        self.rf_filter_padlen = None
+        if self.signal_domain == "rf":
+            if fs <= 5.0 * self.fc:
+                raise ValueError(
+                    f"RF 输入采样率必须高于 2.5fc 谐波带的 Nyquist 下限 5fc={5.0 * self.fc:.6g} Hz，"
+                    f"当前 fs={fs:.6g} Hz"
+                )
+            depth_fs = c / (2.0 * float(np.diff(z_grid).mean()))
+            self.rf_filter = design_rf_fdmas_filter(self.fc, depth_fs)
+            self.rf_filter_padlen = 3 * (RF_FILTER_TAPS - 1)
+            if self.height <= self.rf_filter_padlen:
+                raise ValueError(
+                    f"RF F-DMAS 带通滤波至少需要 {self.rf_filter_padlen + 1} 个密深度行，"
+                    f"当前只有 {self.height} 行"
+                )
 
         self.ep = torch.linspace(
             -(n_elem - 1) / 2 * pitch,
@@ -111,9 +131,23 @@ class FDMASBeamformerIQ:
             pair_norm > 0, pair_sum / pair_norm.clamp_min(tiny), torch.zeros_like(pair_sum),
         )
 
+    def _filter_rf_output(self, values):
+        pad = self.rf_filter_padlen
+        padded = np.pad(values, ((pad, pad), (0, 0)), mode="reflect")
+        filtered = filtfilt(
+            self.rf_filter,
+            [1.0],
+            padded,
+            axis=0,
+            padlen=pad,
+        )
+        return filtered[pad:-pad].astype(np.float32)
+
     def __call__(self, i_data, q_data, selected_angles, t_starts, fs):
         """Run the callable operation."""
         validate_beamformer_input(i_data, q_data, selected_angles, fs, self.fs, self.N)
+        if self.signal_domain == "rf" and np.any(q_data != 0):
+            raise ValueError("RF F-DMAS requires real RF input with a zero imaginary component")
         n_a = i_data.shape[0]
         n_s = i_data.shape[1]
         max_sample = float(n_s - 1)
@@ -146,7 +180,7 @@ class FDMASBeamformerIQ:
                 device=device,
             )
 
-            phi_rx = 2.0 * np.pi * self.fc * (drs_b / fs)
+            phi_rx = 2.0 * np.pi * self.fc * (drs_b / fs) if self.signal_domain == "iq" else torch.zeros_like(drs_b)
             cos_rx = torch.cos(phi_rx)
             sin_rx = torch.sin(phi_rx)
 
@@ -172,7 +206,7 @@ class FDMASBeamformerIQ:
                 q_rx = i_center * sin_rx + q_center * cos_rx
                 pair_sum = self._complex_fdmas(i_rx, q_rx, valid_w)
 
-                phi_tx = 2.0 * np.pi * self.fc * (tx_samples / fs)
+                phi_tx = 2.0 * np.pi * self.fc * (tx_samples / fs) if self.signal_domain == "iq" else torch.zeros_like(tx_samples)
                 cos_tx = torch.cos(2.0 * phi_tx)
                 sin_tx = torch.sin(2.0 * phi_tx)
                 block_sum.add_(
@@ -184,7 +218,33 @@ class FDMASBeamformerIQ:
 
             beam_out[z0:z1] = block_sum / n_a
 
-        return beam_out.real.cpu().numpy(), beam_out.imag.cpu().numpy()
+        real = beam_out.real.cpu().numpy()
+        if self.signal_domain == "rf":
+            return self._filter_rf_output(real), np.zeros_like(real)
+        return real, beam_out.imag.cpu().numpy()
+
+
+def design_rf_fdmas_filter(fc, sample_rate):
+    passband = (1.5 * fc, 2.5 * fc)
+    if passband[1] >= sample_rate / 2:
+        raise ValueError(
+            f"RF F-DMAS 需要足够采样率通过 2f0 谐波带："
+            f"2.5fc={passband[1]:.6g} Hz 必须低于 Nyquist={sample_rate / 2:.6g} Hz"
+        )
+    return firwin(RF_FILTER_TAPS, passband, pass_zero=False, fs=sample_rate, window=("kaiser", 8.6))
+
+
+def fdmas_depth_grid(z_grid, c, fc, fs, signal_domain):
+    if signal_domain != "rf":
+        return z_grid
+    # Leave transition room above the 2.5fc filter edge.
+    filter_sample_rate = 6.0 * fc
+    dense_sample_rate = max(fs, np.nextafter(filter_sample_rate, np.inf))
+    # Keep the deep image boundary away from filter edges; the shallow edge is reflected before filtering.
+    pad_rows = 2 * 3 * (RF_FILTER_TAPS - 1)
+    end_margin = pad_rows * c / (2.0 * dense_sample_rate)
+    bounds = np.array([z_grid[0], z_grid[-1] + end_margin], dtype=np.float64)
+    return beamforming_depth_grid(bounds, c, dense_sample_rate, signal_domain)
 
 
 # ================= 主程序 =================
@@ -199,6 +259,7 @@ def main():
         h5_path,
         args.h5_sample_idx,
         args.select_angles,
+        signal_domain=args.signal_domain,
     )
     sample = input_data.sample
     c, fc, fs, pitch, n_elem = (
@@ -209,6 +270,7 @@ def main():
         sample.n_elem,
     )
     angles_all, z_grid, x_grid = sample.angles, sample.z_grid, sample.x_grid
+    compute_z = fdmas_depth_grid(z_grid, c, fc, fs, args.signal_domain)
     selected_angles = input_data.selected_angles
     i_sub, q_sub, t0_sub = input_data.i_data, input_data.q_data, input_data.t0
     has_gt = sample.has_gt
@@ -238,6 +300,9 @@ def main():
         selected_angles=selected_angles,
         has_gt=has_gt,
         parameters=[
+            ("Signal domain", args.signal_domain),
+            ("Computed depth rows", len(compute_z)),
+            *([("RF output depth sampling", f"{c / (2.0 * np.diff(compute_z).mean()) / 1e6:.3f} MHz")] if args.signal_domain == "rf" else []),
             ("F-Number", args.f_number),
             ("Aperture", "Dynamic" if args.dynamic_aperture else "Fixed Full"),
             ("Window", args.window.upper()),
@@ -249,7 +314,7 @@ def main():
     )
 
     beamformer = FDMASBeamformerIQ(
-        z_grid,
+        compute_z,
         x_grid,
         n_elem,
         pitch,
@@ -270,7 +335,7 @@ def main():
         fs,
         device,
     )
-    fdmas_db = envelope_to_db(i_out, q_out, z_grid, fc, args.tgc, args.tgc_alpha)
+    fdmas_db = beamformed_image_db(i_out, q_out, compute_z, z_grid, fc, args.tgc, args.tgc_alpha, args.signal_domain)
     fdmas_db = validate_db_output(fdmas_db, (height, width), METHOD_NAME)
 
     # ========== 生成图标题(所有参数简写) ==========
@@ -300,6 +365,7 @@ def main():
         METHOD_NAME,
         title_params,
         dt,
+        extra_params={"beamforming_depth_rows": len(compute_z)},
     )
 
     print(f"  GPU Time: {dt:.2f}s | Saved -> {METHOD_NAME}")
