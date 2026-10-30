@@ -75,8 +75,8 @@ algorithm_params:
     lmax_ratio: 0.5
     min_subarray_len: 2
     delta_max: 1.0
-    gamma: 1.0
-    clip_percentile: 100.0
+    gamma: 0.5
+    clip_percentile: 90
     depth_smooth_rows: 1
 
   fdmas: {}
