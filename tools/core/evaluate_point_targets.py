@@ -21,7 +21,9 @@ if str(ROOT) not in sys.path:
 import algorithms.mv as mv
 try:
     from data.scripts.simulate_point_targets import load_reference, simulate_rf
-except ModuleNotFoundError:
+except ModuleNotFoundError as exc:
+    if exc.name not in {"data.scripts", "data.scripts.simulate_point_targets"}:
+        raise
     load_reference = None
     simulate_rf = None
 from tools.core.compare_rf_iq import rf_mv, rf_mv_signed_and_envelope, stft_frequency_mv
@@ -211,6 +213,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if load_reference is None or simulate_rf is None:
+        raise ModuleNotFoundError(
+            "Point-target evaluation requires data.scripts.simulate_point_targets"
+        )
     h5_path = args.h5_path if args.h5_path.is_absolute() else ROOT / args.h5_path
     output_dir = args.output_dir if args.output_dir.is_absolute() else ROOT / args.output_dir
     geom, config = load_reference(h5_path)

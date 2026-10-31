@@ -49,7 +49,10 @@ from tools.run_ablation_cn import (
     validate_values,
 )
 from tools.core.compare_rf_iq import main as compare_rf_iq_main
-from tools.core.evaluate_point_targets import parse_args as parse_point_target_args
+from tools.core.evaluate_point_targets import (
+    main as point_target_main,
+    parse_args as parse_point_target_args,
+)
 from tools.run_wizard_cn import (
     ALGORITHMS,
     ask_algorithm_param,
@@ -566,6 +569,18 @@ class AlgorithmAuditTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as error:
                     parse_point_target_args()
                 self.assertEqual(error.exception.code, 2)
+
+    def test_point_target_cli_reports_missing_optional_simulator(self):
+        with (
+            patch("tools.core.evaluate_point_targets.load_reference", None),
+            patch("tools.core.evaluate_point_targets.simulate_rf", None),
+            patch.object(sys, "argv", ["evaluate_point_targets.py"]),
+            self.assertRaisesRegex(
+                ModuleNotFoundError,
+                "requires data.scripts.simulate_point_targets",
+            ),
+        ):
+            point_target_main()
 
     def test_saved_cache_signature_cannot_be_overridden_by_extra_params(self):
         with tempfile.TemporaryDirectory() as temp_dir:

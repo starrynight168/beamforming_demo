@@ -15,7 +15,7 @@
 - **F-DMAS (Filtered Delay Multiply and Sum)**: 滤波延迟相乘相加法，通过孔径内对信号进行两两相乘处理，有效降低主瓣宽度并抑制旁瓣。
 - **CMSAW (Covariance Matrix-based Statistical Adaptive Weighting)**: 根据修改协方差矩阵的统计量计算权重，并作用于 MV 输出。
 
-各算法的介绍、IQ 数据定义与论文差异见 [算法 README](algorithms/README.md)。
+各算法概览见本节列表；IQ 数据定义与论文差异以各算法实现及对应测试为准。
 
 ---
 
@@ -184,7 +184,7 @@ python tools/run_ablation_cn.py
 
 YAML 场景不再配置 `allow_evaluation`；`run_one.py --no_evaluate` 可主动关闭评估，旧开关字段会明确报错。评估入口不读取根目录 YAML。H5 相对模体路径以本项目 `data/PICMUS` 为基准；显式 CLI 参数可补充缺失的类型或模体路径，但类型不得与 H5 元数据冲突，模体文件仍须通过官方定义校验。
 
-单独运行评估时，`--methods auto` 从同目录 `run_params.json` 读取当前算法及标签，或模型及基线记录。Python 审查范围、修复和验证记录见 [审查记录](docs/python_audit_2026-10-11.md)。
+单独运行评估时，`--methods auto` 从同目录 `run_params.json` 读取当前算法及标签，或模型及基线记录。自动化回归测试位于 `tests/` 和 `evaluation/tests/`。
 
 本工程内置的评估计算核心（`evaluation/evaluate.py`）在四个 controlled phantom 场景中对齐 PICMUS 挑战赛官方 MATLAB 算法语义：
 - **对比度 (Contrast)**: 基于官方同心环形 ROI 划定，并且方差计算使用样本方差（$N-1$ 自由度），保障与 MATLAB 的 `var()` 结果完全一致；
