@@ -535,8 +535,10 @@ def build_embedded_config(items, output_path, row_block):
     has_generated_gt = any(
         item["meta"]["gt"] == "generated:multi_angle_das" for item in items
     )
+    ground_truth_algorithm = "reference"
     ground_truth = {
-        "dataset": "/all_envdb_norm",
+        "algorithm": ground_truth_algorithm,
+        "signal_domain": "iq",
         "reference_sampling_frequency_hz": float(items[0]["fs"]),
         "output_domain": "envelope_db_mapped_to_unit_interval",
         "dynamic_range_db": DYNAMIC_RANGE,
@@ -647,7 +649,15 @@ def build_embedded_config(items, output_path, row_block):
                 "source_sampling_frequency_hz": float(items[0]["fs"]),
                 "packed_sampling_frequency_hz": float(items[0]["fs"]),
             },
+            "storage": {
+                "inputs": {"iq": {"dtype": "float16", "normalize": True}},
+            },
             "ground_truth": ground_truth,
+            "training_targets": {
+                "domain_targets": {
+                    "iq": {ground_truth_algorithm: {"db": "/all_envdb_norm"}},
+                },
+            },
         },
         "source_samples": [
             {

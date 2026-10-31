@@ -327,10 +327,56 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
         problems.append("config_yaml.generation.input_iq 必须是非空字典")
     if not ground_truth:
         problems.append("config_yaml.generation.ground_truth 必须是非空字典")
-    if ground_truth.get("dataset") != "/all_envdb_norm":
-        problems.append(
-            "config_yaml.generation.ground_truth.dataset 应指向 /all_envdb_norm",
-        )
+    if ground_truth.get("algorithm") != "reference":
+        problems.append("ground_truth.algorithm 应为 reference")
+    if ground_truth.get("signal_domain") != "iq":
+        problems.append("ground_truth.signal_domain 应为 iq")
+    targets = _config_mapping(
+        generation,
+        "training_targets",
+        "config_yaml.generation.training_targets",
+        problems,
+    )
+    domain_targets = _config_mapping(
+        targets,
+        "domain_targets",
+        "config_yaml.generation.training_targets.domain_targets",
+        problems,
+    )
+    iq_targets = _config_mapping(
+        domain_targets,
+        "iq",
+        "config_yaml.generation.training_targets.domain_targets.iq",
+        problems,
+    )
+    reference_target = _config_mapping(
+        iq_targets,
+        "reference",
+        "config_yaml.generation.training_targets.domain_targets.iq.reference",
+        problems,
+    )
+    if reference_target.get("db") != "/all_envdb_norm":
+        problems.append("ground_truth reference target 应指向 /all_envdb_norm")
+    storage = _config_mapping(
+        generation,
+        "storage",
+        "config_yaml.generation.storage",
+        problems,
+    )
+    stored_inputs = _config_mapping(
+        storage,
+        "inputs",
+        "config_yaml.generation.storage.inputs",
+        problems,
+    )
+    stored_iq = _config_mapping(
+        stored_inputs,
+        "iq",
+        "config_yaml.generation.storage.inputs.iq",
+        problems,
+    )
+    if stored_iq.get("dtype") != "float16" or stored_iq.get("normalize") is not True:
+        problems.append("generation.storage.inputs.iq 应声明 float16 且 normalize=true")
     reference_fs = ground_truth.get("reference_sampling_frequency_hz")
     if (
         type(reference_fs) not in (int, float)

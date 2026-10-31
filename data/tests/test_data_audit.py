@@ -228,10 +228,29 @@ class DataPipelineTests(unittest.TestCase):
                 self.assertEqual(status, "通过", problems)
                 self.assertEqual(handle["all_multi_I"].shape, (2, 2, 128, 4))
                 config = yaml.safe_load(handle["config_yaml"][()])
+                generation = config["generation"]
+                self.assertEqual(generation["ground_truth"]["algorithm"], "reference")
+                self.assertEqual(generation["ground_truth"]["signal_domain"], "iq")
+                self.assertEqual(
+                    generation["training_targets"]["domain_targets"]["iq"]["reference"]["db"],
+                    "/all_envdb_norm",
+                )
                 self.assertIn(
                     "generated_multi_angle_das",
-                    config["generation"]["ground_truth"],
+                    generation["ground_truth"],
                 )
+
+            from algorithms.common import load_from_h5
+            from evaluation.evaluate import read_sample_meta
+            from run_one import scene_has_gt
+
+            sample = load_from_h5(output, 0)
+            self.assertTrue(sample.has_gt)
+            with h5py.File(output, "r") as handle:
+                expected_gt = handle["all_envdb_norm"][0]
+            np.testing.assert_allclose(sample.gt_data, expected_gt)
+            self.assertTrue(read_sample_meta(output, 0)["has_gt"])
+            self.assertTrue(scene_has_gt({"h5_path": str(output), "sample_idx": 0}))
 
             with h5py.File(output, "r+") as handle:
                 for key in (
