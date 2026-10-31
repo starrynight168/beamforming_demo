@@ -256,6 +256,8 @@ class WizardFlowTests(unittest.TestCase):
             with h5py.File(path, "w") as handle:
                 handle["all_multi_I"] = np.zeros((1, 3, 8, 4), dtype=np.float32)
                 handle["all_multi_Q"] = np.zeros((1, 3, 8, 4), dtype=np.float32)
+                handle["acquisition_id"] = ["sample"]
+                handle["body_region"] = ["simulation"]
                 handle["valid_time_samples"] = np.array([8], dtype=np.int32)
                 handle["time_start_vector"] = np.zeros((1, 3), dtype=np.float32)
                 handle["angles"] = np.array([-0.2, 0.0, 0.2], dtype=np.float32)
@@ -272,6 +274,16 @@ class WizardFlowTests(unittest.TestCase):
                 handle["all_envdb_norm"] = np.zeros((1, 1, 2, 5), dtype=np.float32)
                 handle["config_yaml"] = yaml.safe_dump(
                     {
+                        "generation": {
+                            "storage": {
+                                "inputs": {"iq": {"dtype": "float32", "normalize": False}},
+                                "outputs": {"dtype": "float32"},
+                            },
+                            "ground_truth": {"algorithm": "mv", "signal_domain": "iq"},
+                            "training_targets": {
+                                "domain_targets": {"iq": {"mv": {"db": "/all_envdb_norm"}}}
+                            },
+                        },
                         "source_samples": [
                             {"acquisition_id": "sample", "phantom_mode": "in_vitro"}
                         ]

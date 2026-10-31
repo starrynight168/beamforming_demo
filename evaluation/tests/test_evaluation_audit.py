@@ -55,6 +55,10 @@ def write_picmus_sample(
             handle["all_envdb_norm"] = np.zeros((1, 1, 201, 201))
         handle["config_yaml"] = yaml.safe_dump(
             {
+                "generation": {
+                    "ground_truth": {"algorithm": "mv", "signal_domain": "iq", "dynamic_range_db": 60.0},
+                    "training_targets": {"domain_targets": {"iq": {"mv": {"db": "/all_envdb_norm"}}}},
+                },
                 "source_samples": [
                     {
                         "id": "renamed_sample",
@@ -496,7 +500,12 @@ class EvaluationInputTests(unittest.TestCase):
                 handle.create_dataset("all_multi_I", data=np.zeros((1, 1, 1, 1)))
                 handle.create_dataset(
                     "config_yaml",
-                    data=b"dataset: []\nsource_samples:\n  - id: sample\n",
+                    data=yaml.safe_dump({
+                        "dataset": [],
+                        "generation": {"ground_truth": {"signal_domain": "iq", "algorithm": "mv"},
+                                       "training_targets": {"domain_targets": {"iq": {"mv": {}}}}},
+                        "source_samples": [{"id": "sample"}],
+                    }),
                 )
 
             with self.assertRaisesRegex(ValueError, "dataset must be a mapping"):
@@ -516,7 +525,13 @@ class EvaluationInputTests(unittest.TestCase):
                 handle.create_dataset("all_envdb_norm", data=np.zeros((1, 1, 2, 2)))
                 handle.create_dataset(
                     "config_yaml",
-                    data=yaml.safe_dump({"source_samples": [sample_meta, sample_meta]}),
+                    data=yaml.safe_dump({
+                        "generation": {
+                            "ground_truth": {"signal_domain": "iq", "algorithm": "mv"},
+                            "training_targets": {"domain_targets": {"iq": {"mv": {"db": "/all_envdb_norm"}}}},
+                        },
+                        "source_samples": [sample_meta, sample_meta],
+                    }),
                 )
             with self.assertRaisesRegex(ValueError, "样本数必须与 all_multi_I 一致"):
                 read_sample_meta(path, sample_idx=1)
@@ -530,7 +545,7 @@ class EvaluationInputTests(unittest.TestCase):
                                    "acquisition_id_dataset": "/acquisition_id",
                                    "phantom_mode": "in_vivo", "phantom_source": "in_vivo"},
                 "generation": {
-                    "ground_truth": {"algorithm": "mv", "signal_domain": "rf", "dataset": "/mv_rf_db"},
+                    "ground_truth": {"algorithm": "mv", "signal_domain": "rf"},
                     "training_targets": {"domain_targets": {"rf": {"mv": {"db": "/mv_rf_db"}}}},
                 },
             }
@@ -543,6 +558,10 @@ class EvaluationInputTests(unittest.TestCase):
             self.assertEqual(meta["sample_name"], "rf_sample")
             self.assertTrue(meta["has_gt"])
             self.assertIsNone(load_picmus_context(path, sample_idx=0))
+            config["source_samples"]["encoding"] = "root_labels"
+            with h5py.File(path, "r+") as handle:
+                handle["config_yaml"][()] = yaml.safe_dump(config)
+            self.assertEqual(read_sample_meta(path, sample_idx=0)["sample_name"], "rf_sample")
 
     def test_picmus_config_rejects_non_object_evaluation_settings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

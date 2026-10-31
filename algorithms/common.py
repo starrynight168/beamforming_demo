@@ -20,7 +20,7 @@ from matplotlib import patches
 from matplotlib.gridspec import GridSpec
 from algorithms.shared_core.images import require_current_rf_envelope_method, to_db, to_envelope
 from algorithms.shared_core.signals import rf_to_analytic, rf_to_iq
-from algorithms.shared_core.data import input_is_normalized, load_input, load_target
+from algorithms.shared_core.data import load_input, load_input_from_h5, load_target
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WINDOW_CHOICES = ["rect", "tukey", "hann", "hamming", "blackman", "kaiser"]
@@ -154,7 +154,7 @@ def add_common_arguments(
 ):
     params = load_common_params() if params is None else params
     parser.add_argument("--signal_domain", choices=("rf", "analytic_rf", "iq"),
-                        default=params.get("signal_domain", "iq"), help="输入和成像信号域；IQ 缓存缺失时可从 RF 派生")
+                        default=params.get("signal_domain", "iq"), help="输入和成像信号域；优先读取同域缓存，缺失时从 RF 派生")
     parser.add_argument(
         "--select_angles",
         type=str,
@@ -243,13 +243,10 @@ def ground_truth_db(hf, sample_idx, signal_domain=None):
     if not np.isfinite(dynamic_range) or dynamic_range <= 0:
         raise ValueError("ground_truth.dynamic_range_db 必须是有限正数")
     algorithm = definition.get("algorithm")
-    primary_domain = definition.get("signal_domain", "iq").replace("baseband_iq", "iq")
-    domain = primary_domain if signal_domain is None else signal_domain
+    domain = definition["signal_domain"] if signal_domain is None else signal_domain
     targets = config["generation"].get("training_targets", {})
     entry = targets.get("domain_targets", {}).get(domain, {}).get(algorithm, {})
-    image_path = entry.get("db") or (definition.get("dataset") if domain == primary_domain else None)
-    if image_path is None and domain == "iq" and "domain_targets" not in targets and "all_envdb_norm" in hf:
-        image_path = "all_envdb_norm"
+    image_path = entry.get("db")
     if domain == "rf" and image_path is not None:
         require_current_rf_envelope_method(targets)
     if image_path is not None:
@@ -259,8 +256,6 @@ def ground_truth_db(hf, sample_idx, signal_domain=None):
         db = gt * dynamic_range - dynamic_range
         return db[None] if db.ndim == 2 else db
     envelope_path = entry.get("envelope")
-    if envelope_path is None and domain == "rf":
-        envelope_path = targets.get("rf_envelope_targets", {}).get(algorithm)
     if domain == "rf" and envelope_path is not None:
         require_current_rf_envelope_method(targets)
     if envelope_path is not None:
@@ -269,12 +264,7 @@ def ground_truth_db(hf, sample_idx, signal_domain=None):
         raise KeyError("未保存 RF 包络；请选择 outputs.rf 中的 envelope，不能直接对有符号 RF 取绝对值")
     else:
         pair = entry.get("signal")
-        if pair is None:
-            section = "complex_iq_targets" if domain == "iq" else "analytic_rf_targets"
-            saved = targets.get(section, {}).get(algorithm, {})
-            pair = {"real": saved.get("i" if domain == "iq" else "real"),
-                    "imag": saved.get("q" if domain == "iq" else "imag")}
-        if not pair.get("real") or not pair.get("imag"):
+        if not isinstance(pair, dict) or not pair.get("real") or not pair.get("imag"):
             raise KeyError(f"未保存 {domain}/{algorithm} 的显示图、包络或复数标签")
         envelope = to_envelope(hf[pair["real"]][sample_idx, 0], hf[pair["imag"]][sample_idx, 0], domain=domain)
     gain = None
@@ -284,57 +274,15 @@ def ground_truth_db(hf, sample_idx, signal_domain=None):
     return to_db(envelope, dr=dynamic_range, gain_db=gain)[None]
 
 
-def _algorithm_channels(hf, h5_path, sample_idx, signal_domain):
-    if signal_domain != "iq" or "all_multi_I" not in hf:
-        values = load_input(h5_path, sample_idx, domain=signal_domain)
-        return (values["real"], values["imag"], values["angles"].astype(np.float32),
-                values["t0"].astype(np.float32), values["fs"])
-    i_all = hf["all_multi_I"]
-    q_all = hf["all_multi_Q"]
-    if i_all.shape != q_all.shape or i_all.ndim != 4:
-        raise ValueError("all_multi_I/all_multi_Q 必须是形状一致的 [N,A,T,C] 数组")
-    if (
-        min(i_all.shape[0], i_all.shape[1], i_all.shape[3]) < 1
-        or i_all.shape[2] < 2
-    ):
-        raise ValueError("IQ 的样本、角度、通道维必须非空，时间维至少为 2")
-    if not 0 <= sample_idx < i_all.shape[0]:
-        raise IndexError(
-            f"h5_sample_idx={sample_idx} 超出 [0,{i_all.shape[0] - 1}]",
-        )
-
-    i_data = i_all[sample_idx].astype(np.float32)
-    q_data = q_all[sample_idx].astype(np.float32)
-    if not input_is_normalized(hf, "iq"):
-        scale = float(hf["all_scale_ref"][sample_idx])
-        if not np.isfinite(scale) or scale <= 0:
-            raise ValueError("all_scale_ref 必须是有限正数")
-        i_data /= scale
-        q_data /= scale
-    angles = hf["angles"][:].astype(np.float32)
-    t0_vec = hf["time_start_vector"][sample_idx].astype(np.float32)
-    if angles.ndim != 1 or len(angles) != i_data.shape[0]:
-        raise ValueError("angles 必须与 IQ 的角度维度一致")
-    if t0_vec.ndim != 1 or len(t0_vec) != i_data.shape[0]:
-        raise ValueError("time_start_vector 必须与 IQ 的角度维度一致")
-
-    valid_raw = hf["valid_time_samples"][sample_idx]
-    valid_time = int(valid_raw)
-    if float(valid_raw) != valid_time or not 2 <= valid_time <= i_data.shape[1]:
-        raise ValueError(
-            f"valid_time_samples[{sample_idx}]={valid_raw} 不是 [2,{i_data.shape[1]}] 内的整数",
-        )
-    i_data = i_data[:, :valid_time, :]
-    q_data = q_data[:, :valid_time, :]
-    if not np.all(np.isfinite(i_data)) or not np.all(np.isfinite(q_data)):
-        raise ValueError("所选样本的 IQ 数据包含 NaN/Inf")
-
-    return i_data, q_data, angles, t0_vec, float(hf["fs"][()])
+def _algorithm_channels(hf, sample_idx, signal_domain):
+    values = load_input_from_h5(hf, sample_idx, domain=signal_domain)
+    return (values["real"], values["imag"], values["angles"].astype(np.float32),
+            values["t0"].astype(np.float32), values["fs"])
 
 
 def load_from_h5(h5_path, sample_idx=0, signal_domain="iq"):
     with h5py.File(h5_path, "r") as hf:
-        i_data, q_data, angles, t0_vec, fs = _algorithm_channels(hf, h5_path, sample_idx, signal_domain)
+        i_data, q_data, angles, t0_vec, fs = _algorithm_channels(hf, sample_idx, signal_domain)
         c = float(hf["c"][()])
         fc = float(hf["fc"][()])
         pitch = float(hf["pitch"][()])
@@ -344,7 +292,7 @@ def load_from_h5(h5_path, sample_idx=0, signal_domain="iq"):
         n_elem = int(hf["num_channels"][()])
         if n_elem != i_data.shape[2]:
             raise ValueError(
-                f"num_channels={n_elem} 与 IQ 通道数={i_data.shape[2]} 不一致",
+                f"num_channels={n_elem} 与 {signal_domain} 通道数={i_data.shape[2]} 不一致",
             )
 
         z_grid = hf["z_grid"][:].astype(np.float32)
@@ -359,30 +307,19 @@ def load_from_h5(h5_path, sample_idx=0, signal_domain="iq"):
 
         gt_data = None
         has_gt = False
-        if "config_yaml" in hf:
-            generation = yaml.safe_load(hf["config_yaml"][()])["generation"]
-            definition = generation.get("ground_truth", {})
-            targets = generation.get("training_targets", {})
-            domain = signal_domain
-            algorithm = definition.get("algorithm")
-            entry = targets.get("domain_targets", {}).get(domain, {}).get(algorithm, {})
-            primary_domain = definition.get("signal_domain", "iq").replace("baseband_iq", "iq")
-            image_path = entry.get("db") or (definition.get("dataset") if domain == primary_domain else None)
-            if image_path is None and domain == "iq" and "domain_targets" not in targets and "all_envdb_norm" in hf:
-                image_path = "all_envdb_norm"
-            if image_path is not None and (image_path not in hf or len(hf[image_path]) <= sample_idx):
-                raise ValueError("GT 字段缺失或样本数少于 IQ 样本数")
-            legacy_complex = targets.get("complex_iq_targets" if domain == "iq" else "analytic_rf_targets", {})
-            has_gt = bool(image_path or entry.get("envelope") or (domain != "rf" and (entry.get("signal") or algorithm in legacy_complex)))
-            has_gt |= domain == "rf" and algorithm in targets.get("rf_envelope_targets", {})
-            if has_gt:
-                dr = float(definition["dynamic_range_db"])
-                gt_data = (ground_truth_db(hf, sample_idx, signal_domain=signal_domain) + dr) / dr
-        elif signal_domain == "iq" and "all_envdb_norm" in hf:
-            if hf["all_envdb_norm"].shape[0] <= sample_idx:
-                raise ValueError("GT 样本数少于 IQ 样本数")
-            has_gt = True
-            gt_data = hf["all_envdb_norm"][sample_idx].astype(np.float32)
+        generation = yaml.safe_load(hf["config_yaml"][()])["generation"]
+        definition = generation["ground_truth"]
+        targets = generation["training_targets"]
+        algorithm = definition.get("algorithm")
+        entry = targets.get("domain_targets", {}).get(signal_domain, {}).get(algorithm, {}) if algorithm else {}
+        image_path = entry.get("db")
+        if image_path is not None and (image_path not in hf or len(hf[image_path]) <= sample_idx):
+            raise ValueError("GT 字段缺失或样本数少于输入样本数")
+        has_gt = bool(image_path or entry.get("envelope") or
+                      (signal_domain != "rf" and entry.get("signal")))
+        if has_gt:
+            dynamic_range = float(definition["dynamic_range_db"])
+            gt_data = (ground_truth_db(hf, sample_idx, signal_domain=signal_domain) + dynamic_range) / dynamic_range
         if has_gt:
             expected_gt_shape = (1, z_grid.size, x_grid.size)
             if gt_data.shape not in (expected_gt_shape, expected_gt_shape[1:]):
@@ -536,7 +473,7 @@ def save_algorithm_result(
     sample = input_data.sample
     if sample.has_gt and args.save_gt:
         with h5py.File(resolve_project_path(args.h5_path, PROJECT_ROOT), "r") as hf:
-            gt_db = ground_truth_db(hf, args.h5_sample_idx, signal_domain=getattr(args, "signal_domain", "iq"))
+            gt_db = ground_truth_db(hf, args.h5_sample_idx, signal_domain=args.signal_domain)
         save_comparison_figure(
             image_db,
             gt_db,

@@ -507,6 +507,7 @@ class BeamformerRegressionTests(unittest.TestCase):
             with h5py.File(source, "w") as handle:
                 for key, value in {
                     "all_multi_I": iq.real[None], "all_multi_Q": iq.imag[None],
+                    "all_scale_ref": [1.0],
                     "angles": angles, "time_start_vector": np.zeros((1, 3)),
                     "valid_time_samples": [160], "c": c, "fc": fc, "fs": fs,
                     "pitch": pitch, "num_channels": 8,

@@ -115,7 +115,7 @@ def delayed_iq(sample, angle_idx, interp):
     )
 
     phase_rx = (2.0 * torch.pi * sample["fc"] * (receive / sample["c"])
-                if sample.get("signal_domain", "iq") == "iq" else torch.zeros_like(receive))
+                if sample["signal_domain"] == "iq" else torch.zeros_like(receive))
     cos_rx = torch.cos(phase_rx)[None]
     sin_rx = torch.sin(phase_rx)[None]
     aligned_i = i * cos_rx - q * sin_rx

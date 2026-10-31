@@ -73,7 +73,7 @@ class AlgorithmAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "params.window.*不受支持"):
             configured_choice_index(choices, "old_window", "params.window")
         with self.assertRaisesRegex(ValueError, "das.aperture_mode.*不受支持"):
-            ask_algorithm_param("das", "aperture_mode", "legacy")
+            ask_algorithm_param("das", "aperture_mode", "unsupported")
         with self.assertRaisesRegex(ValueError, "config.algorithms"):
             ask_multi_choice("algorithms", list(ALGORITHMS.items()), ["das", "unknown"])
         with (
@@ -113,8 +113,35 @@ class AlgorithmAuditTests(unittest.TestCase):
             with h5py.File(h5_path, "w") as handle:
                 handle.create_dataset("all_multi_I", data=np.zeros((2, 1, 1, 1)))
                 handle.create_dataset("all_envdb_norm", data=np.zeros((1, 1, 2, 2)))
-            with self.assertRaisesRegex(ValueError, "样本数必须与 all_multi_I 一致"):
+                handle.create_dataset("config_yaml", data=yaml.safe_dump({
+                    "generation": {
+                        "ground_truth": {"algorithm": "mv", "signal_domain": "iq"},
+                        "training_targets": {
+                            "domain_targets": {"iq": {"mv": {"db": "/all_envdb_norm"}}}
+                        },
+                    }
+                }))
+            with self.assertRaisesRegex(ValueError, "GT 样本索引超出范围"):
                 scene_has_gt({"h5_path": str(h5_path), "sample_idx": 1})
+
+    def test_scene_detects_complex_teacher_without_display_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            h5_path = Path(directory) / "input.h5"
+            config = {
+                "generation": {
+                    "ground_truth": {"algorithm": "mv", "signal_domain": "iq"},
+                    "training_targets": {
+                        "domain_targets": {
+                            "iq": {"mv": {"signal": {"real": "/mv_i", "imag": "/mv_q"}}}
+                        }
+                    },
+                }
+            }
+            with h5py.File(h5_path, "w") as handle:
+                handle.create_dataset("config_yaml", data=yaml.safe_dump(config))
+                handle.create_dataset("mv_i", data=np.zeros((1, 1, 2, 2)))
+                handle.create_dataset("mv_q", data=np.ones((1, 1, 2, 2)))
+            self.assertTrue(scene_has_gt({"h5_path": str(h5_path), "sample_idx": 0}))
 
     def test_cache_signature_tracks_cli_file_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -225,7 +252,18 @@ class AlgorithmAuditTests(unittest.TestCase):
                 handle.create_dataset("z_grid", data=[0.001, 0.002])
                 handle.create_dataset("all_envdb_norm", data=gt[None, None])
                 handle.create_dataset("config_yaml", data=yaml.safe_dump({
-                    "generation": {"ground_truth": {"dynamic_range_db": 60}}
+                    "generation": {
+                        "ground_truth": {
+                            "algorithm": "mv",
+                            "signal_domain": "iq",
+                            "dynamic_range_db": 60,
+                        },
+                        "training_targets": {
+                            "domain_targets": {
+                                "iq": {"mv": {"db": "/all_envdb_norm"}}
+                            }
+                        },
+                    }
                 }))
             config = {
                 "algorithms": ["das"], "params": {"dr": 60},
@@ -627,7 +665,20 @@ class AlgorithmAuditTests(unittest.TestCase):
             ):
                 h5_path = Path(temp_dir) / "sample.h5"
                 embedded_config = {
+                    "schema_version": 2,
                     "dataset": {"id": "simulation"},
+                    "generation": {
+                        "storage": {
+                            "inputs": {"iq": {"dtype": "float32", "normalize": False}},
+                            "outputs": {"dtype": "float32"},
+                        },
+                        "ground_truth": {"algorithm": "mv", "signal_domain": "iq"},
+                        "training_targets": {
+                            "domain_targets": {
+                                "iq": {"mv": {"db": "/all_envdb_norm"}}
+                            }
+                        },
+                    },
                     "source_samples": [
                         {
                             "acquisition_id": "simulation_contrast_speckle",
@@ -639,6 +690,8 @@ class AlgorithmAuditTests(unittest.TestCase):
                 with h5py.File(h5_path, "w") as hf:
                     hf.create_dataset("all_multi_I", data=np.zeros((1, 3, 8, 4)))
                     hf.create_dataset("all_multi_Q", data=np.zeros((1, 3, 8, 4)))
+                    hf.create_dataset("acquisition_id", data=["simulation_contrast_speckle"])
+                    hf.create_dataset("body_region", data=["simulation"])
                     hf.create_dataset("valid_time_samples", data=[8])
                     hf.create_dataset("time_start_vector", data=np.zeros((1, 3)))
                     hf.create_dataset("angles", data=[-0.1, 0.0, 0.1])
@@ -664,10 +717,47 @@ class AlgorithmAuditTests(unittest.TestCase):
                     del hf["config_yaml"]
                     hf.create_dataset(
                         "config_yaml",
-                        data=yaml.safe_dump({"source_samples": [{}]}),
+                    data=yaml.safe_dump({**embedded_config, "source_samples": [{}]}),
                     )
                 with self.assertRaisesRegex(ValueError, "必须包含 id 或 acquisition_id"):
                     inspect_h5(h5_path)
+
+    def test_wizard_lists_derived_domains_for_rf_input(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            h5_path = Path(temp_dir) / "rf-only.h5"
+            config = {
+                "schema_version": 2,
+                "dataset": {"id": "rf_sample"},
+                "generation": {
+                    "storage": {
+                        "inputs": {"rf": {"dtype": "float32", "normalize": False}},
+                        "outputs": {"dtype": "float32"},
+                    },
+                    "input_iq": {"decimation_factor": 1},
+                    "ground_truth": {},
+                    "training_targets": {"domain_targets": {}},
+                },
+                "source_samples": [{"id": "rf_sample", "phantom_mode": "in_vivo"}],
+            }
+            with h5py.File(h5_path, "w") as hf:
+                hf.create_dataset("config_yaml", data=yaml.safe_dump(config))
+                hf.create_dataset("acquisition_id", data=["rf_sample"])
+                hf.create_dataset("body_region", data=["region"])
+                hf.create_dataset("rf", data=np.zeros((1, 1, 8, 4), dtype=np.float32))
+                hf.create_dataset("rf_fs", data=20e6)
+                hf.create_dataset("rf_angles", data=[0.0])
+                hf.create_dataset("rf_t0", data=np.zeros((1, 1)))
+                hf.create_dataset("rf_length", data=[8])
+                hf.create_dataset("z_grid", data=[0.001, 0.002])
+                hf.create_dataset("x_grid", data=[-0.001, 0.001])
+                hf.create_dataset("c", data=1540.0)
+                hf.create_dataset("fc", data=5e6)
+                hf.create_dataset("pitch", data=0.0003)
+                hf.create_dataset("num_channels", data=4)
+
+            info = inspect_h5(h5_path)
+            self.assertEqual(info["domains"], ["rf", "analytic_rf", "iq"])
+            self.assertEqual(info["default_domain"], "iq")
 
 
 if __name__ == "__main__":

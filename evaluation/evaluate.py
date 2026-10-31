@@ -189,25 +189,16 @@ def read_sample_meta(h5_path, sample_idx):
         generation = config.get("generation", {})
         ground_truth = generation.get("ground_truth", {})
         targets = generation.get("training_targets", {})
-        domain = ground_truth.get("signal_domain", "iq")
-        domain = "iq" if domain == "baseband_iq" else domain
-        algorithm = ground_truth.get("algorithm")
+        domain = ground_truth["signal_domain"]
+        algorithm = ground_truth["algorithm"]
         entry = targets.get("domain_targets", {}).get(domain, {}).get(algorithm, {})
         target_paths = [entry.get("db"), entry.get("envelope")]
-        if domain == "rf":
-            target_paths.append(targets.get("rf_envelope_targets", {}).get(algorithm))
         if domain != "rf":
-            pair = entry.get("signal")
-            if pair is None:
-                section = "complex_iq_targets" if domain == "iq" else "analytic_rf_targets"
-                saved = targets.get(section, {}).get(algorithm, {})
-                pair = {"real": saved.get("i" if domain == "iq" else "real"),
-                        "imag": saved.get("q" if domain == "iq" else "imag")}
+            pair = entry.get("signal", {})
+            if not isinstance(pair, dict):
+                raise ValueError(f"domain_targets.{domain}.{algorithm}.signal must be a mapping")
             target_paths.extend(pair.values())
-        if ground_truth.get("dataset"):
-            target_paths.append(ground_truth["dataset"])
         has_gt = any(path and str(path).lstrip("/") in hf for path in target_paths)
-        has_gt |= domain == "iq" and "domain_targets" not in targets and "all_envdb_norm" in hf
         if "all_envdb_norm" in hf:
             gt_shape = hf["all_envdb_norm"].shape
             if not gt_shape or gt_shape[0] != n_samples:
@@ -233,10 +224,10 @@ def read_sample_meta(h5_path, sample_idx):
             }
         if (
             isinstance(source_samples, dict)
-            and source_samples.get("encoding") == "root_labels_with_path_template"
+            and source_samples.get("encoding") in ("root_labels", "root_labels_with_path_template")
             and source_samples.get("count") == n_samples
         ):
-            id_dataset = str(source_samples.get("acquisition_id_dataset", "/acquisition_id"))
+            id_dataset = str(source_samples["acquisition_id_dataset"])
             if id_dataset not in hf or not 0 <= sample_idx < hf[id_dataset].shape[0]:
                 raise IndexError(f"{id_dataset} has no sample index {sample_idx}")
             sample_name = hf[id_dataset][sample_idx]

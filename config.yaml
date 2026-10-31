@@ -57,25 +57,25 @@ algorithm_params:
 
   gcfmv:
     mv_axis: rx
-    mv_dl: 0.0
+    mv_dl: 0.01
     fbss: true
     subarray_ratio: 0.25
     temporal_win: 9
     gcf_low_bins: 1
-    gcf_power: 1.0
+    gcf_power: 0.5
     tx_subarray_ratio: null
     gcf_tx_low_bins: null
 
   cmsaw:
     mv_axis: rx
-    mv_dl: 0.0
+    mv_dl: 0.01
     fbss: true
     subarray_ratio: 0.25
     temporal_win: 9
     lmax_ratio: 0.5
     min_subarray_len: 2
     delta_max: 1.0
-    gamma: 0.5
+    gamma: 0.4
     clip_percentile: 90
     depth_smooth_rows: 1
 

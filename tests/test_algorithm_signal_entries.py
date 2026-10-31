@@ -75,7 +75,7 @@ class AlgorithmSignalEntryTests(unittest.TestCase):
             with h5py.File(path,'w') as h:
                 for key,value in dict(rf=np.broadcast_to(rf[None,None,:,None],(1,1,512,4)),rf_fs=fs,rf_t0=np.zeros((1,1)),rf_length=[512],rf_angles=[0.],all_scale_ref=[1.],c=c,fc=fc,pitch=.0003,num_channels=4,z_grid=z,x_grid=np.linspace(-.0003,.0003,3)).items():
                     h[key]=value
-                h['config_yaml']=yaml.safe_dump({'acquisition':{'fc_hz':fc},'generation':{'storage':{'inputs':{'rf':{'dtype':'float32','normalize':False}}},'input_iq':{'source_sampling_frequency_hz':fs,'packed_sampling_frequency_hz':fs,'decimation_factor':1,'ddc':{'phase_sign_q':-1,'mixing_gain':1.,'lowpass':'firwin_64_then_filtfilt','resampling':'scipy_resample_poly_kaiser_12'},'normalization':{'mode':'complex_rms','epsilon':1e-12}},'ground_truth':{},'training_targets':{}}})
+                h['config_yaml']=yaml.safe_dump({'acquisition':{'fc_hz':fc},'generation':{'storage':{'inputs':{'rf':{'dtype':'float32','normalize':False}}},'input_iq':{'source_sampling_frequency_hz':fs,'packed_sampling_frequency_hz':fs,'decimation_factor':1,'ddc':{'phase_sign_q':-1,'mixing_gain':1.,'cutoff_hz':4e6,'num_taps':64,'lowpass':'firwin_64_then_filtfilt','resampling':'scipy_resample_poly_kaiser_12'},'normalization':{'mode':'complex_rms','epsilon':1e-12}},'ground_truth':{},'training_targets':{}}})
             for method in ('das','mv','ccmv','esbmv','gcfmv','cmsaw','fdmas'):
                 module=importlib.import_module('algorithms.'+method)
                 for domain in ('iq','analytic_rf','rf'):

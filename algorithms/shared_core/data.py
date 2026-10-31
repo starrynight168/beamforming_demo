@@ -67,9 +67,7 @@ def _scale(hf, sample_idx, required=False):
 def input_is_normalized(hf, domain):
     inputs = _metadata(hf)["generation"].get("storage", {}).get("inputs")
     if not isinstance(inputs, dict):
-        if domain == "analytic_rf":
-            raise ValueError("Analytic RF cache requires explicit generation.storage.inputs.analytic_rf.normalize")
-        return domain == "iq"
+        raise ValueError("H5 must declare generation.storage.inputs")
     if domain not in inputs or type(inputs[domain].get("normalize")) is not bool:
         raise ValueError(f"generation.storage.inputs.{domain}.normalize must be explicit")
     return inputs[domain]["normalize"]
@@ -83,15 +81,16 @@ def _rf_frame(hf, sample_idx):
     )
 
 
-def _ddc_settings(hf, source_fs):
+def ddc_settings(hf, source_fs):
     config = _metadata(hf)
     settings = config["generation"].get("input_iq")
     if not isinstance(settings, dict):
         raise ValueError("generation.input_iq is required to derive IQ from RF")
     ddc = settings.get("ddc")
     if not isinstance(ddc, dict) or (
-        ddc.get("phase_sign_q") != -1
-        or ddc.get("mixing_gain", 1.0) != 1.0
+        not {"phase_sign_q", "mixing_gain", "lowpass", "resampling", "num_taps", "cutoff_hz"} <= set(ddc)
+        or ddc.get("phase_sign_q") != -1
+        or ddc["mixing_gain"] != 1.0
         or ddc.get("lowpass") != "firwin_64_then_filtfilt"
         or ddc.get("resampling") != "scipy_resample_poly_kaiser_12"
     ):
@@ -108,13 +107,13 @@ def _ddc_settings(hf, source_fs):
     fc = acquisition.get("fc_hz")
     if fc is None or not np.isfinite(fc) or not 0 < fc < fs / 2:
         raise ValueError("config_yaml.acquisition.fc_hz must describe the RF demodulation frequency")
-    taps = ddc.get("num_taps", 64)
-    cutoff = ddc.get("cutoff_hz", 0.8 * fc)
+    taps = ddc["num_taps"]
+    cutoff = ddc["cutoff_hz"]
     if type(taps) is not int or taps < 2 or not np.isfinite(cutoff) or not 0 < cutoff < fs / 2:
         raise ValueError("DDC FIR length/cutoff must describe a valid lowpass filter")
     normalization = settings.get("normalization")
-    if not isinstance(normalization, dict) or normalization.get("mode") not in ("complex_rms", "rms", "env_std"):
-        raise ValueError("input_iq.normalization.mode must be complex_rms or env_std")
+    if not isinstance(normalization, dict) or normalization.get("mode") not in ("complex_rms", "env_std", "none"):
+        raise ValueError("input_iq.normalization.mode must be complex_rms, env_std or none")
     epsilon = normalization.get("epsilon")
     if epsilon is None or not np.isfinite(epsilon) or epsilon <= 0:
         raise ValueError("input_iq.normalization.epsilon must be finite and positive")
@@ -124,87 +123,90 @@ def _ddc_settings(hf, source_fs):
     return fs, fc, firwin(taps, cutoff / (fs / 2)), factor, normalization
 
 
-def load_input(h5_path, sample_idx, domain="iq"):
+def load_input_from_h5(hf, sample_idx, domain="iq"):
     if not isinstance(sample_idx, (int, np.integer)) or isinstance(sample_idx, bool):
         raise ValueError("sample_idx must be an integer")
     if domain not in ("rf", "analytic_rf", "iq"):
         raise ValueError("domain must be rf, analytic_rf or iq")
-    with h5py.File(h5_path, "r") as hf:
-        cache_names = (("all_multi_I", "all_multi_Q") if domain == "iq" else
-                       ("ar_i", "ar_q") if domain == "analytic_rf" else ())
-        if any(field in hf for field in cache_names):
-            _require(hf, cache_names, f"{domain.upper()} cache is incomplete; check storage.inputs")
-            real = _frame(hf, cache_names[0], sample_idx)
-            imag = _frame(hf, cache_names[1], sample_idx)
-            if real.shape != imag.shape:
-                raise ValueError("Cached complex components must have matching dimensions")
-            keys = (dict(fs_key="fs", t0_key="time_start_vector", length_key="valid_time_samples", angles_key="angles")
-                    if domain == "iq" else dict(fs_key="ar_fs", t0_key="ar_t0", length_key="ar_len", angles_key="ar_angles"))
-            real, fs, t0, angles = _sampling(hf, real, sample_idx, **keys)
-            imag = imag[:, :real.shape[1]]
-            if not np.isfinite(imag).all():
-                raise ValueError("Valid complex samples must be finite")
-            normalized = input_is_normalized(hf, domain)
-            scale = _scale(hf, sample_idx, required=domain == "iq" or normalized)
-            if not normalized:
-                real, imag = real / scale, imag / scale
-        else:
-            real, fs, t0, angles = _rf_frame(hf, sample_idx)
-            normalized_rf = input_is_normalized(hf, "rf")
-            scale = _scale(hf, sample_idx, required=normalized_rf)
-            if normalized_rf:
-                real *= scale
-            if domain == "iq":
-                fs, fc, coefficients, factor, normalization = _ddc_settings(hf, fs)
-                real, imag = rf_to_iq(real, fs, fc, t0, coefficients, factor)
-                fs /= factor
-                if "all_scale_ref" not in hf:
-                    epsilon = normalization["epsilon"]
-                    if normalization["mode"] in ("complex_rms", "rms"):
-                        scale = float(np.sqrt(np.mean(real**2 + imag**2) + epsilon))
-                    else:
-                        scale = float(np.std(np.hypot(real, imag)) + epsilon)
-                    if not np.isfinite(scale) or scale <= 0:
-                        raise ValueError("Derived IQ normalization scale must be finite and positive")
-            elif domain == "analytic_rf":
-                real, imag = rf_to_analytic(real)
-            else:
-                imag = np.zeros_like(real)
+    cache_names = (("all_multi_I", "all_multi_Q") if domain == "iq" else
+                   ("ar_i", "ar_q") if domain == "analytic_rf" else ())
+    if any(field in hf for field in cache_names):
+        _require(hf, cache_names, f"{domain.upper()} cache is incomplete; check storage.inputs")
+        real = _frame(hf, cache_names[0], sample_idx)
+        imag = _frame(hf, cache_names[1], sample_idx)
+        if real.shape != imag.shape:
+            raise ValueError("Cached complex components must have matching dimensions")
+        keys = (dict(fs_key="fs", t0_key="time_start_vector", length_key="valid_time_samples", angles_key="angles")
+                if domain == "iq" else dict(fs_key="ar_fs", t0_key="ar_t0", length_key="ar_len", angles_key="ar_angles"))
+        real, fs, t0, angles = _sampling(hf, real, sample_idx, **keys)
+        imag = imag[:, :real.shape[1]]
+        if not np.isfinite(imag).all():
+            raise ValueError("Valid complex samples must be finite")
+        normalized = input_is_normalized(hf, domain)
+        scale = _scale(hf, sample_idx, required=domain == "iq" or normalized)
+        if not normalized:
             real, imag = real / scale, imag / scale
+    else:
+        real, fs, t0, angles = _rf_frame(hf, sample_idx)
+        normalized_rf = input_is_normalized(hf, "rf")
+        scale = _scale(hf, sample_idx, required=normalized_rf)
+        if normalized_rf:
+            real *= scale
+        if domain == "iq":
+            fs, fc, coefficients, factor, normalization = ddc_settings(hf, fs)
+            real, imag = rf_to_iq(real, fs, fc, t0, coefficients, factor)
+            fs /= factor
+            if "all_scale_ref" not in hf and normalization["mode"] == "none":
+                scale = 1.0
+            elif "all_scale_ref" not in hf:
+                epsilon = normalization["epsilon"]
+                if normalization["mode"] in ("complex_rms", "rms"):
+                    scale = float(np.sqrt(np.mean(real**2 + imag**2) + epsilon))
+                else:
+                    scale = float(np.std(np.hypot(real, imag)) + epsilon)
+                if not np.isfinite(scale) or scale <= 0:
+                    raise ValueError("Derived IQ normalization scale must be finite and positive")
+        elif domain == "analytic_rf":
+            real, imag = rf_to_analytic(real)
+        else:
+            imag = np.zeros_like(real)
+        real, imag = real / scale, imag / scale
     return {"domain": domain, "real": real, "imag": imag, "fs": fs,
             "t0": t0, "angles": angles, "scale": scale}
+
+
+def load_input(h5_path, sample_idx, domain="iq"):
+    with h5py.File(h5_path, "r") as hf:
+        return load_input_from_h5(hf, sample_idx, domain)
 
 
 def load_target(h5_path, sample_idx, algorithm="mv", domain="iq", angles="input"):
     if not isinstance(sample_idx, (int, np.integer)) or isinstance(sample_idx, bool):
         raise ValueError("sample_idx must be an integer")
-    fields = {"iq": "complex_iq_targets", "rf": "rf_targets",
-              "analytic_rf": "analytic_rf_targets"}
-    if domain not in fields:
+    if domain not in ("iq", "rf", "analytic_rf"):
         raise ValueError("domain must be rf, analytic_rf or iq")
     with h5py.File(h5_path, "r") as hf:
         targets = _metadata(hf)["generation"].get("training_targets", {})
         if not isinstance(targets, dict):
             raise ValueError("generation.training_targets must be a mapping")
-        map_name = fields[domain]
         option = f"{domain}.{algorithm}"
-        mapping = targets.get(map_name, {})
-        if not isinstance(mapping, dict):
-            raise ValueError(f"training_targets.{map_name} must be a mapping")
-        if algorithm not in mapping:
+        mapping = targets.get("domain_targets", {}).get(domain, {})
+        if not isinstance(mapping, dict) or algorithm not in mapping:
             raise KeyError(f"No {algorithm}/{domain} teacher; select signal in outputs.{option}")
-        angle_spec = targets.get("output_angles", {}).get(algorithm)
+        entry = mapping[algorithm]
+        angle_spec = entry.get("angles")
         if not isinstance(angle_spec, dict) or "selection" not in angle_spec:
-            raise ValueError(f"Teacher {algorithm} requires explicit output_angles metadata")
+            raise ValueError(f"Teacher {algorithm} requires domain_targets.{domain}.{algorithm}.angles metadata")
         if angle_spec["selection"] != angles:
             raise ValueError(f"Teacher {algorithm} uses angles={angle_spec['selection']!r}, requested {angles!r}")
-        entry = mapping[algorithm]
-        if domain == "iq":
-            paths = (entry["i"], entry["q"])
-        elif domain == "analytic_rf":
-            paths = (entry["real"], entry["imag"])
-        else:
-            paths = (entry,)
+        signal = entry.get("signal")
+        if not isinstance(signal, dict) or not signal.get("real"):
+            raise KeyError(f"Teacher fields are incomplete; check outputs.{option}")
+        paths = (signal["real"], signal["imag"]) if domain != "rf" else (signal["real"],)
+        if domain != "rf" and not signal.get("imag"):
+            raise KeyError(f"Teacher fields are incomplete; check outputs.{option}")
+        if domain == "rf" and signal.get("imag") is not None:
+            raise ValueError("RF teacher must contain only signed real samples")
         _require(hf, (*paths, "x_grid", "z_grid"), f"Teacher fields are incomplete; check outputs.{option}")
         grid = {name: np.asarray(hf[name][:], dtype=np.float32) for name in ("x_grid", "z_grid")}
         for name, values in grid.items():

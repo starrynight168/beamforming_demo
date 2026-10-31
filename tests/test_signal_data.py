@@ -27,15 +27,18 @@ class SignalDataTests(unittest.TestCase):
                     "source_sampling_frequency_hz": 20e6,
                     "packed_sampling_frequency_hz": 10e6,
                     "ddc": {"phase_sign_q": -1, "lowpass": "firwin_64_then_filtfilt",
-                            "resampling": "scipy_resample_poly_kaiser_12"},
+                            "resampling": "scipy_resample_poly_kaiser_12",
+                            "mixing_gain": 1.0, "cutoff_hz": 4e6, "num_taps": 64},
                     "normalization": {"mode": "complex_rms", "epsilon": 1e-12},
                 },
                 "training_targets": {
-                    "complex_iq_targets": {"mv": {"i": "/mv_i", "q": "/mv_q"}},
-                    "rf_targets": {"mv": "/mv_rf"},
-                    "analytic_rf_targets": {"mv": {"real": "/mv_ar_i", "imag": "/mv_ar_q"}},
-                    "output_angles": {"mv": {"selection": "input", "indices": [0, 1]}},
+                    "domain_targets": {
+                        "iq": {"mv": {"signal": {"real": "/mv_i", "imag": "/mv_q"}, "angles": {"selection": "input", "indices": [0, 1]}}},
+                        "rf": {"mv": {"signal": {"real": "/mv_rf", "imag": None}, "angles": {"selection": "input", "indices": [0, 1]}}},
+                        "analytic_rf": {"mv": {"signal": {"real": "/mv_ar_i", "imag": "/mv_ar_q"}, "angles": {"selection": "input", "indices": [0, 1]}}},
+                    },
                 },
+                "storage": {"inputs": {"rf": {"dtype": "float32", "normalize": False}}, "outputs": {"dtype": "float16"}},
             },
         }
 
@@ -52,6 +55,9 @@ class SignalDataTests(unittest.TestCase):
             if scale is not None:
                 hf["all_scale_ref"] = [scale]
             if cached_iq:
+                self.config["generation"]["storage"]["inputs"].setdefault(
+                    "iq", {"dtype": "float16", "normalize": True}
+                )
                 hf["all_multi_I"] = np.full((1, 2, 10, 3), 4.0, dtype=np.float16)
                 hf["all_multi_Q"] = np.full((1, 2, 10, 3), -2.0, dtype=np.float16)
                 hf["fs"] = 10e6

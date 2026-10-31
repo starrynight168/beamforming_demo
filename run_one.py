@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -28,6 +29,15 @@ from evaluation.evaluate import load_picmus_context
 ROOT = Path(__file__).resolve().parent
 
 MAX_COMPARISON_IMAGES_PER_PAGE = 8
+
+
+def run_subprocess(command):
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    return subprocess.run(
+        command, cwd=ROOT, text=True, encoding="utf-8", errors="replace",
+        env=env, check=False,
+    )
 
 
 def parse_args():
@@ -247,15 +257,31 @@ def scene_has_gt(scene, signal_domain="iq"):
     h5_path = resolve_path(scene["h5_path"])
     sample_idx = int(scene["sample_idx"])
     with h5py.File(h5_path, "r") as hf:
-        if signal_domain != "iq" or "all_multi_I" not in hf:
-            from algorithms.common import load_from_h5
-            return load_from_h5(h5_path, sample_idx, signal_domain).has_gt
-        if "all_envdb_norm" not in hf:
+        config = yaml.safe_load(hf["config_yaml"][()])
+        generation = config["generation"]
+        ground_truth = generation["ground_truth"]
+        algorithm = ground_truth["algorithm"]
+        entry = generation["training_targets"]["domain_targets"].get(signal_domain, {}).get(algorithm, {})
+        paths = entry.get("db") or entry.get("envelope")
+        if paths is None and signal_domain != "rf":
+            signal = entry.get("signal")
+            if signal is None:
+                return False
+            paths = [signal.get("real"), signal.get("imag")]
+            if not any(paths):
+                return False
+            if not all(paths):
+                raise ValueError(f"{signal_domain}/{algorithm} 复数 GT 必须同时声明实部和虚部")
+        elif paths is None:
             return False
-        gt_shape = hf["all_envdb_norm"].shape
-        if not gt_shape or gt_shape[0] != hf["all_multi_I"].shape[0]:
-            raise ValueError("all_envdb_norm 样本数必须与 all_multi_I 一致")
-        return 0 <= sample_idx < gt_shape[0]
+        else:
+            paths = [paths]
+        for path in paths:
+            if path not in hf:
+                raise KeyError(f"声明的 GT 字段缺失: {path}")
+            if hf[path].ndim < 1 or not 0 <= sample_idx < hf[path].shape[0]:
+                raise ValueError(f"GT 样本索引超出范围: {path}, sample_idx={sample_idx}")
+        return True
 
 
 def save_comparison(images, titles, extent_mm, output_path, dr, _cleanup_pages=True):
@@ -410,7 +436,7 @@ def run_evaluation(args, config, scene, scene_dir, comparison_path):
         "--phantom_source",
         "auto",
     ]
-    result = subprocess.run(cmd, cwd=ROOT, text=True, check=False)
+    result = run_subprocess(cmd)
     if result.returncode != 0:
         raise RuntimeError("Evaluation failed")
     metrics_dir = scene_dir / "metrics"
@@ -425,13 +451,16 @@ def run_evaluation(args, config, scene, scene_dir, comparison_path):
             "--reference-mode",
             "algorithms",
         ]
-        result = subprocess.run(plot_cmd, cwd=ROOT, text=True, check=False)
+        result = run_subprocess(plot_cmd)
         if result.returncode != 0:
             raise RuntimeError("Metric plotting failed")
 
 
 def main():
     """Run the command-line workflow."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     args = parse_args()
     config = load_config(resolve_path(args.config))
     scene = find_scene(config, args.scene)
@@ -469,7 +498,7 @@ def main():
         print("\n" + "=" * 70)
         print(f"Running {method}: {' '.join(cmd)}")
         print("=" * 70)
-        result = subprocess.run(cmd, cwd=ROOT, text=True, check=False)
+        result = run_subprocess(cmd)
         if result.returncode != 0 or not expected.exists():
             raise RuntimeError(f"Algorithm failed or output missing: {method}")
 

@@ -372,46 +372,65 @@ def list_h5_files():
 def inspect_h5(path):
     """Execute inspect h5."""
     with h5py.File(path, "r") as hf:
-        required = {
-            "all_multi_I",
-            "all_multi_Q",
-            "valid_time_samples",
-            "time_start_vector",
-            "fs",
-            "c",
-            "fc",
-            "pitch",
-            "num_channels",
-            "z_grid",
-            "x_grid",
-            "angles",
-            "config_yaml",
+        if "config_yaml" not in hf or "acquisition_id" not in hf:
+            raise ValueError("当前 H5 必须包含 config_yaml 和 acquisition_id")
+        raw_config = hf["config_yaml"][()]
+        if isinstance(raw_config, bytes):
+            raw_config = raw_config.decode("utf-8", errors="replace")
+        config = yaml.safe_load(raw_config)
+        if not isinstance(config, dict):
+            raise ValueError("config_yaml 顶层必须是映射")
+        generation = config.get("generation", {})
+        storage = generation.get("storage", {}) if isinstance(generation, dict) else {}
+        declared = storage.get("inputs", {}) if isinstance(storage, dict) else {}
+        if not isinstance(declared, dict):
+            raise ValueError("generation.storage.inputs 必须是映射")
+        definitions = {
+            "iq": ("all_multi_I", "all_multi_Q", "fs", "angles", "time_start_vector", "valid_time_samples"),
+            "analytic_rf": ("ar_i", "ar_q", "ar_fs", "ar_angles", "ar_t0", "ar_len"),
+            "rf": ("rf", None, "rf_fs", "rf_angles", "rf_t0", "rf_length"),
         }
+        available = []
+        for domain, fields in definitions.items():
+            if domain not in declared:
+                continue
+            required = [field for field in fields if field is not None]
+            missing = sorted(set(required) - set(hf.keys()))
+            if missing:
+                raise ValueError(f"storage.inputs.{domain} 声明的字段缺失:{', '.join(missing)}")
+            available.append(domain)
+        stored_domains = list(available)
+        if "rf" in available:
+            if "analytic_rf" not in available:
+                available.append("analytic_rf")
+            if "iq" not in available and isinstance(generation.get("input_iq"), dict):
+                available.append("iq")
+        if not available:
+            raise ValueError("H5 未保存可用的 rf、analytic_rf 或 iq 输入")
+        default_domain = next((d for d in ("iq", "analytic_rf", "rf") if d in available), available[0])
+        data_domain = next((d for d in ("iq", "analytic_rf", "rf") if d in stored_domains), stored_domains[0])
+        data_name, imag_name, fs_name, angles_name, starts_name, length_name = definitions[data_domain]
+        n = len(hf["acquisition_id"])
+        shape = hf[data_name].shape
+        if len(shape) != 4 or shape[0] != n or min(shape[1], shape[3]) < 1 or shape[2] < 2:
+            raise ValueError(f"{data_name} 必须是非空 [N,A,T,C] 数组")
+        if imag_name and hf[data_name].shape != hf[imag_name].shape:
+            raise ValueError(f"{data_name}/{imag_name} 形状必须一致")
+        _, a, t, c = shape
+        valid_time_dataset = hf[length_name]
+        if valid_time_dataset.shape != (n,) or valid_time_dataset.dtype.kind not in "iu":
+            raise ValueError(f"{length_name} 必须是长度为 N 的整数数组")
+        valid_time = [int(value) for value in valid_time_dataset[:]]
+        if any(value < 2 or value > t for value in valid_time):
+            raise ValueError(f"{length_name} 必须为每个样本提供有效时间长度")
+        if hf[starts_name].shape != (n, a) or hf[angles_name].shape != (a,):
+            raise ValueError(f"{data_domain} 起始时间或角度形状与输入不匹配")
+        if not np.isfinite(hf[angles_name][:]).all() or not np.isfinite(hf[starts_name][:]).all():
+            raise ValueError(f"{data_domain} 角度或时间起点必须有限")
+        required = {"body_region", "c", "fc", "pitch", "num_channels", "z_grid", "x_grid"}
         missing = sorted(required - set(hf.keys()))
         if missing:
-            raise ValueError(f"不是当前 pack_data 格式,缺少字段:{', '.join(missing)}")
-        if (
-            hf["all_multi_I"].shape != hf["all_multi_Q"].shape
-            or hf["all_multi_I"].ndim != 4
-        ):
-            raise ValueError("all_multi_I/all_multi_Q 必须是形状一致的 [N,A,T,C] 数组")
-        n, a, t, c = hf["all_multi_I"].shape
-        if min(n, a, c) < 1 or t < 2:
-            raise ValueError(
-                "all_multi_I/all_multi_Q 的样本、角度、通道必须非空，时间维至少为 2"
-            )
-        valid_time_dataset = hf["valid_time_samples"]
-        if valid_time_dataset.ndim != 1 or valid_time_dataset.dtype.kind not in "iu":
-            raise ValueError("valid_time_samples 必须是一维整数数组")
-        valid_time = [int(value) for value in valid_time_dataset[:]]
-        if len(valid_time) != n or any(value < 2 or value > t for value in valid_time):
-            raise ValueError(
-                "valid_time_samples 必须为每个样本提供至少 2 个有效时间采样点",
-            )
-        if hf["time_start_vector"].shape != (n, a):
-            raise ValueError("time_start_vector 必须为 [N,A]")
-        if hf["angles"].shape != (a,):
-            raise ValueError("angles 必须与 IQ 角度维度一致")
+            raise ValueError(f"H5 缺少公共成像字段:{', '.join(missing)}")
         for name in ("z_grid", "x_grid"):
             values = np.asarray(hf[name][:], dtype=np.float32)
             if (
@@ -421,34 +440,32 @@ def inspect_h5(path):
                 or not np.all(np.diff(values) > 0)
             ):
                 raise ValueError(f"{name} 必须是一维有限严格递增坐标")
-        if (
-            not np.isfinite(hf["angles"][:]).all()
-            or not np.isfinite(hf["time_start_vector"][:]).all()
-        ):
-            raise ValueError("angles/time_start_vector 必须为有限数值")
         scalar_values = {}
-        for name in ("c", "fc", "fs", "pitch"):
+        for name in ("c", "fc", fs_name, "pitch"):
             value = float(hf[name][()])
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} 必须是有限正数")
             scalar_values[name] = value
         if int(hf["num_channels"][()]) != c:
-            raise ValueError("num_channels 必须与 IQ 通道维度一致")
-        gt = "有" if "all_envdb_norm" in hf else "无"
-        if gt == "有" and hf["all_envdb_norm"].shape not in (
-            (n, 1, hf["z_grid"].size, hf["x_grid"].size),
-            (n, hf["z_grid"].size, hf["x_grid"].size),
-        ):
-            raise ValueError("all_envdb_norm 必须为 [N,1,H,W] 或 [N,H,W]")
-        angles = hf["angles"].shape[0]
-        fs = scalar_values["fs"]
+            raise ValueError(f"num_channels 必须与 {data_domain} 通道维度一致")
+        targets = generation.get("training_targets", {}) if isinstance(generation, dict) else {}
+        ground_truth = generation.get("ground_truth", {}) if isinstance(generation, dict) else {}
+        target_domains = targets.get("domain_targets", {}) if isinstance(targets, dict) else {}
+        gt_by_domain = {}
+        for domain in ("rf", "analytic_rf", "iq"):
+            algorithm = ground_truth.get("algorithm") if isinstance(ground_truth, dict) else None
+            entry = target_domains.get(domain, {}).get(algorithm, {}) if isinstance(target_domains, dict) else {}
+            paths = [entry.get(name) for name in ("db", "envelope") if isinstance(entry, dict) and entry.get(name)]
+            if not paths and domain != "rf" and isinstance(entry, dict):
+                signal = entry.get("signal", {})
+                if isinstance(signal, dict):
+                    paths = [signal.get("real"), signal.get("imag")]
+            gt_by_domain[domain] = bool(paths and all(path and path in hf for path in paths))
+        main_domain = ground_truth.get("signal_domain", default_domain) if isinstance(ground_truth, dict) else default_domain
+        gt = "有" if gt_by_domain.get(main_domain, False) else "无"
+        angles = a
+        fs = scalar_values[fs_name]
         fc = scalar_values["fc"]
-        raw_config = hf["config_yaml"][()]
-        if isinstance(raw_config, bytes):
-            raw_config = raw_config.decode("utf-8", errors="replace")
-        config = yaml.safe_load(raw_config)
-        if not isinstance(config, dict):
-            raise ValueError("config_yaml 顶层必须是映射")
         samples = config.get("source_samples", [])
         if isinstance(samples, list):
             if len(samples) != n:
@@ -497,6 +514,9 @@ def inspect_h5(path):
         "names": names,
         "valid_time": valid_time,
         "in_vivo": in_vivo,
+        "domains": available,
+        "default_domain": default_domain,
+        "gt_by_domain": gt_by_domain,
     }
 
 
@@ -546,6 +566,7 @@ def choose_sample(path, teaching=True):
     print("\n这个 H5 的基本信息:")
     print(f"  样本数: {info['n']}")
     print(f"  输入形状: [N={info['n']}, A={info['a']}, T={info['t']}, C={info['c']}]")
+    print(f"  可选信号域: {', '.join(info['domains'])}")
     if teaching:
         print("  形状说明: N=样本数,A=角度数,T=时间采样点,C=阵元/通道数")
     print(f"  H5 角度数: {info['angles']}")
@@ -706,6 +727,22 @@ def main():
         state["sample_idx"] = choose_sample(
             state["h5_path"],
             teaching=state["teaching"],
+        )
+
+    def step_signal_domain():
+        info = inspect_h5(state["h5_path"])
+        labels = {"iq": "iq: 基带 IQ", "rf": "rf: 实数 RF", "analytic_rf": "analytic_rf: 解析 RF"}
+        options = [(domain, labels[domain]) for domain in info["domains"]]
+        default = state.get(
+            "signal_domain",
+            (state["base_config"].get("params", {}) or {}).get("signal_domain", info["default_domain"]),
+        )
+        if default not in info["domains"]:
+            default = info["default_domain"]
+        state["signal_domain"] = ask_choice(
+            "请选择算法输入信号域",
+            options,
+            default_index=next(i for i, (domain, _) in enumerate(options) if domain == default),
         )
 
     def step_algorithms():
@@ -888,7 +925,7 @@ def main():
     def step_gt_evaluate():
         """Execute step gt evaluate."""
         info = inspect_h5(state["h5_path"])
-        has_gt_default = info["gt"] == "有"
+        has_gt_default = info["gt_by_domain"].get(state["signal_domain"], False)
         state["in_vivo"] = info["in_vivo"][state["sample_idx"]]
         sample_name = info["names"][state["sample_idx"]]
         explain(state["teaching"], "gt")
@@ -930,6 +967,7 @@ def main():
     def step_confirm():
         """Execute step confirm."""
         params = {
+            "signal_domain": state["signal_domain"],
             "select_angles": state["select_angles"],
             "f_number": state["f_number"],
             "dr": state["dr"],
@@ -982,6 +1020,7 @@ def main():
         print(f"H5 文件: {relative_to_root(state['h5_path'])}")
         print(f"样本编号: {state['sample_idx']}")
         print(f"算法: {', '.join(state['algorithms'])}")
+        print(f"输入信号域: {state['signal_domain']}")
         print("方法专属参数:")
         for algorithm in state["algorithms"]:
             method_params = state["algorithm_params"].get(algorithm, {})
@@ -1007,6 +1046,7 @@ def main():
                 step_teaching,
                 step_h5,
                 step_sample,
+                step_signal_domain,
                 step_algorithms,
                 step_algorithm_params,
                 step_angles,
@@ -1058,6 +1098,7 @@ def main():
                 for algorithm in state["algorithms"]
             },
             "params": {
+                "signal_domain": state["signal_domain"],
                 "select_angles": state["select_angles"],
                 "f_number": state["f_number"],
                 "dr": state["dr"],

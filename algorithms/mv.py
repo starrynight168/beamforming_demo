@@ -106,7 +106,7 @@ class RowDynamicMVBeamformerIQ:
     ):
         """Initialize the instance."""
         self.options = options if options is not None else self.get_options()
-        signal_domain = getattr(self.options, "signal_domain", "iq") if signal_domain is None else signal_domain
+        signal_domain = self.options.signal_domain if signal_domain is None else signal_domain
         self.mv_axis = getattr(self.options, "mv_axis", "rx")
         if signal_domain not in ("iq", "rf", "analytic_rf"):
             raise ValueError("signal_domain must be iq, rf or analytic_rf")
