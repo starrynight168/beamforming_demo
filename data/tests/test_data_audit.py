@@ -1,7 +1,7 @@
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -25,6 +25,7 @@ from data.pack_data import (
     pack_dataset,
     pad_and_concat,
     process_scene,
+    parse_args,
     validate_grid,
 )
 
@@ -314,6 +315,32 @@ class DataPipelineTests(unittest.TestCase):
                 ]
             with self.assertRaisesRegex(ValueError, "不是均匀线阵"):
                 process_scene(scenes[1], root)
+
+    def test_pack_write_failure_does_not_publish_partial_h5(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "packed.h5"
+            with patch(
+                "data.pack_data.build_embedded_config",
+                side_effect=RuntimeError("metadata write failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "metadata write failed"):
+                    pack_dataset(
+                        self._write_sources(root),
+                        output,
+                        root,
+                        row_block=2,
+                        save_gt_images_enabled=False,
+                    )
+            self.assertFalse(output.exists())
+            self.assertEqual(list(root.glob(".packed.h5.*")), [])
+
+    def test_pack_cli_rejects_alternate_source_root(self) -> None:
+        stream = StringIO()
+        with patch("sys.argv", ["pack_data.py", "--source_root", "alternate"]):
+            with redirect_stderr(stream), self.assertRaises(SystemExit):
+                parse_args()
+        self.assertIn("--source_root", stream.getvalue())
 
     def test_invalid_scene_metadata_fails_before_reading_inputs(self) -> None:
         scene = {

@@ -1,6 +1,8 @@
 """Pack PICMUS IQ and reference images into the project HDF5 format."""
 
 import argparse
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import h5py
@@ -22,6 +24,18 @@ F_NUMBER = 1.5
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE_ROOT = PROJECT_ROOT / "data" / "PICMUS"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+@contextmanager
+def atomic_h5_output(output_path):
+    with tempfile.TemporaryDirectory(
+        dir=output_path.parent,
+        prefix=f".{output_path.name}.",
+    ) as temporary_dir:
+        temporary_path = Path(temporary_dir) / output_path.name
+        with h5py.File(temporary_path, "x") as handle:
+            yield handle
+        temporary_path.rename(output_path)
 
 
 SIMULATION_SCENES = [
@@ -878,14 +892,7 @@ def pack_dataset(
     if not np.isfinite(packed_gt).all():
         raise OverflowError("GT 转换为 float16 后产生 NaN/Inf")
 
-    try:
-        output_file = h5py.File(output_path, "x")
-    except FileExistsError as exc:
-        raise FileExistsError(
-            f"输出文件已存在，请先移除或更换路径: {output_path}"
-        ) from exc
-
-    with output_file as hf:
+    with atomic_h5_output(output_path) as hf:
         hf.create_dataset(
             "all_multi_I",
             data=packed_i,
@@ -978,7 +985,12 @@ def parse_args():
         action="store_true",
         help="不额外输出GT预览图",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if Path(args.source_root).resolve() != DEFAULT_SOURCE_ROOT.resolve():
+        parser.error(
+            "--source_root 必须是项目 data/PICMUS；H5 中的模体路径以该目录为基准"
+        )
+    return args
 
 
 def main():
