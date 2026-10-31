@@ -149,6 +149,82 @@ class DataUtilityTests(unittest.TestCase):
 
 
 class DataPipelineTests(unittest.TestCase):
+    def test_storage_rejects_unsupported_options(self):
+        from data.pack_data import validate_storage
+        for storage in ({}, {"unknown": {}}, {"rf": {}}, {"iq": {"dtype": "int16", "normalize": True}},
+                        {"rf": {"dtype": "float32", "normalize": "false"}}):
+            with self.subTest(storage=storage), self.assertRaises(ValueError):
+                validate_storage(storage)
+
+    def test_configurable_signal_domains_round_trip(self):
+        from itertools import combinations
+        from scipy.signal import hilbert
+        from algorithms.common import ground_truth_db, load_from_h5
+        from algorithms.shared_core.data import load_input_from_h5
+        from run_one import scene_has_gt
+        from evaluation.evaluate import read_sample_meta
+
+        cases = [(domains, False) for size in (1, 2, 3)
+                 for domains in combinations(("rf", "analytic_rf", "iq"), size)]
+        cases.append((("rf", "analytic_rf", "iq"), True))
+        for domains, reverse_storage in cases:
+            with self.subTest(domains=domains), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                scenes = self._write_sources(root)
+                raw = []
+                for index, scene in enumerate(scenes):
+                    scene["rf"] = f"rf_{index}.h5"
+                    values = np.random.default_rng(index).normal(size=(2, 4, 512 + index * 4)).astype("f4")
+                    raw.append(values.transpose(0, 2, 1))
+                    with h5py.File(root / scene["iq"], "r") as iq, h5py.File(root / scene["rf"], "w") as rf:
+                        iq.copy("US", rf)
+                        base = rf["US/US_DATASET0000"]
+                        del base["data"]
+                        base.create_dataset("data/real", data=values)
+                        base.create_dataset("data/imag", data=np.zeros_like(values))
+                        base["sampling_frequency"][()] = 80e6
+                        if "probe_geometry" in base:
+                            del base["probe_geometry"]
+                        base.create_dataset("probe_geometry", data=[[-0.00045, -0.00015, 0.00015, 0.00045], [0]*4, [0]*4])
+                storage = {domain: {"dtype": "float32" if (domain == "rf") != reverse_storage else "float16", "normalize": (domain != "rf") != reverse_storage} for domain in domains}
+                output = root / "packed.h5"
+                pack_dataset(scenes, output, root, save_gt_images_enabled=False, storage=storage)
+                with h5py.File(output, "r") as handle, patch("data.check_data.DATA_DIR", root):
+                    status, problems = run_checks(handle)
+                    self.assertEqual(status, "通过", problems)
+                    self.assertEqual("all_multi_I" in handle, "iq" in domains)
+                    if "rf" not in domains:
+                        with self.assertRaises(KeyError):
+                            load_input_from_h5(handle, 0, "rf")
+                    for domain in set(domains) | ({"iq", "analytic_rf"} if "rf" in domains else set()):
+                        sample = load_input_from_h5(handle, 1, domain)
+                        self.assertTrue(np.isfinite(sample["real"]).all())
+                        self.assertTrue(np.isfinite(sample["imag"]).all())
+                        if domain == "iq" and "iq" in domains:
+                            scale = float(handle["all_scale_ref"][1])
+                            with h5py.File(root / scenes[1]["iq"], "r") as source:
+                                expected_i = source["US/US_DATASET0000/data/real"][:].transpose(0, 2, 1) / scale
+                                expected_q = source["US/US_DATASET0000/data/imag"][:].transpose(0, 2, 1) / scale
+                            np.testing.assert_allclose(sample["real"], expected_i, rtol=5e-4, atol=5e-4)
+                            np.testing.assert_allclose(sample["imag"], expected_q, rtol=5e-4, atol=5e-4)
+                        if domain in ("rf", "analytic_rf"):
+                            scale = float(handle["all_scale_ref"][1])
+                            np.testing.assert_allclose(sample["real"], raw[1]/scale, rtol=5e-4, atol=5e-4)
+                            expected_q = hilbert(raw[1], axis=1).imag/scale if domain == "analytic_rf" else np.zeros_like(raw[1])
+                            np.testing.assert_allclose(sample["imag"], expected_q, rtol=5e-4, atol=5e-4)
+                        np.testing.assert_array_equal(ground_truth_db(handle, 1, domain), ground_truth_db(handle, 1, "iq"))
+                self.assertTrue(read_sample_meta(output, 1)["has_gt"])
+                for domain in domains:
+                    self.assertTrue(load_from_h5(output, 1, domain).has_gt)
+                    self.assertTrue(scene_has_gt({"h5_path": str(output), "sample_idx": 1}, domain))
+                if domains == ("rf",):
+                    with h5py.File(root / scenes[0]["rf"], "r+") as source:
+                        source["US/US_DATASET0000/data/imag"][0, 0, 0] = 1
+                    failed_output = root / "invalid.h5"
+                    with self.assertRaisesRegex(ValueError, "虚部必须为零"):
+                        pack_dataset(scenes, failed_output, root, storage=storage, save_gt_images_enabled=False)
+                    self.assertFalse(failed_output.exists())
+
     def _write_sources(self, root: Path) -> list[dict]:
         rng = np.random.default_rng(11)
         iq_names = ("iq_direct.h5", "iq_geometry.h5")

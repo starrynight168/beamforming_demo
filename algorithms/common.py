@@ -247,7 +247,7 @@ def ground_truth_db(hf, sample_idx, signal_domain=None):
     targets = config["generation"].get("training_targets", {})
     entry = targets.get("domain_targets", {}).get(domain, {}).get(algorithm, {})
     image_path = entry.get("db")
-    if domain == "rf" and image_path is not None:
+    if domain == "rf" and image_path is not None and entry.get("kind") != "image_reference":
         require_current_rf_envelope_method(targets)
     if image_path is not None:
         gt = hf[image_path][sample_idx].astype(np.float32)

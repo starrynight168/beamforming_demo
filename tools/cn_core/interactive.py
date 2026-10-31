@@ -53,9 +53,10 @@ def choice(prompt, choices, default=0):
 
 def sample_input(h5_path):
     with h5py.File(h5_path, "r") as f:
-        if "all_multi_I" not in f:
-            raise ValueError("H5 缺少 all_multi_I，不能用于当前工具。")
-        count = f["all_multi_I"].shape[0]
+        field = next((key for key in ("acquisition_id", "all_multi_I", "rf", "ar_i") if key in f), None)
+        if field is None:
+            raise ValueError("H5 未保存可识别的输入样本。")
+        count = f[field].shape[0]
         print(f"H5 共 {count} 帧，输入范围 0–{count - 1}。")
         selected = number("样本序号", 0, int, lambda value: 0 <= value < count)
         if "acquisition_id" in f:

@@ -19,6 +19,9 @@ PREVIEW_MAX_ITEMS = 4096
 # 脚本位于 data/;默认检查同目录的打包 H5,和启动时的工作目录无关。
 DATA_DIR = Path(__file__).resolve().parent
 ROOT = DATA_DIR.parent
+sys.path.insert(0, str(ROOT))
+
+from algorithms.shared_core.data import load_input_from_h5
 LOG_DIR = DATA_DIR / "logs"
 
 KEY_FIELDS = (
@@ -251,9 +254,9 @@ def _config_mapping(config, key, label, problems):
 def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> None:
     """Validate config schema."""
     schema_version = config.get("schema_version")
-    if type(schema_version) is not int or schema_version != 1:
+    if type(schema_version) is not int or schema_version != 2:
         problems.append(
-            f"config_yaml.schema_version 应为整数 1,实际为 {schema_version}",
+            f"config_yaml.schema_version 应为整数 2,实际为 {schema_version}",
         )
 
     dataset = _config_mapping(config, "dataset", "config_yaml.dataset", problems)
@@ -261,8 +264,6 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
         problems.append("config_yaml.dataset.purpose 应为 algorithm_evaluation")
 
     schema = _config_mapping(config, "h5_schema", "config_yaml.h5_schema", problems)
-    if schema.get("iq_layout") != ["sample", "angle", "time", "channel"]:
-        problems.append("config_yaml.h5_schema.iq_layout 与实际 IQ 布局不一致")
     if schema.get("ground_truth_layout") != ["sample", "image_channel", "z", "x"]:
         problems.append(
             "config_yaml.h5_schema.ground_truth_layout 与实际 GT 布局不一致",
@@ -275,10 +276,6 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
     )
     if padding.get("value") != 0.0:
         problems.append("config_yaml.h5_schema.padding.value 应为 0")
-    if padding.get("time_valid_length_dataset") != "/valid_time_samples":
-        problems.append(
-            "config_yaml.h5_schema.padding.time_valid_length_dataset 应指向 /valid_time_samples",
-        )
     if schema.get("sample_metadata") != "config_yaml.source_samples":
         problems.append(
             "config_yaml.h5_schema.sample_metadata 应指向 config_yaml.source_samples",
@@ -369,14 +366,22 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
         "config_yaml.generation.storage.inputs",
         problems,
     )
-    stored_iq = _config_mapping(
-        stored_inputs,
-        "iq",
-        "config_yaml.generation.storage.inputs.iq",
-        problems,
-    )
-    if stored_iq.get("dtype") != "float16" or stored_iq.get("normalize") is not True:
-        problems.append("generation.storage.inputs.iq 应声明 float16 且 normalize=true")
+    if not stored_inputs or set(stored_inputs) - {"rf", "analytic_rf", "iq"}:
+        problems.append("storage.inputs 必须选择 rf、analytic_rf、iq 中至少一种")
+    for domain, options in stored_inputs.items():
+        if (not isinstance(options, dict) or options.get("dtype") not in ("float16", "float32")
+                or type(options.get("normalize")) is not bool):
+            problems.append(f"storage.inputs.{domain} 的 dtype/normalize 非法")
+    layouts = {domain: ["sample", "angle", "time", "channel"] for domain in stored_inputs}
+    if schema.get("input_layouts") != layouts:
+        problems.append("h5_schema.input_layouts 与保存的域不一致")
+    lengths = {"iq": "/valid_time_samples", "rf": "/rf_length", "analytic_rf": "/ar_len"}
+    if padding.get("valid_length_datasets") != {domain: lengths[domain] for domain in stored_inputs if domain in lengths}:
+        problems.append("h5_schema.padding.valid_length_datasets 与保存的域不一致")
+    for domain in stored_inputs:
+        reference = domain_targets.get(domain, {}).get("reference", {})
+        if reference.get("db") != "/all_envdb_norm" or reference.get("kind") != "image_reference":
+            problems.append(f"{domain} 必须明确关联图像参考 /all_envdb_norm")
     reference_fs = ground_truth.get("reference_sampling_frequency_hz")
     if (
         type(reference_fs) not in (int, float)
@@ -424,7 +429,7 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
             problems.append(
                 "input_iq.packed_sampling_frequency_hz 与根数据集 fs 不一致"
             )
-        elif type(reference_fs) in (int, float) and not np.isclose(
+        elif "ddc" not in input_iq and type(reference_fs) in (int, float) and not np.isclose(
             reference_fs, source_fs_value, rtol=1e-5, atol=1.0
         ):
             problems.append(
@@ -511,7 +516,18 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
 def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
     """Execute run checks."""
     problems: list[str] = []
-    missing = [key for key in REQUIRED_FIELDS if key not in hf]
+    stored_inputs = {}
+    if "config_yaml" in hf:
+        try:
+            stored_inputs = yaml.safe_load(decode_value(hf["config_yaml"][()])).get("generation", {}).get("storage", {}).get("inputs", {})
+        except (AttributeError, TypeError, yaml.YAMLError):
+            pass
+    if not isinstance(stored_inputs, dict):
+        stored_inputs = {}
+    required = REQUIRED_FIELDS if "iq" in stored_inputs or not stored_inputs else tuple(
+        key for key in REQUIRED_FIELDS if key not in ("all_multi_I", "all_multi_Q")
+    ) + ("acquisition_id",)
+    missing = [key for key in required if key not in hf]
     if missing:
         problems.append("缺少字段: " + ", ".join(missing))
 
@@ -550,7 +566,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
     ):
         problems.append("all_multi_I / all_multi_Q 形状不一致")
 
-    for key in ("all_multi_I", "all_multi_Q", "all_envdb_norm"):
+    for key in ("all_envdb_norm",):
         if key in hf and hf[key].dtype != np.float16:
             problems.append(f"{key} 类型应为 float16，实际为 {hf[key].dtype}")
     for key in ("fs", "c", "fc", "pitch"):
@@ -710,7 +726,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
                 )
                 validate_config_schema(config, hf, problems)
                 samples = config.get("source_samples")
-                n_samples = iq_shape[0] if iq_shape is not None else 0
+                n_samples = hf["all_envdb_norm"].shape[0] if "all_envdb_norm" in hf else 0
                 if not isinstance(samples, list) or len(samples) != n_samples:
                     problems.append(
                         "config_yaml.source_samples 数量必须与 H5 样本数一致",
@@ -781,6 +797,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
                                 f"source_samples[{index}] 不支持的模体组合: mode={mode}, source={source}"
                             )
                         expected_path_roles = {
+                            **({"rf_path": "read_input"} if set(stored_inputs) & {"rf", "analytic_rf"} else {}),
                             "iq_path": "read_input",
                             "scan_path": "read_input",
                             "phantom_path": "reference_only_not_read",
@@ -806,6 +823,35 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
                     problems.append("config_yaml.path_convention.type 应为 relative")
                 if convention.get("base") != "PICMUS_ROOT":
                     problems.append("config_yaml.path_convention.base 应为 PICMUS_ROOT")
+
+    domain_fields = {"iq": ("all_multi_I", "all_multi_Q"), "rf": ("rf",), "analytic_rf": ("ar_i", "ar_q")}
+    count = len(hf["all_envdb_norm"]) if "all_envdb_norm" in hf else 0
+    if "acquisition_id" in hf and hf["acquisition_id"].shape != (count,):
+        problems.append("acquisition_id 样本数与 GT 不一致")
+    for domain, options in stored_inputs.items():
+        if domain not in domain_fields or not isinstance(options, dict):
+            continue
+        for field in domain_fields[domain]:
+            if field not in hf:
+                problems.append(f"{domain} 缺少 {field}")
+            elif (not isinstance(hf[field], h5py.Dataset) or hf[field].ndim != 4
+                  or hf[field].dtype.name != options.get("dtype") or hf[field].shape[0] != count):
+                problems.append(f"{field} 类型或样本数与声明不一致")
+        for index in range(count):
+            try:
+                loaded = load_input_from_h5(hf, index, domain)
+                if loaded["real"].shape[-1] != int(hf["num_channels"][()]):
+                    raise ValueError("通道数与 num_channels 不一致")
+                length = loaded["real"].shape[1]
+                for field in domain_fields[domain]:
+                    if np.any(hf[field][index, :, length:, :] != 0):
+                        raise ValueError(f"{field} 有效长度之后必须为零填充")
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                problems.append(f"{domain} 样本 {index}: {exc}")
+                break
+    for domain, fields in domain_fields.items():
+        if domain not in stored_inputs and any(field in hf for field in fields):
+            problems.append(f"{domain} 数据未在 storage.inputs 中声明")
 
     gt_min = np.inf
     gt_max = -np.inf
@@ -847,12 +893,13 @@ def inspect_file(path: Path) -> bool:
         with h5py.File(path, "r") as hf:
             status, problems = run_checks(hf)
             file_size = path.stat().st_size / 1024**2
-            input_shape = dataset_shape(hf, "all_multi_I")
+            input_field = next((key for key in ("all_multi_I", "rf", "ar_i") if key in hf), "all_multi_I")
+            input_shape = dataset_shape(hf, input_field)
             gt_shape = dataset_shape(hf, "all_envdb_norm")
             n_frames = input_shape[0] if input_shape else "?"
             input_shape = format_shape(input_shape) if input_shape else "缺失"
             gt_shape = format_shape(gt_shape) if gt_shape else "无"
-            fs = scalar_float(hf, "fs")
+            fs = scalar_float(hf, {"rf": "rf_fs", "ar_i": "ar_fs"}.get(input_field, "fs"))
             gt_reference_fs = None
             decimation = None
             config_dataset = hf.get("config_yaml")
@@ -874,7 +921,7 @@ def inspect_file(path: Path) -> bool:
                 ("检查状态", status),
                 ("文件大小", f"{file_size:.3f} MiB"),
                 ("样本帧数", n_frames),
-                ("输入 IQ", input_shape),
+                (f"输入 {input_field}", input_shape),
                 ("主 GT", gt_shape),
                 ("输入采样率", format_frequency_mhz(fs)),
                 ("GT 参考采样率", format_frequency_mhz(gt_reference_fs)),

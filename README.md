@@ -98,6 +98,14 @@ pip install -r requirements.txt
    # --only 也支持 experiments 或 in_vivo
    ```
 
+   当前打包格式为 schema_version 2，已有 H5 需要重新打包后才能使用新增输入域。保存哪些输入域由 [data/config.yaml](data/config.yaml) 的 `storage.inputs` 决定，默认保存原始 RF（float32、不归一化）和官方 IQ（float16、归一化）。可以只保留 `rf`、`analytic_rf`、`iq` 中一种或多种，每种都明确配置 `dtype: float16/float32` 和 `normalize: true/false`。另一个配置可用 `--config 路径` 指定。
+
+   解析 RF 由原始 RF 沿时间轴做 Hilbert 变换后保存；RF 和解析 RF 保留各自的采样率、起始时间与有效长度。三种域共用从配对官方 IQ 计算的 `all_scale_ref`，以保持缩放口径一致。即使只保存 RF，配对官方 IQ 仍用于尺度标定和图像参考生成。
+
+   算法通过 `--signal_domain rf/analytic_rf/iq` 选择输入，优先读取 H5 已保存的域。只保存 RF 时，解析 RF 可在读取时生成；IQ 可按元数据记录的 DDC（64-tap FIR + filtfilt，截止频率 0.8fc）和整数降采样生成。派生 IQ 与官方 IQ 的滤波口径不同，H5 会明确记录来源。只保存 IQ 或解析 RF 时，缺少的 RF 输入会明确报错。
+
+   `all_envdb_norm` 是三种输入域共用的图像参考，来源仍记录为官方 IQ 重建或多角度 IQ-DAS，不作为 RF teacher 信号。RF 的采样率为 20.832 MHz，载频来自配对 IQ 的 5.208 MHz；RF 文件中的 `modulation_frequency=0` 表示未解调，不能作为载频。当前 RF F-DMAS 要求采样率高于 5fc，PICMUS 的 4fc RF 不满足这个条件，会明确报错。
+
 4. **进行数据完整性体检**：
    验证必需字段、数据类型、形状、有限性、归一化尺度、路径元数据和 contract 一致性。模体类型支持 `contrast_speckle`/`resolution_distortion` 与 `simulation`/`experiments` 的组合，以及 `in_vivo`/`in_vivo`；前四种组合的 `phantom_path` 必须指向 `data/PICMUS` 下存在的文件，活体允许空模体路径。`valid_time_samples` 必须是有效整数，其后的 IQ 必须保持零填充；`all_envdb_norm` 必须为有限的 `[N,1,H,W]` 且位于 `[0,1]`：
    ```bash

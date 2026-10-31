@@ -1,4 +1,4 @@
-"""Pack PICMUS IQ and reference images into the project HDF5 format."""
+"""Pack selected PICMUS signal domains and image references into HDF5."""
 
 import argparse
 import tempfile
@@ -10,6 +10,7 @@ import matplotlib
 import numpy as np
 import torch
 import yaml
+from scipy.signal import hilbert
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -44,6 +45,7 @@ SIMULATION_SCENES = [
         "mode": "contrast_speckle",
         "source": "simulation",
         "iq": "database/simulation/contrast_speckle/contrast_speckle_simu_dataset_iq.hdf5",
+        "rf": "database/simulation/contrast_speckle/contrast_speckle_simu_dataset_rf.hdf5",
         "scan": "database/simulation/contrast_speckle/contrast_speckle_simu_scan.hdf5",
         "phantom": "database/simulation/contrast_speckle/contrast_speckle_simu_phantom.hdf5",
         "gt": "reconstructed_image/simulation/contrast_speckle/contrast_speckle_simu_img_from_iq.hdf5",
@@ -53,6 +55,7 @@ SIMULATION_SCENES = [
         "mode": "resolution_distortion",
         "source": "simulation",
         "iq": "database/simulation/resolution_distortion/resolution_distortion_simu_dataset_iq.hdf5",
+        "rf": "database/simulation/resolution_distortion/resolution_distortion_simu_dataset_rf.hdf5",
         "scan": "database/simulation/resolution_distortion/resolution_distortion_simu_scan.hdf5",
         "phantom": "database/simulation/resolution_distortion/resolution_distortion_simu_phantom.hdf5",
         "gt": "reconstructed_image/simulation/resolution_distortion/resolution_distortion_simu_img_from_iq.hdf5",
@@ -65,6 +68,7 @@ EXPERIMENT_SCENES = [
         "mode": "contrast_speckle",
         "source": "experiments",
         "iq": "database/experiments/contrast_speckle/contrast_speckle_expe_dataset_iq.hdf5",
+        "rf": "database/experiments/contrast_speckle/contrast_speckle_expe_dataset_rf.hdf5",
         "scan": "database/experiments/contrast_speckle/contrast_speckle_expe_scan.hdf5",
         "phantom": "database/experiments/contrast_speckle/contrast_speckle_expe_phantom.hdf5",
         "gt": "reconstructed_image/experiments/contrast_speckle/contrast_speckle_expe_img_from_iq.hdf5",
@@ -74,6 +78,7 @@ EXPERIMENT_SCENES = [
         "mode": "resolution_distortion",
         "source": "experiments",
         "iq": "database/experiments/resolution_distortion/resolution_distortion_expe_dataset_iq.hdf5",
+        "rf": "database/experiments/resolution_distortion/resolution_distortion_expe_dataset_rf.hdf5",
         "scan": "database/experiments/resolution_distortion/resolution_distortion_expe_scan.hdf5",
         "phantom": "database/experiments/resolution_distortion/resolution_distortion_expe_phantom.hdf5",
         "gt": "reconstructed_image/experiments/resolution_distortion/resolution_distortion_expe_img_from_iq.hdf5",
@@ -86,6 +91,7 @@ IN_VIVO_SCENES = [
         "mode": "in_vivo",
         "source": "in_vivo",
         "iq": "database/in_vivo/carotid_cross/carotid_cross_expe_dataset_iq.hdf5",
+        "rf": "database/in_vivo/carotid_cross/carotid_cross_expe_dataset_rf.hdf5",
         "scan": "database/in_vivo/carotid_cross/carotid_cross_expe_scan.hdf5",
         "phantom": "",
         "gt": "generated:multi_angle_das",
@@ -95,6 +101,7 @@ IN_VIVO_SCENES = [
         "mode": "in_vivo",
         "source": "in_vivo",
         "iq": "database/in_vivo/carotid_long/carotid_long_expe_dataset_iq.hdf5",
+        "rf": "database/in_vivo/carotid_long/carotid_long_expe_dataset_rf.hdf5",
         "scan": "database/in_vivo/carotid_long/carotid_long_expe_scan.hdf5",
         "phantom": "",
         "gt": "generated:multi_angle_das",
@@ -352,7 +359,7 @@ def das_reference_from_iq(
         ), float(safe_max.cpu())
 
 
-def process_scene(scene, source_root, row_block=24):
+def process_scene(scene, source_root, row_block=24, storage=None):
     """Execute process scene."""
     required_scene_keys = {"name", "mode", "source", "iq", "scan", "phantom", "gt"}
     present_scene_keys = set(scene) if isinstance(scene, dict) else set()
@@ -480,7 +487,41 @@ def process_scene(scene, source_root, row_block=24):
     if not np.isfinite(norm_ref) or norm_ref <= 0:
         raise ValueError("norm_ref 必须是有限正数")
 
+    channels = {}
+    if storage is not None and set(storage) & {"rf", "analytic_rf"}:
+        with h5py.File(source_root / scene["rf"], "r") as handle:
+            real = np.asarray(handle[f"{BASE}/data/real"], dtype=np.float32)
+            imag = np.asarray(handle[f"{BASE}/data/imag"])
+            rf_fs = _read_h5_scalar(handle, f"{BASE}/sampling_frequency")
+            rf_c = _read_h5_scalar(handle, f"{BASE}/sound_speed")
+            rf_angles = np.asarray(handle[f"{BASE}/angles"]).reshape(-1)
+            rf_t0 = np.asarray(handle[f"{BASE}/initial_time"], dtype=np.float32).reshape(-1)
+            geometry = np.asarray(handle[f"{BASE}/probe_geometry"])
+        if (real.ndim != 3 or real.shape[:2] != (len(angles), i_trans.shape[2])
+                or real.shape[2] < 2 or imag.shape != real.shape
+                or not np.isfinite(real).all() or np.any(imag != 0)):
+            raise ValueError("RF 必须是匹配角度和通道的有限实信号，虚部必须为零")
+        if (not np.isfinite(rf_fs) or rf_fs <= 2 * fc or not np.isclose(rf_c, c)
+                or not np.array_equal(rf_angles, angles)
+                or geometry.shape != (3, i_trans.shape[2])
+                or not np.isfinite(geometry).all()
+                or not np.allclose(geometry[0], (np.arange(i_trans.shape[2]) - (i_trans.shape[2]-1)/2) * pitch, rtol=1e-4, atol=1e-9)
+                or np.any(geometry[1:] != 0)):
+            raise ValueError("RF 采样率、声速、角度或均匀线阵几何与场景定义不一致")
+        if rf_t0.size == 1:
+            rf_t0 = np.repeat(rf_t0, len(angles))
+        if rf_t0.shape != angles.shape or not np.isfinite(rf_t0).all():
+            raise ValueError("RF initial_time 必须匹配角度数量且有限")
+        rf = real.transpose(0, 2, 1)
+        channels.update(rf_fs=rf_fs, rf_angles=rf_angles.astype(np.float32), rf_t0=rf_t0[None])
+        if "rf" in storage:
+            channels["rf"] = rf[None]
+        if "analytic_rf" in storage:
+            channels["ar_i"] = rf[None]
+            channels["ar_q"] = hilbert(rf, axis=1).imag.astype(np.float32)[None]
+
     return {
+        **channels,
         "I": i_trans[np.newaxis, ...],
         "Q": q_trans[np.newaxis, ...],
         "gt": gt,
@@ -540,7 +581,7 @@ def compact_sequence_config(values):
     return array.tolist()
 
 
-def build_embedded_config(items, output_path, row_block):
+def build_embedded_config(items, output_path, row_block, storage=None):
     """Build embedded config."""
     has_official_gt = any(
         item["meta"]["gt"] and not item["meta"]["gt"].startswith("generated:")
@@ -606,8 +647,10 @@ def build_embedded_config(items, output_path, row_block):
             },
         }
 
-    return {
-        "schema_version": 1,
+    storage = storage or {"iq": {"dtype": "float16", "normalize": True}}
+    available = {"iq"} | set(storage) | ({"analytic_rf"} if "rf" in storage else set())
+    config = {
+        "schema_version": 2,
         "dataset": {
             "id": output_path.stem,
             "type": "PICMUS",
@@ -618,11 +661,16 @@ def build_embedded_config(items, output_path, row_block):
             "source_kind": "official_PICMUS_data",
         },
         "h5_schema": {
-            "iq_layout": ["sample", "angle", "time", "channel"],
+            "input_layouts": {
+                domain: ["sample", "angle", "time", "channel"] for domain in storage
+            },
             "ground_truth_layout": ["sample", "image_channel", "z", "x"],
             "padding": {
                 "value": 0.0,
-                "time_valid_length_dataset": "/valid_time_samples",
+                "valid_length_datasets": {
+                    domain: {"iq": "/valid_time_samples", "rf": "/rf_length", "analytic_rf": "/ar_len"}[domain]
+                    for domain in storage
+                },
             },
             "sample_metadata": "config_yaml.source_samples",
             "units": {
@@ -655,6 +703,7 @@ def build_embedded_config(items, output_path, row_block):
                     "formula": "sqrt(mean(I^2 + Q^2) + epsilon)",
                     "epsilon": 1.0e-12,
                     "scale_reference_dataset": "/all_scale_ref",
+                    "scale_reference_source": "paired_official_PICMUS_IQ",
                 },
                 # PICMUS 的输入本身就是基带 IQ；没有在打包阶段执行抽取。
                 # 采样率相关元数据统一放在 config_yaml，避免遗留 gt_fs 等
@@ -664,12 +713,13 @@ def build_embedded_config(items, output_path, row_block):
                 "packed_sampling_frequency_hz": float(items[0]["fs"]),
             },
             "storage": {
-                "inputs": {"iq": {"dtype": "float16", "normalize": True}},
+                "inputs": storage,
             },
             "ground_truth": ground_truth,
             "training_targets": {
                 "domain_targets": {
-                    "iq": {ground_truth_algorithm: {"db": "/all_envdb_norm"}},
+                    domain: {ground_truth_algorithm: {"db": "/all_envdb_norm", "kind": "image_reference", "source_domain": "iq"}}
+                    for domain in available
                 },
             },
         },
@@ -680,10 +730,12 @@ def build_embedded_config(items, output_path, row_block):
                 "phantom_mode": item["meta"]["mode"],
                 "phantom_source": item["meta"]["source"],
                 "iq_path": item["meta"]["iq"],
+                **({"rf_path": item["meta"]["rf"]} if "rf_fs" in item else {}),
                 "scan_path": item["meta"]["scan"],
                 "phantom_path": item["meta"]["phantom"],
                 "gt_path": item["meta"]["gt"],
                 "path_roles": {
+                    **({"rf_path": "read_input"} if "rf_fs" in item else {}),
                     "iq_path": "read_input",
                     "scan_path": "read_input",
                     "phantom_path": "reference_only_not_read",
@@ -701,6 +753,32 @@ def build_embedded_config(items, output_path, row_block):
             "base": "PICMUS_ROOT",
         },
     }
+
+    if "rf" in storage:
+        config["generation"]["input_rf"] = {
+            "source": "PICMUS_real_RF", "carrier_frequency_source": "paired_official_IQ.modulation_frequency",
+            "scale_reference_dataset": "/all_scale_ref",
+        }
+        if "iq" not in storage:
+            source_fs = float(items[0]["rf_fs"])
+            factor = round(source_fs / items[0]["fs"])
+            if factor < 1 or not np.isclose(source_fs / factor, items[0]["fs"]):
+                raise ValueError("RF 派生 IQ 需要整数降采样倍数")
+            config["acquisition"] = {"fc_hz": float(items[0]["fc"])}
+            config["generation"]["input_iq"].update(
+                source="derived_from_PICMUS_RF", decimation_factor=factor,
+                source_sampling_frequency_hz=source_fs,
+                ddc={"phase_sign_q": -1, "mixing_gain": 1.0,
+                     "lowpass": "firwin_64_then_filtfilt", "num_taps": 64,
+                     "cutoff_hz": 0.8 * float(items[0]["fc"]),
+                     "resampling": "scipy_resample_poly_kaiser_12"},
+            )
+    if "analytic_rf" in storage:
+        config["generation"]["input_analytic_rf"] = {
+            "source": "PICMUS_real_RF", "operation": "scipy.signal.hilbert along time before padding",
+            "scale_reference_dataset": "/all_scale_ref",
+        }
+    return config
 
 
 def save_gt_images(items, image_dir, dr=DYNAMIC_RANGE):
@@ -866,46 +944,64 @@ def validate_shared_metadata(items):
                 )
 
 
+def validate_storage(storage):
+    if not isinstance(storage, dict) or not storage or set(storage) - {"rf", "analytic_rf", "iq"}:
+        raise ValueError("storage.inputs 必须选择 rf、analytic_rf、iq 中至少一种")
+    for domain, options in storage.items():
+        if (not isinstance(options, dict) or set(options) != {"dtype", "normalize"}
+                or options["dtype"] not in ("float16", "float32")
+                or type(options["normalize"]) is not bool):
+            raise ValueError(f"storage.inputs.{domain} 必须声明 dtype: float16/float32 和 normalize: true/false")
+    return storage
+
+
+def write_channels(handle, name, items, component, options):
+    arrays = []
+    for item in items:
+        values = item[component]
+        if component in ("I", "Q"):
+            if not options["normalize"]:
+                values = values * item["scale_ref"]
+        elif options["normalize"]:
+            values = values / item["scale_ref"]
+        arrays.append({component: values})
+    values = pad_and_concat(arrays, component).astype(options["dtype"])
+    if not np.isfinite(values).all():
+        raise OverflowError(f"{name} 转换为 {options['dtype']} 后产生 NaN/Inf")
+    handle.create_dataset(name, data=values, compression="gzip", compression_opts=4)
+
+
 def pack_dataset(
     scenes,
     output_path,
     source_root,
     row_block=24,
     save_gt_images_enabled=True,
+    storage=None,
 ):
     """Execute pack dataset."""
     output_path = Path(output_path)
     if output_path.exists():
         raise FileExistsError(f"输出文件已存在，请先移除或更换路径: {output_path}")
-    items = [process_scene(scene, source_root, row_block=row_block) for scene in scenes]
+    storage = validate_storage({"iq": {"dtype": "float16", "normalize": True}} if storage is None else storage)
+    items = [process_scene(scene, source_root, row_block=row_block, storage=storage) for scene in scenes]
     validate_shared_metadata(items)
+    if set(storage) & {"rf", "analytic_rf"}:
+        for item in items[1:]:
+            if (item["rf_fs"] != items[0]["rf_fs"]
+                    or not np.array_equal(item["rf_angles"], items[0]["rf_angles"])):
+                raise ValueError("同一 H5 的 RF 采样率和角度必须一致")
     base = items[0]
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    packed_i = pad_and_concat(items, "I").astype(np.float16, copy=False)
-    packed_q = pad_and_concat(items, "Q").astype(np.float16, copy=False)
     packed_gt = np.concatenate([item["gt"] for item in items], axis=0).astype(
         np.float16,
         copy=False,
     )
-    if not np.isfinite(packed_i).all() or not np.isfinite(packed_q).all():
-        raise OverflowError("IQ 转换为 float16 后产生 NaN/Inf")
     if not np.isfinite(packed_gt).all():
         raise OverflowError("GT 转换为 float16 后产生 NaN/Inf")
 
     with atomic_h5_output(output_path) as hf:
-        hf.create_dataset(
-            "all_multi_I",
-            data=packed_i,
-            compression="gzip",
-            compression_opts=4,
-        )
-        hf.create_dataset(
-            "all_multi_Q",
-            data=packed_q,
-            compression="gzip",
-            compression_opts=4,
-        )
-
+        hf.create_dataset("acquisition_id", data=[item["meta"]["name"] for item in items], dtype=h5py.string_dtype("utf-8"))
         hf.create_dataset(
             "all_envdb_norm",
             data=packed_gt,
@@ -951,11 +1047,24 @@ def pack_dataset(
 
         string_dtype = h5py.string_dtype(encoding="utf-8")
         config_yaml = yaml.safe_dump(
-            build_embedded_config(items, output_path, row_block),
+            build_embedded_config(items, output_path, row_block, storage),
             sort_keys=False,
             allow_unicode=True,
         )
         hf.create_dataset("config_yaml", data=config_yaml, dtype=string_dtype)
+        if "iq" in storage:
+            for key, component in (("all_multi_I", "I"), ("all_multi_Q", "Q")):
+                write_channels(hf, key, items, component, storage["iq"])
+        for domain, fields in (("rf", ("rf",)), ("analytic_rf", ("ar_i", "ar_q"))):
+            if domain not in storage:
+                continue
+            prefix = "rf" if domain == "rf" else "ar"
+            for field in fields:
+                write_channels(hf, field, items, field, storage[domain])
+            hf.create_dataset(f"{prefix}_fs", data=np.float32(items[0]["rf_fs"]))
+            hf.create_dataset(f"{prefix}_angles", data=items[0]["rf_angles"])
+            hf.create_dataset(f"{prefix}_t0", data=np.concatenate([item["rf_t0"] for item in items]))
+            hf.create_dataset("rf_length" if domain == "rf" else "ar_len", data=np.array([item[fields[0]].shape[2] for item in items], dtype=np.int32))
 
     if save_gt_images_enabled:
         save_gt_images(items, output_path.parent / "gt_preview")
@@ -966,6 +1075,7 @@ def pack_dataset(
 def parse_args():
     """Parse args."""
     parser = argparse.ArgumentParser(description="Pack project H5 datasets.")
+    parser.add_argument("--config", type=Path, default=Path(__file__).with_name("config.yaml"))
     parser.add_argument("--source_root", default=str(DEFAULT_SOURCE_ROOT))
     parser.add_argument("--out_dir", default=str(PROJECT_ROOT / "data"))
     parser.add_argument(
@@ -996,6 +1106,12 @@ def parse_args():
 def main():
     """Run the command-line workflow."""
     args = parse_args()
+    with args.config.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    if (not isinstance(config, dict) or set(config) != {"storage"}
+            or not isinstance(config["storage"], dict) or set(config["storage"]) != {"inputs"}):
+        raise ValueError("打包配置必须包含 storage.inputs")
+    storage = validate_storage(config["storage"]["inputs"])
     source_root = Path(args.source_root)
     out_dir = Path(args.out_dir)
     choices = (
@@ -1014,6 +1130,7 @@ def main():
             source_root,
             row_block=args.row_block,
             save_gt_images_enabled=not args.no_save_gt_images,
+            storage=storage,
         )
 
 

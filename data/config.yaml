@@ -1,0 +1,11 @@
+storage:
+  inputs:
+    rf:
+      dtype: float32
+      normalize: false
+    iq:
+      dtype: float16
+      normalize: true
+    # analytic_rf:
+    #   dtype: float16
+    #   normalize: true
