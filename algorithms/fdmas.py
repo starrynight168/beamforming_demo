@@ -66,11 +66,12 @@ class FDMASBeamformerIQ:
         self.rf_filter = None
         self.rf_filter_padlen = None
         if self.signal_domain == "rf":
-            if fs <= 5.0 * self.fc:
+            if fs <= 2.0 * self.fc:
                 raise ValueError(
-                    f"RF 输入采样率必须高于 2.5fc 谐波带的 Nyquist 下限 5fc={5.0 * self.fc:.6g} Hz，"
+                    f"RF 输入采样率必须高于载频的 Nyquist 下限 2fc={2.0 * self.fc:.6g} Hz，"
                     f"当前 fs={fs:.6g} Hz"
                 )
+            # Interpolate RF onto the depth grid before the nonlinear pair operation.
             depth_fs = c / (2.0 * float(np.diff(z_grid).mean()))
             self.rf_filter = design_rf_fdmas_filter(self.fc, depth_fs)
             self.rf_filter_padlen = 3 * (RF_FILTER_TAPS - 1)

@@ -429,11 +429,39 @@ class BeamformerRegressionTests(unittest.TestCase):
         self.assertLess(stopband_amplitude, passband_amplitude * 0.05)
         with self.assertRaisesRegex(ValueError, "Nyquist"):
             fdmas.design_rf_fdmas_filter(fc, 20e6)
-        with self.assertRaisesRegex(ValueError, "5fc"):
+        with self.assertRaisesRegex(ValueError, "2fc"):
             fdmas.FDMASBeamformerIQ(
-                z, np.array([0.0]), 4, 0.0003, 1540.0, fc, 24e6,
+                z, np.array([0.0]), 4, 0.0003, 1540.0, fc, 10e6,
                 np.zeros(1), np.zeros(1), options=options,
             )
+
+    def test_fdmas_rf_4fc_input_generates_second_harmonic_on_dense_grid(self):
+        fc, c = 1e6, 1540.0
+        z = fdmas.fdmas_depth_grid(np.array([0.01, 0.08]), c, fc, 4*fc, "rf")
+        processing_fs = c / (2*np.diff(z).mean())
+        self.assertGreater(processing_fs, 5*fc)
+        outputs = []
+        for input_fs in (4*fc, 16*fc):
+            t = np.arange(int(0.0002*input_fs))/input_fs
+            carrier = np.cos(2*np.pi*fc*t + 0.37).astype(np.float32)
+            channels = np.repeat(carrier[None, :, None], 2, axis=2)
+            bf = fdmas.FDMASBeamformerIQ(
+                z, np.array([0.0]), 2, 1e-9, c, fc, input_fs,
+                np.zeros(1), np.zeros(1),
+                options=self.options(fdmas, signal_domain="rf", interp="cubic"),
+            )
+            real, imag = bf(channels, np.zeros_like(channels), np.zeros(1), np.zeros(1), input_fs)
+            self.assertTrue(np.isfinite(real).all())
+            np.testing.assert_array_equal(imag, np.zeros_like(imag))
+            output = real[128:-256, 0]
+            spectrum = np.abs(np.fft.rfft(output - output.mean()))
+            frequencies = np.fft.rfftfreq(len(output), 1/processing_fs)
+            self.assertLess(abs(frequencies[spectrum.argmax()] - 2*fc), processing_fs/len(output))
+            self.assertGreater(np.std(output), 0.1)
+            self.assertLess(abs(output.mean()), 0.05*np.std(output))
+            outputs.append(output)
+        self.assertGreater(np.corrcoef(outputs)[0, 1], 0.98)
+        self.assertLess(np.linalg.norm(outputs[0]-outputs[1])/np.linalg.norm(outputs[1]), 0.1)
 
     def test_fdmas_preserves_pairs_with_imbalanced_weights(self):
         signal = torch.tensor([[1.0, 4.0]])

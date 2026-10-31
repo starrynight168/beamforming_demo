@@ -68,7 +68,7 @@ class AlgorithmSignalEntryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             path = root / 'rf.h5'
-            fs, fc, c = 30e6, 5e6, 1540.
+            fs, fc, c = 20e6, 5e6, 1540.
             time = np.arange(512)/fs
             rf = np.exp(-((time-6e-6)/1e-6)**2)*np.cos(2*np.pi*fc*time)
             z = np.linspace(.003, .006, 5, dtype=np.float32)
