@@ -184,7 +184,7 @@ python tools/run_ablation_cn.py
 
 YAML 场景不再配置 `allow_evaluation`；`run_one.py --no_evaluate` 可主动关闭评估，旧开关字段会明确报错。评估入口不读取根目录 YAML。H5 相对模体路径以本项目 `data/PICMUS` 为基准；显式 CLI 参数可补充缺失的类型或模体路径，但类型不得与 H5 元数据冲突，模体文件仍须通过官方定义校验。
 
-单独运行评估时，`--methods auto` 从同目录 `run_params.json` 读取当前算法及标签，或模型及基线记录。自动化回归测试位于 `tests/` 和 `evaluation/tests/`。
+单独运行评估时，`--methods auto` 从同目录 `run_params.json` 读取当前算法及标签，或模型及基线记录。自动化回归测试位于 `tests/` 和 `evaluation/tests/`。`tools/evaluate_point_targets.py` 依赖 `data.scripts.simulate_point_targets`，该模块未包含在本项目中，因此此入口不能在 `beamforming_demo` 内完整运行。
 
 本工程内置的评估计算核心（`evaluation/evaluate.py`）在四个 controlled phantom 场景中对齐 PICMUS 挑战赛官方 MATLAB 算法语义：
 - **对比度 (Contrast)**: 基于官方同心环形 ROI 划定，并且方差计算使用样本方差（$N-1$ 自由度），保障与 MATLAB 的 `var()` 结果完全一致；
@@ -196,6 +196,15 @@ YAML 场景不再配置 `allow_evaluation`；`run_one.py --no_evaluate` 可主�
 *(注：in-vivo H5 中的 `all_envdb_norm` 是打包阶段生成的多角度 DAS 参考图，不等同于带物理靶标的 PICMUS GT。因此在体颈动脉场景会自动跳过 phantom ROI、点目标和 PICMUS 分组定量，只做图像重建与对比拼接。)*
 
 ---
+
+## 自动化测试
+
+从项目根目录运行：
+
+```bash
+python -m unittest discover -s tests -q
+python -m unittest discover -s evaluation/tests -q
+```
 
 ## 新增算法扩展指南
 
