@@ -1003,7 +1003,10 @@ def main():
         raise ValueError("dr 必须是有限正数")
     repeat_references = infer_repeat_references(metrics_dir, args.reference_mode)
 
-    summary_rows = read_rows(os.path.join(metrics_dir, "summary_metrics.csv"))
+    summary_path = os.path.join(metrics_dir, "summary_metrics.csv")
+    if not os.path.isfile(summary_path):
+        raise FileNotFoundError(f"Missing required metrics file: {summary_path}")
+    summary_rows = read_rows(summary_path)
     contrast_group_rows = read_rows(
         os.path.join(metrics_dir, "contrast_group_metrics.csv"),
     )
@@ -1120,6 +1123,10 @@ def main():
                 target_rows,
                 peak_method,
             )
+        else:
+            roi_path = os.path.join(metrics_dir, "roi_targets.png")
+            Path(roi_path).unlink(missing_ok=True)
+            remove_paged_plot_files(roi_path)
         profile_order = sorted(range(len(methods)), key=lambda index: method_sort_key(methods[index]))
         profile_methods = [methods[index] for index in profile_order]
         profile_comparison = comparison[profile_order]

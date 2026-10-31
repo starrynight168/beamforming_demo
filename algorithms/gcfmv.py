@@ -71,7 +71,7 @@ class RowDynamicMVBeamformerIQ(mv.RowDynamicMVBeamformerIQ):
         return output * factor.pow(self.options.gcf_power).view(-1, 1, 1)
 
     def combine_subarrays(self, values):
-        output = super().combine_subarrays(values) if self.mv_axis == "tx" else values.sum(dim=(-2, -1))
+        output = super().combine_subarrays(values)
         if self.options.gcf_power == 0:
             return output
         tx_bins = self.options.gcf_tx_low_bins

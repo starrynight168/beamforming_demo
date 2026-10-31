@@ -333,6 +333,12 @@ class EvaluationInputTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "必须提供"):
                 load_picmus_context(path, 0, phantom_path="none")
 
+    def test_misspelled_resolution_protocol_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_picmus_sample(Path(directory), mode="resolution_distorsion")
+            with self.assertRaisesRegex(ValueError, "不支持的 PICMUS 模体组合"):
+                load_picmus_context(path, 0)
+
     def test_phantom_parameters_and_target_order_must_match_official_definition(self):
         for mode, dataset, operation in (
             ("contrast_speckle", "phantom_occlusionDiameter", "change"),
@@ -742,6 +748,57 @@ class EvaluationInputTests(unittest.TestCase):
 
 
 class PlotOutputTests(unittest.TestCase):
+    def test_missing_required_summary_metrics_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metrics = root / "metrics"
+            metrics.mkdir()
+            (root / "run_params.json").write_text(
+                json.dumps({"models": {"model": "model.pth"}}), encoding="utf-8"
+            )
+            args = SimpleNamespace(
+                metrics_dir=str(metrics), dr=None, reference_mode="auto",
+                profile_roi_index=None, profile_target_index=None,
+            )
+            with patch("evaluation.plot_metrics.parse_args", return_value=args):
+                with self.assertRaisesRegex(FileNotFoundError, "summary_metrics.csv"):
+                    plot_main()
+
+    def test_no_ground_truth_cleans_stale_roi_plot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metrics = root / "metrics"
+            metrics.mkdir()
+            h5_path = write_picmus_sample(root)
+            comparison_path = root / "comparison.npy"
+            np.save(comparison_path, np.zeros((1, 201, 201)))
+            (root / "run_params.json").write_text(
+                json.dumps({"models": {"model": "model.pth"}}), encoding="utf-8"
+            )
+            (metrics / "summary_metrics.csv").write_text(
+                "status\nnot_applicable\n", encoding="utf-8"
+            )
+            roi_path = metrics / "roi_targets.png"
+            roi_path.write_bytes(b"stale")
+            (metrics / "evaluation_meta.json").write_text(
+                json.dumps(
+                    {
+                        "comparison_npy": str(comparison_path),
+                        "h5_path": str(h5_path),
+                        "methods": ["DAS"],
+                        "has_gt": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(
+                metrics_dir=str(metrics), dr=None, reference_mode="auto",
+                profile_roi_index=None, profile_target_index=None,
+            )
+            with patch("evaluation.plot_metrics.parse_args", return_value=args):
+                plot_main()
+            self.assertFalse(roi_path.exists())
+
     def test_point_profile_uses_peak_inside_target_window_as_reference(self) -> None:
         from matplotlib.axes import Axes
 
@@ -792,6 +849,9 @@ class PlotOutputTests(unittest.TestCase):
             (metrics / "evaluation_meta.json").write_text(
                 json.dumps({"comparison_npy": "missing.npy", "h5_path": "missing.h5"}),
                 encoding="utf-8",
+            )
+            (metrics / "summary_metrics.csv").write_text(
+                "status\nnot_applicable\n", encoding="utf-8"
             )
             stale_paths = [
                 metrics / "roi_targets.png",

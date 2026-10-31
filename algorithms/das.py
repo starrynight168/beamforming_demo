@@ -13,6 +13,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from algorithms.common import (
     add_common_arguments,
     add_io_arguments,
+    aperture_start_indices,
     aperture_half_width,
     aperture_window_1d,
     aperture_window_from_dx,
@@ -97,10 +98,6 @@ class DASBeamformerIQ:
                 dtype=torch.float32,
                 device=device,
             )
-            centers = torch.argmin(
-                torch.abs(self.x_grid[:, None] - self.ep[None, :]),
-                dim=1,
-            )
             for iz, depth in enumerate(self.z_grid):
                 k = dynamic_aperture_channel_count(
                     float(depth.item()),
@@ -109,7 +106,7 @@ class DASBeamformerIQ:
                     n_elem,
                     self.options.dynamic_aperture,
                 )
-                starts = torch.clamp(centers - k // 2, 0, n_elem - k)
+                starts = aperture_start_indices(self.x_grid, n_elem, k, pitch)
                 channels = starts[:, None] + torch.arange(k, device=device)[None, :]
                 row_window = aperture_window_1d(k, self.options.window, device).expand(
                     self.width,

@@ -12,6 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from algorithms import mv
 from algorithms.common import (
+    aperture_start_indices,
     aperture_window_1d,
     dynamic_aperture_channel_count,
     beamforming_depth_grid,
@@ -157,11 +158,6 @@ def cmsaw_weight_from_delayed_data(
     if z_grid.shape != (height,) or x_grid.shape != (width,) or n_channels < 1:
         raise ValueError("delayed IQ shape must match the image grids and have channels")
     x_t = torch.from_numpy(x_grid).to(data_device)
-    element_x = (
-        torch.arange(n_channels, device=data_device) - (n_channels - 1) / 2.0
-    ) * pitch
-    centers = torch.argmin(torch.abs(x_t[:, None] - element_x[None]), dim=1)
-
     row_cache = []
     for depth in z_grid:
         k = dynamic_aperture_channel_count(
@@ -171,7 +167,7 @@ def cmsaw_weight_from_delayed_data(
             n_channels,
             dynamic_aperture,
         )
-        starts = torch.clamp(centers - k // 2, 0, n_channels - k)
+        starts = aperture_start_indices(x_t, n_channels, k, pitch)
         channels = starts[:, None] + torch.arange(k, device=data_device)[None]
         row_cache.append(
             (k, channels, aperture_window_1d(k, window, data_device)[None]),

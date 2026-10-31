@@ -88,6 +88,8 @@ PARAM_VALUE_LABELS = {
 
 CATEGORICAL_PARAM_CHOICES = {
     "aperture_mode": ("discrete", "geometry"),
+    "signal_domain": ("rf", "analytic_rf", "iq"),
+    "mv_axis": ("rx", "tx", "joint"),
     "window": ("rect", "tukey", "hann", "hamming", "blackman", "kaiser"),
     "interp": (
         "nearest",
@@ -140,12 +142,13 @@ def parse_value_list(raw):
     return [parse_scalar(item) for item in raw.split(",") if item.strip()]
 
 
-def numeric_range_values():
+def numeric_range_values(integer=False):
     """Execute numeric range values."""
-    start = float(ask_text("起始值"))
-    stop = float(ask_text("结束值"))
-    step = float(ask_text("步长"))
-    if not all(math.isfinite(value) for value in (start, stop, step)):
+    parse_number = int if integer else float
+    start = parse_number(ask_text("起始值"))
+    stop = parse_number(ask_text("结束值"))
+    step = parse_number(ask_text("步长"))
+    if not integer and not all(math.isfinite(value) for value in (start, stop, step)):
         raise ValueError("起始值、结束值和步长必须是有限数。")
     if step == 0:
         raise ValueError("步长不能为 0。")
@@ -361,7 +364,19 @@ def choose_values(param_name, default_value):
         )
         try:
             if mode == "range":
-                values = numeric_range_values()
+                integer = (
+                    param_name in {
+                        "temporal_win",
+                        "num_eig",
+                        "gcf_low_bins",
+                        "gcf_tx_low_bins",
+                        "min_subarray_len",
+                        "depth_smooth_rows",
+                    }
+                    or isinstance(default_value, int)
+                    and not isinstance(default_value, bool)
+                )
+                values = numeric_range_values(integer=integer)
             else:
                 raw = ask_text("请输入消融取值,多个用逗号分隔")
                 values = parse_value_list(raw)

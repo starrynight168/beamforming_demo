@@ -67,13 +67,6 @@ class PaperFormulaTests(unittest.TestCase):
         torch.testing.assert_close(weights.real.squeeze(), torch.tensor([1 / 3, 2 / 3]))
         torch.testing.assert_close(steering.mH @ weights, torch.ones((1, 1, 1), dtype=torch.complex64))
 
-    def test_singular_loaded_matrix_uses_pseudoinverse(self):
-        floor = 20 * torch.finfo(torch.float32).eps
-        covariance = torch.diag(torch.tensor([-floor, 1.0], dtype=torch.complex64))[None]
-        steering = torch.ones((1, 2, 1), dtype=torch.complex64)
-        weights = normalized_mv_weights(covariance, steering)
-        torch.testing.assert_close(weights.squeeze(), torch.tensor([0.0, 1.0], dtype=torch.complex64))
-
     def test_joint_covariance_divides_by_actual_fractional_weight_sum(self):
         data = torch.tensor([[[[1.0], [2.0]], [[0.0], [0.0]]]], dtype=torch.complex64)
         valid = torch.tensor([[[[True], [True]], [[False], [False]]]])

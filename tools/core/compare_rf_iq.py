@@ -192,7 +192,26 @@ def main():
     parser.add_argument("--iq_gain", type=float, default=2.0, help="IQ amplitude correction for shared display")
     parser.add_argument("--stft_window", type=int, default=16, help="Axial STFT window length in RF samples")
     args = parser.parse_args()
-    if args.sample_idx < 0 or args.mv_dl <= 0 or not 0 < args.subarray_ratio <= 1 or args.temporal_win < 1 or args.temporal_win % 2 != 1 or args.f_number <= 0 or args.dr <= 0 or args.iq_gain <= 0 or args.stft_window < 8 or args.stft_window % 2 != 0:
+    continuous_values = (
+        args.mv_dl,
+        args.subarray_ratio,
+        args.f_number,
+        args.dr,
+        args.iq_gain,
+    )
+    valid_parameters = (
+        args.sample_idx >= 0
+        and args.mv_dl > 0
+        and 0 < args.subarray_ratio <= 1
+        and args.temporal_win >= 1
+        and args.temporal_win % 2 == 1
+        and args.f_number > 0
+        and args.dr > 0
+        and args.iq_gain > 0
+        and args.stft_window >= 8
+        and args.stft_window % 2 == 0
+    )
+    if not np.isfinite(continuous_values).all() or not valid_parameters:
         parser.error("Invalid sample, MV, aperture or display parameters")
     if args.rf_root is None and args.rf_path is None:
         parser.error("Specify --rf_root or --rf_path")

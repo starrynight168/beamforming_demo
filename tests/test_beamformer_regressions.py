@@ -17,6 +17,7 @@ import torch
 from algorithms import ccmv, cmsaw, das, esbmv, fdmas, gcfmv, mban, mv, template_algorithm
 from algorithms.common import (
     WINDOW_CHOICES,
+    aperture_start_indices,
     algorithm_source_paths,
     envelope_to_db,
     generalized_coherence_factor,
@@ -215,14 +216,69 @@ class BeamformerRegressionTests(unittest.TestCase):
         angles = np.array([-0.1, 0.0, 0.1], dtype=np.float32)
         rx = torch.tensor([[[0.2], [0.8]]], dtype=torch.complex64)
         tx = torch.tensor([[[0.3], [0.7]]], dtype=torch.complex64)
-        with patch.object(gcfmv, "device", torch.device("cpu")):
+        with patch.object(gcfmv, "device", torch.device("cpu")), patch.object(
+            mv, "device", torch.device("cpu")
+        ):
             bf = self.beamformer(gcfmv, self.options(gcfmv, mv_axis="joint", gcf_power=0.0), channels=4)
             with patch.object(mv, "normalized_mv_weights", side_effect=(rx, tx)):
                 i, q = bf(signal, np.zeros_like(signal), angles, np.zeros(3), 1.0)
+            baseline = self.beamformer(mv, self.options(mv, mv_axis="joint"), channels=4)
+            with patch.object(mv, "normalized_mv_weights", side_effect=(rx, tx)):
+                i_mv, q_mv = baseline(signal, np.zeros_like(signal), angles, np.zeros(3), 1.0)
         rx_values = 0.2 * values[:, :-1] + 0.8 * values[:, 1:]
-        expected = (0.3 * rx_values[:-1] + 0.7 * rx_values[1:]).sum()
+        expected = (0.3 * rx_values[:-1] + 0.7 * rx_values[1:]).mean()
         np.testing.assert_allclose(i, expected, rtol=1e-6)
         np.testing.assert_allclose(q, 0.0, atol=1e-6)
+        np.testing.assert_allclose(i, i_mv, rtol=1e-6)
+        np.testing.assert_allclose(q, q_mv, atol=1e-6)
+
+    def test_discrete_apertures_center_even_windows_on_pixels(self):
+        x_grid = (-0.25, 0.0, 0.25)
+        for module in self.modules:
+            if module is cmsaw:
+                continue
+            with self.subTest(module=module.METHOD_NAME):
+                options = self.options(module, dynamic_aperture=True, f_number=1.0)
+                with patch.object(module, "device", torch.device("cpu")):
+                    beamformer = self.beamformer(
+                        module, options, z=(1.0,), x=x_grid, channels=4
+                    )
+                for pixel in range(len(x_grid)):
+                    if module in (das, fdmas):
+                        channels = torch.where(beamformer.window[0, pixel] > 0)[0]
+                    else:
+                        channels = beamformer.row_cache[0]["ch_idx_t"][pixel, :, 0]
+                    self.assertEqual(channels.cpu().tolist(), [1, 2])
+
+        data = torch.tensor(
+            [[[[1, 2, 3, 4], [2, 4, 1, 3], [3, 1, 4, 2]]]],
+            dtype=torch.complex64,
+        )
+        starts = []
+        with patch.object(
+            cmsaw,
+            "aperture_start_indices",
+            side_effect=lambda x, n, k, pitch: starts.append(
+                aperture_start_indices(x, n, k, pitch)
+            ) or starts[-1],
+        ):
+            weights = cmsaw.cmsaw_weight_from_delayed_data(
+                data,
+                np.array([1.0]),
+                np.array(x_grid),
+                1.0,
+                1.0,
+                True,
+                "rect",
+                0.5,
+                2,
+                1.0,
+                0.4,
+                90.0,
+                1,
+            )
+        self.assertEqual(starts[0].cpu().tolist(), [1, 1, 1])
+        self.assertTrue(torch.isfinite(weights).all())
 
     def test_rx_gcf_compounds_independent_angles_without_switching_method(self):
         rng = np.random.default_rng(71)
@@ -273,8 +329,7 @@ class BeamformerRegressionTests(unittest.TestCase):
                     engine = bf.mv_bf if module is cmsaw else bf
                     self.assertIs(type(engine).__call__, mv.RowDynamicMVBeamformerIQ.__call__)
                     i, q = bf(signal, np.zeros_like(signal), angles, np.zeros(3), 1.0)
-                    gain = 10 if module is gcfmv and axis == "joint" else 1
-                    np.testing.assert_allclose(i, gain, atol=3e-4)
+                    np.testing.assert_allclose(i, 1, atol=3e-4)
                     np.testing.assert_allclose(q, 0.0, atol=1e-6)
 
     def test_esbmv_projects_weights_on_both_axes_in_joint_mode(self):

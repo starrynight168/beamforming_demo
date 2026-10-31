@@ -433,8 +433,6 @@ def load_picmus_context(
             raise ValueError(f"H5 缺少 {name}，请显式指定 --{name}")
         values.append(value)
     mode, source = values
-    if mode == "resolution_distorsion":
-        mode = "resolution_distortion"
     if (mode, source) in NON_PICMUS_PROTOCOLS:
         return None
     supported_mode = mode in {"contrast_speckle", "resolution_distortion"}

@@ -658,6 +658,13 @@ def dynamic_aperture_channel_count(
     return min(count, n_channels)
 
 
+def aperture_start_indices(x_positions, n_channels, aperture_size, pitch):
+    starts = torch.round(
+        x_positions / pitch + (n_channels - aperture_size) / 2
+    )
+    return starts.long().clamp(0, n_channels - aperture_size)
+
+
 def tgc_gain(z_grid, fc, tgc_alpha):
     return 10 ** (tgc_alpha * (fc / 1e6) * (z_grid * 100) * 2.0 / 20.0)
 
@@ -795,8 +802,8 @@ def build_row_dynamic_geometry(
         )
         subarray_size = min(max(int(aperture_size * subarray_ratio), 2), aperture_size)
         subarray_count = aperture_size - subarray_size + 1
-        idx_start = torch.clamp(
-            c_idx - aperture_size // 2, 0, n_channels - aperture_size
+        idx_start = aperture_start_indices(
+            x_tensor, n_channels, aperture_size, pitch
         )
         ch_idx = idx_start.unsqueeze(1) + torch.arange(
             aperture_size, device=device
@@ -849,10 +856,7 @@ def normalized_mv_weights(covariance, steering):
     eye = torch.eye(size, dtype=covariance.dtype, device=covariance.device)
     # A relative numerical floor also stabilizes zero user-specified loading.
     normalized = normalized + (10 * size * torch.finfo(dtype).eps) * eye
-    try:
-        solved = torch.linalg.solve(normalized, steering)
-    except RuntimeError:
-        solved = torch.linalg.pinv(normalized) @ steering
+    solved = torch.linalg.solve(normalized, steering)
     denominator = (steering.mH @ solved).real
     nonzero = denominator.abs() > torch.finfo(dtype).tiny
     safe_denominator = torch.where(nonzero, denominator, torch.ones_like(denominator))

@@ -160,7 +160,7 @@ def load_input_from_h5(hf, sample_idx, domain="iq"):
                 scale = 1.0
             elif "all_scale_ref" not in hf:
                 epsilon = normalization["epsilon"]
-                if normalization["mode"] in ("complex_rms", "rms"):
+                if normalization["mode"] == "complex_rms":
                     scale = float(np.sqrt(np.mean(real**2 + imag**2) + epsilon))
                 else:
                     scale = float(np.std(np.hypot(real, imag)) + epsilon)

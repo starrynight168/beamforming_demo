@@ -40,6 +40,7 @@ from tools.core.ablate_sound_speed import (
 )
 from tools.run_ablation_cn import (
     can_reuse_flat_result,
+    choose_values,
     find_matching_ablation_run,
     method_output_path,
     numeric_range_values,
@@ -47,6 +48,8 @@ from tools.run_ablation_cn import (
     run_ablation_evaluation,
     validate_values,
 )
+from tools.core.compare_rf_iq import main as compare_rf_iq_main
+from tools.core.evaluate_point_targets import parse_args as parse_point_target_args
 from tools.run_wizard_cn import (
     ALGORITHMS,
     ask_algorithm_param,
@@ -56,6 +59,7 @@ from tools.run_wizard_cn import (
     reusable_scene_id,
     sample_can_be_evaluated,
     validate_algorithm_param,
+    validate_select_angles,
 )
 
 
@@ -93,6 +97,15 @@ class AlgorithmAuditTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(ask_algorithm_param("esbmv", "num_eig", 0.0), 3)
+
+    def test_wizard_accepts_nullable_gcf_defaults_and_single_angle_index(self):
+        with patch("tools.run_wizard_cn.ask_text", return_value=""):
+            self.assertIsNone(ask_algorithm_param("gcfmv", "tx_subarray_ratio", None))
+            self.assertIsNone(ask_algorithm_param("gcfmv", "gcf_tx_low_bins", None))
+        self.assertEqual(validate_select_angles("0,"), "0,")
+        for malformed in ("0,,", ",", "0,1,"):
+            with self.subTest(value=malformed), self.assertRaises(ValueError):
+                validate_select_angles(malformed)
 
     def test_wizard_reusable_scene_id_tracks_effective_configuration(self):
         config = {
@@ -545,6 +558,15 @@ class AlgorithmAuditTests(unittest.TestCase):
         self.assertEqual(validate_values("depth_smooth_rows", 1, [1, 3]), [1, 3])
         self.assertEqual(validate_values("f_number", 1.5, [1, 2]), [1, 2])
 
+    def test_point_target_duplicate_methods_and_loadings_are_rejected(self):
+        for option, values in (("--methods", ("mv", "mv")), ("--loadings", ("0.1", "0.1"))):
+            with self.subTest(option=option), patch.object(
+                sys, "argv", ["evaluate_point_targets.py", option, *values]
+            ), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    parse_point_target_args()
+                self.assertEqual(error.exception.code, 2)
+
     def test_saved_cache_signature_cannot_be_overridden_by_extra_params(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -623,6 +645,30 @@ class AlgorithmAuditTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "无法推进"):
                 numeric_range_values()
+
+    def test_integer_ablation_range_returns_integers_and_categorical_values_are_checked(self):
+        with patch("tools.run_ablation_cn.ask_text", side_effect=["1", "5", "2"]):
+            self.assertEqual(numeric_range_values(integer=True), [1, 3, 5])
+        with (
+            patch("tools.run_ablation_cn.ask_choice", return_value="range"),
+            patch("tools.run_ablation_cn.ask_text", side_effect=["1", "5", "2"]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            values = choose_values("temporal_win", 3)
+        self.assertEqual(values, [1, 3, 5])
+        self.assertTrue(all(isinstance(value, int) for value in values))
+        self.assertEqual(validate_values("signal_domain", "iq", ["rf", "iq"]), ["rf", "iq"])
+        with self.assertRaisesRegex(ValueError, "mv_axis"):
+            validate_values("mv_axis", "rx", ["invalid"])
+
+    def test_compare_rf_iq_rejects_nonfinite_continuous_arguments(self):
+        for option, value in (("--mv_dl", "nan"), ("--subarray_ratio", "inf"),
+                              ("--f_number", "nan"), ("--dr", "inf"),
+                              ("--iq_gain", "nan")):
+            with self.subTest(option=option), patch(
+                "sys.argv", ["compare_rf_iq", "--h5_path", "sample.h5", option, value]
+            ), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                compare_rf_iq_main()
 
     def test_select_angles_count_one_selects_nearest_zero(self):
         angles = np.array([-0.2, -0.05, 0.1, 0.3])

@@ -52,10 +52,12 @@ ALGORITHM_PARAM_HELP = {
     "mv_dl": "MV 对角加载系数(非负)",
     "fbss": "是否启用前后向空间平滑",
     "subarray_ratio": "子阵长度比例,范围 (0, 1]",
+    "tx_subarray_ratio": "多角度 Tx 子阵比例;回车沿用 subarray_ratio",
     "temporal_win": "时间平滑窗口,必须为正奇数",
     "num_eig": "ESBMV 保留特征数,0 表示按阈值自动选择",
     "eig_threshold": "ESBMV 特征阈值,范围 [0, 1]",
     "gcf_low_bins": "GCF 低频 bin 数,必须为非负整数",
+    "gcf_tx_low_bins": "多角度 Tx GCF 低频 bin 数;回车沿用 gcf_low_bins",
     "gcf_power": "GCF 权重幂次(非负)",
     "lmax_ratio": "CMSAW 最大子阵比例,范围 (0, 0.5]",
     "min_subarray_len": "CMSAW 最小子阵长度,至少为 2",
@@ -70,10 +72,12 @@ ALGORITHM_PARAM_TYPES = {
     "mv_dl": float,
     "fbss": bool,
     "subarray_ratio": float,
+    "tx_subarray_ratio": float,
     "temporal_win": int,
     "num_eig": int,
     "eig_threshold": float,
     "gcf_low_bins": int,
+    "gcf_tx_low_bins": int,
     "gcf_power": float,
     "lmax_ratio": float,
     "min_subarray_len": int,
@@ -190,7 +194,7 @@ def ask_float(prompt, default, minimum=None, strictly_greater=False):
 
 def validate_algorithm_param(name, value):
     """Validate one method-specific parameter and return its normalized value."""
-    if name in {"num_eig", "gcf_low_bins"} and value < 0:
+    if name in {"num_eig", "gcf_low_bins", "gcf_tx_low_bins"} and value < 0:
         raise ValueError("必须是非负整数。")
     if name == "min_subarray_len" and value < 2:
         raise ValueError("必须是大于等于 2 的整数。")
@@ -200,7 +204,7 @@ def validate_algorithm_param(name, value):
         raise ValueError("必须是正奇数。")
     if name in {"mv_dl", "gcf_power"} and value < 0:
         raise ValueError("必须大于等于 0。")
-    if name == "subarray_ratio" and not 0 < value <= 1:
+    if name in {"subarray_ratio", "tx_subarray_ratio"} and not 0 < value <= 1:
         raise ValueError("必须位于 (0, 1]。")
     if name in {"eig_threshold", "delta_max"} and not 0 <= value <= 1:
         raise ValueError("必须位于 [0, 1]。")
@@ -236,7 +240,12 @@ def ask_algorithm_param(algorithm, name, default):
         return ask_yes_no(prompt, default=default)
 
     while True:
-        raw = ask_text(prompt, default=default)
+        if default is None and name in {"tx_subarray_ratio", "gcf_tx_low_bins"}:
+            raw = ask_text(f"{prompt}（回车沿用关联参数）", default="")
+            if not raw:
+                return None
+        else:
+            raw = ask_text(prompt, default=default)
         try:
             if value_type is int:
                 value = int(raw)
@@ -340,13 +349,16 @@ def validate_select_angles(value):
     text = str(value).strip().lower()
     if text in ("center", "all"):
         return text
-    parts = [part.strip() for part in text.split(",") if part.strip()]
+    raw_parts = [part.strip() for part in text.split(",")]
+    if len(raw_parts) == 2 and raw_parts[0].isdigit() and raw_parts[1] == "":
+        return f"{raw_parts[0]},"
+    parts = raw_parts
     if len(parts) == 1 and parts[0].isdigit() and int(parts[0]) > 0:
         return parts[0]
     if len(parts) > 1 and all(part.isdigit() for part in parts):
         return ",".join(parts)
     raise ValueError(
-        "角度只能填 center、all、正整数角度数,或 0 基整数索引列表,例如 1、3、11、0,37,74。",
+        "角度只能填 center、all、正整数角度数,或 0 基整数索引列表,例如 1、3、11、0,37,74；单个索引以逗号结尾,例如 0,。",
     )
 
 
@@ -354,7 +366,7 @@ def ask_select_angles(default="1"):
     """Execute ask select angles."""
     while True:
         raw = ask_text(
-            "请输入角度数量 N 或整数索引列表,例如 1、3、11、0,37,74",
+            "请输入角度数量 N 或整数索引列表,例如 1、3、11、0,37,74；单个索引以逗号结尾,例如 0,",
             default=default,
         )
         try:
