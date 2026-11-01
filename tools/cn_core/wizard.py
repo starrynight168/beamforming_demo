@@ -1,4 +1,6 @@
 import h5py
+import yaml
+from data.h5_schema import require_h5_schema
 
 from .interactive import ROOT, choice, number, output_input, path_input, run, sample_input
 from .registry import TOOLS
@@ -20,7 +22,17 @@ def ask_field(field, state):
         return key, path
     if kind == "reference":
         with h5py.File(state["h5_path"], "r") as f:
-            fields = [name for name in ("all_envdb_das_norm", "all_envdb_norm") if name in f]
+            require_h5_schema(f)
+            config = yaml.safe_load(f["config_yaml"][()])
+            targets = config["generation"]["training_targets"]["domain_targets"]
+            fields = sorted(
+                {
+                    entry["db"].lstrip("/")
+                    for entries in targets.values()
+                    for entry in entries.values()
+                    if entry.get("db")
+                }
+            )
         if not fields:
             raise ValueError("H5 缺少可用的归一化参考图。")
         return key, choice(label, [(name, name) for name in fields])

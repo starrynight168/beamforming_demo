@@ -33,7 +33,7 @@ class SignalDataTests(unittest.TestCase):
                 },
                 "training_targets": {
                     "domain_targets": {
-                        "iq": {"mv": {"signal": {"real": "/mv_i", "imag": "/mv_q"}, "angles": {"selection": "input", "indices": [0, 1]}}},
+                        "iq": {"mv": {"signal": {"real": "/mv_iq_i", "imag": "/mv_iq_q"}, "angles": {"selection": "input", "indices": [0, 1]}}},
                         "rf": {"mv": {"signal": {"real": "/mv_rf", "imag": None}, "angles": {"selection": "input", "indices": [0, 1]}}},
                         "analytic_rf": {"mv": {"signal": {"real": "/mv_ar_i", "imag": "/mv_ar_q"}, "angles": {"selection": "input", "indices": [0, 1]}}},
                     },
@@ -44,6 +44,7 @@ class SignalDataTests(unittest.TestCase):
 
     def create_file(self, *, scale=3.0, cached_iq=False):
         with h5py.File(self.path, "w") as hf:
+            hf["h5_schema_version"] = np.uint8(3)
             padded = np.pad(self.rf, ((0, 0), (0, 16), (0, 0)), constant_values=np.nan)
             hf["rf"] = padded[None]
             hf["rf_fs"] = 20e6
@@ -53,18 +54,18 @@ class SignalDataTests(unittest.TestCase):
             hf["x_grid"] = [-0.001, 0.001]
             hf["z_grid"] = [0.01, 0.02, 0.03]
             if scale is not None:
-                hf["all_scale_ref"] = [scale]
+                hf["linear_scale_ref"] = [scale]
             if cached_iq:
                 self.config["generation"]["storage"]["inputs"].setdefault(
                     "iq", {"dtype": "float16", "normalize": True}
                 )
-                hf["all_multi_I"] = np.full((1, 2, 10, 3), 4.0, dtype=np.float16)
-                hf["all_multi_Q"] = np.full((1, 2, 10, 3), -2.0, dtype=np.float16)
-                hf["fs"] = 10e6
-                hf["time_start_vector"] = self.starts[None]
-                hf["valid_time_samples"] = [7]
-                hf["angles"] = [-0.1, 0.1]
-            for field, value in (("mv_i", 1.0), ("mv_q", 2.0), ("mv_rf", -3.0),
+                hf["iq_i"] = np.full((1, 2, 10, 3), 4.0, dtype=np.float16)
+                hf["iq_q"] = np.full((1, 2, 10, 3), -2.0, dtype=np.float16)
+                hf["iq_fs"] = 10e6
+                hf["iq_t0"] = self.starts[None]
+                hf["iq_length"] = [7]
+                hf["iq_angles"] = [-0.1, 0.1]
+            for field, value in (("mv_iq_i", 1.0), ("mv_iq_q", 2.0), ("mv_rf", -3.0),
                                  ("mv_ar_i", 4.0), ("mv_ar_q", 5.0)):
                 hf[field] = np.full((1, 1, 3, 2), value, dtype=np.float16)
             hf["config_yaml"] = yaml.safe_dump(self.config)
@@ -95,7 +96,7 @@ class SignalDataTests(unittest.TestCase):
                 self.config["generation"]["storage"] = {"inputs": {"iq": {"dtype": np.dtype(dtype).name, "normalize": False}}}
                 self.create_file(scale=4.0, cached_iq=True)
                 with h5py.File(self.path, "r+") as hf:
-                    for field in ("all_multi_I", "all_multi_Q"):
+                    for field in ("iq_i", "iq_q"):
                         physical = hf[field][:].astype(np.float32) * 4.0
                         del hf[field]
                         hf[field] = physical.astype(dtype)
@@ -116,7 +117,7 @@ class SignalDataTests(unittest.TestCase):
     def test_normalized_rf_requires_its_saved_scale(self):
         self.config["generation"]["storage"] = {"inputs": {"rf": {"dtype": "float16", "normalize": True}}}
         self.create_file(scale=None)
-        with self.assertRaisesRegex(KeyError, "all_scale_ref"):
+        with self.assertRaisesRegex(KeyError, "linear_scale_ref"):
             load_input(self.path, 0, "rf")
 
     def test_new_input_normalization_declaration_must_be_boolean(self):
@@ -135,7 +136,7 @@ class SignalDataTests(unittest.TestCase):
             hf["ar_i"] = expected["real"][None] * 3
             hf["ar_q"] = expected["imag"][None] * 3
             hf["ar_fs"], hf["ar_t0"] = 20e6, self.starts[None]
-            hf["ar_angles"], hf["ar_len"] = [-.1, .1], [260]
+            hf["ar_angles"], hf["ar_length"] = [-.1, .1], [260]
             del hf["rf"]
         with patch("algorithms.shared_core.data.rf_to_analytic", side_effect=AssertionError("Cache must be used")):
             cached = load_input(self.path, 0, "analytic_rf")
@@ -158,7 +159,7 @@ class SignalDataTests(unittest.TestCase):
         with h5py.File(self.path, "r+") as hf:
             hf["ar_i"], hf["ar_q"] = self.rf[None], expected_imag[None]
             hf["ar_fs"], hf["ar_t0"] = 20e6, self.starts[None]
-            hf["ar_angles"], hf["ar_len"] = [-.1, .1], [260]
+            hf["ar_angles"], hf["ar_length"] = [-.1, .1], [260]
             del hf["rf"]
         result = load_input(self.path, 0, "analytic_rf")
         self.assertEqual(result["scale"], 1.)
@@ -167,7 +168,7 @@ class SignalDataTests(unittest.TestCase):
         with h5py.File(self.path, "r+") as hf:
             self.config["generation"]["storage"]["inputs"]["analytic_rf"]["normalize"] = True
             hf["config_yaml"][()] = yaml.safe_dump(self.config)
-        with self.assertRaisesRegex(KeyError, "all_scale_ref"):
+        with self.assertRaisesRegex(KeyError, "linear_scale_ref"):
             load_input(self.path, 0, "analytic_rf")
 
     def test_teacher_analytic_fields_are_not_channel_cache(self):
@@ -238,7 +239,7 @@ class SignalDataTests(unittest.TestCase):
     def test_partial_iq_cache_is_not_silently_replaced_by_rf_conversion(self):
         self.create_file(cached_iq=True)
         with h5py.File(self.path, "r+") as hf:
-            del hf["all_multi_Q"]
+            del hf["iq_q"]
         with self.assertRaisesRegex(KeyError, "IQ cache is incomplete"):
             load_input(self.path, 0, "iq")
 

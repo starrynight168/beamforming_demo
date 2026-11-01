@@ -557,7 +557,7 @@ class BeamformerRegressionTests(unittest.TestCase):
                 source.write_text("source", encoding="utf-8")
             h5_path = root / "input.h5"
             with h5py.File(h5_path, "w") as handle:
-                handle["angles"] = [0.0]
+                handle["iq_angles"] = [0.0]
             grid = torch.tensor([0.0, 1.0])
             scene = SimpleNamespace(x_grid=grid, z_grid=grid, height=2, width=2)
             model = SimpleNamespace(runtime={}, signal_domain="iq")
@@ -588,11 +588,12 @@ class BeamformerRegressionTests(unittest.TestCase):
             pulse = np.exp(-0.5 * ((np.arange(160)[None, :, None] - tof[:, None] * fs) / 3.0) ** 2)
             iq = (pulse * np.exp(-2j * np.pi * fc * tof[:, None])).astype(np.complex64)
             with h5py.File(source, "w") as handle:
+                handle["h5_schema_version"] = np.uint8(3)
                 for key, value in {
-                    "all_multi_I": iq.real[None], "all_multi_Q": iq.imag[None],
-                    "all_scale_ref": [1.0],
-                    "angles": angles, "time_start_vector": np.zeros((1, 3)),
-                    "valid_time_samples": [160], "c": c, "fc": fc, "fs": fs,
+                    "iq_i": iq.real[None], "iq_q": iq.imag[None],
+                    "linear_scale_ref": [1.0],
+                    "iq_angles": angles, "iq_t0": np.zeros((1, 3)),
+                    "iq_length": [160], "c": c, "fc": fc, "iq_fs": fs,
                     "pitch": pitch, "num_channels": 8,
                     "z_grid": np.linspace(0.002, 0.004, 5),
                     "x_grid": np.linspace(-0.0006, 0.0006, 5),

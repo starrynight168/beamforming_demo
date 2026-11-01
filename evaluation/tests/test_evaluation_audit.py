@@ -48,16 +48,17 @@ def write_picmus_sample(
         else ""
     )
     with h5py.File(path, "w") as handle:
-        handle["all_multi_I"] = np.zeros((1, 1, 1, 1))
+        handle["h5_schema_version"] = np.uint8(3)
+        handle["iq_i"] = np.zeros((1, 1, 1, 1))
         handle["x_grid"] = np.linspace(-0.025, 0.025, 201)
         handle["z_grid"] = np.linspace(0.005, 0.055, 201)
         if has_gt:
-            handle["all_envdb_norm"] = np.zeros((1, 1, 201, 201))
+            handle["reference_iq_db"] = np.zeros((1, 1, 201, 201))
         handle["config_yaml"] = yaml.safe_dump(
             {
                 "generation": {
                     "ground_truth": {"algorithm": "mv", "signal_domain": "iq", "dynamic_range_db": 60.0},
-                    "training_targets": {"domain_targets": {"iq": {"mv": {"db": "/all_envdb_norm"}}}},
+                    "training_targets": {"domain_targets": {"iq": {"mv": {"db": "/reference_iq_db"}}}},
                 },
                 "source_samples": [
                     {
@@ -503,7 +504,8 @@ class EvaluationInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.h5"
             with h5py.File(path, "w") as handle:
-                handle.create_dataset("all_multi_I", data=np.zeros((1, 1, 1, 1)))
+                handle["h5_schema_version"] = np.uint8(3)
+                handle.create_dataset("iq_i", data=np.zeros((1, 1, 1, 1)))
                 handle.create_dataset(
                     "config_yaml",
                     data=yaml.safe_dump({
@@ -527,19 +529,20 @@ class EvaluationInputTests(unittest.TestCase):
                 "phantom_path": "phantom.h5",
             }
             with h5py.File(path, "w") as handle:
-                handle.create_dataset("all_multi_I", data=np.zeros((2, 1, 1, 1)))
-                handle.create_dataset("all_envdb_norm", data=np.zeros((1, 1, 2, 2)))
+                handle["h5_schema_version"] = np.uint8(3)
+                handle.create_dataset("iq_i", data=np.zeros((2, 1, 1, 1)))
+                handle.create_dataset("reference_iq_db", data=np.zeros((1, 1, 2, 2)))
                 handle.create_dataset(
                     "config_yaml",
                     data=yaml.safe_dump({
                         "generation": {
                             "ground_truth": {"signal_domain": "iq", "algorithm": "mv"},
-                            "training_targets": {"domain_targets": {"iq": {"mv": {"db": "/all_envdb_norm"}}}},
+                            "training_targets": {"domain_targets": {"iq": {"mv": {"db": "/reference_iq_db"}}}},
                         },
                         "source_samples": [sample_meta, sample_meta],
                     }),
                 )
-            with self.assertRaisesRegex(ValueError, "样本数必须与 all_multi_I 一致"):
+            with self.assertRaisesRegex(ValueError, "样本数必须与 iq_i 一致"):
                 read_sample_meta(path, sample_idx=1)
 
     def test_sample_metadata_supports_rf_only_h5_and_rf_display_target(self) -> None:
@@ -556,6 +559,7 @@ class EvaluationInputTests(unittest.TestCase):
                 },
             }
             with h5py.File(path, "w") as handle:
+                handle["h5_schema_version"] = np.uint8(3)
                 handle["acquisition_id"] = np.array([b"rf_sample"])
                 handle["rf"] = np.zeros((1, 1, 8, 2), np.float32)
                 handle["mv_rf_db"] = np.zeros((1, 1, 2, 2), np.float16)
@@ -573,6 +577,7 @@ class EvaluationInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.h5"
             with h5py.File(path, "w") as handle:
+                handle["h5_schema_version"] = np.uint8(3)
                 handle.create_dataset("config_yaml", data=b"evaluation: []\n")
 
             with self.assertRaisesRegex(ValueError, "config_yaml.evaluation must be a mapping"):

@@ -98,16 +98,16 @@ pip install -r requirements.txt
    # --only 也支持 experiments 或 in_vivo
    ```
 
-   当前打包格式为 schema_version 2，已有 H5 需要重新打包后才能使用新增输入域。保存哪些输入域由 [data/config.yaml](data/config.yaml) 的 `storage.inputs` 决定，默认保存原始 RF（float32、不归一化）和官方 IQ（float16、归一化）。可以只保留 `rf`、`analytic_rf`、`iq` 中一种或多种，每种都明确配置 `dtype: float16/float32` 和 `normalize: true/false`。另一个配置可用 `--config 路径` 指定。
+   当前 H5 根字段 `h5_schema_version` 为 3，`config_yaml.schema_version` 也为 3；旧版 H5 不受支持，必须重新打包。IQ 字段为 `iq_i`、`iq_q`、`iq_fs`、`iq_t0`、`iq_angles`、`iq_length`；RF 字段为 `rf`、`rf_fs`、`rf_t0`、`rf_angles`、`rf_length`；解析 RF 字段为 `ar_i`、`ar_q`、`ar_fs`、`ar_t0`、`ar_angles`、`ar_length`。图像参考字段为 `reference_iq_db`，显示参考为 `reference_iq_ref`，每样本共同尺度为 `linear_scale_ref`。保存哪些输入域由 [data/config.yaml](data/config.yaml) 的 `storage.inputs` 决定，默认保存原始 RF（float32、不归一化）和官方 IQ（float16、归一化）。可以只保留 `rf`、`analytic_rf`、`iq` 中一种或多种，每种都明确配置 `dtype: float16/float32` 和 `normalize: true/false`。另一个配置可用 `--config 路径` 指定。
 
-   解析 RF 由原始 RF 沿时间轴做 Hilbert 变换后保存；RF 和解析 RF 保留各自的采样率、起始时间与有效长度。三种域共用从配对官方 IQ 计算的 `all_scale_ref`，以保持缩放口径一致。即使只保存 RF，配对官方 IQ 仍用于尺度标定和图像参考生成。
+   解析 RF 由原始 RF 沿时间轴做 Hilbert 变换后保存；RF 和解析 RF 保留各自的采样率、起始时间与有效长度。三种域共用从配对官方 IQ 计算的 `linear_scale_ref`，以保持缩放口径一致。即使只保存 RF，配对官方 IQ 仍用于尺度标定和图像参考生成。
 
    算法通过 `--signal_domain rf/analytic_rf/iq` 选择输入，优先读取 H5 已保存的域。只保存 RF 时，解析 RF 可在读取时生成；IQ 可按元数据记录的 DDC（64-tap FIR + filtfilt，截止频率 0.8fc）和整数降采样生成。派生 IQ 与官方 IQ 的滤波口径不同，H5 会明确记录来源。只保存 IQ 或解析 RF 时，缺少的 RF 输入会明确报错。
 
-   `all_envdb_norm` 是三种输入域共用的图像参考，来源仍记录为官方 IQ 重建或多角度 IQ-DAS，不作为 RF teacher 信号。RF 的采样率为 20.832 MHz，载频来自配对 IQ 的 5.208 MHz；RF 文件中的 `modulation_frequency=0` 表示未解调，不能作为载频。RF F-DMAS 在非线性成对运算前使用至少 6fc 的密深度网格，按该处理网格设计 1.5fc～2.5fc 带通，支持 PICMUS 的 4fc 原始 RF。原始输入要求 fs > 2fc，且采集时的实际信号带宽须低于输入 Nyquist；插值不能恢复采集时已混叠的频谱。
+   `reference_iq_db` 是三种输入域共用的图像参考，来源仍记录为官方 IQ 重建或多角度 IQ-DAS，不作为 RF teacher 信号。RF 的采样率为 20.832 MHz，载频来自配对 IQ 的 5.208 MHz；RF 文件中的 `modulation_frequency=0` 表示未解调，不能作为载频。RF F-DMAS 在非线性成对运算前使用至少 6fc 的密深度网格，按该处理网格设计 1.5fc～2.5fc 带通，支持 PICMUS 的 4fc 原始 RF。原始输入要求 fs > 2fc，且采集时的实际信号带宽须低于输入 Nyquist；插值不能恢复采集时已混叠的频谱。
 
 4. **进行数据完整性体检**：
-   验证必需字段、数据类型、形状、有限性、归一化尺度、路径元数据和 contract 一致性。模体类型支持 `contrast_speckle`/`resolution_distortion` 与 `simulation`/`experiments` 的组合，以及 `in_vivo`/`in_vivo`；前四种组合的 `phantom_path` 必须指向 `data/PICMUS` 下存在的文件，活体允许空模体路径。`valid_time_samples` 必须是有效整数，其后的 IQ 必须保持零填充；`all_envdb_norm` 必须为有限的 `[N,1,H,W]` 且位于 `[0,1]`：
+   验证必需字段、数据类型、形状、有限性、归一化尺度、路径元数据和 contract 一致性。模体类型支持 `contrast_speckle`/`resolution_distortion` 与 `simulation`/`experiments` 的组合，以及 `in_vivo`/`in_vivo`；前四种组合的 `phantom_path` 必须指向 `data/PICMUS` 下存在的文件，活体允许空模体路径。`iq_length` 必须是有效整数，其后的 IQ 必须保持零填充；`reference_iq_db` 必须为有限的 `[N,1,H,W]` 且位于 `[0,1]`：
    ```bash
    python data/check_data.py
    python data/check_data.py data/simulation.h5
@@ -201,7 +201,7 @@ YAML 场景不再配置 `allow_evaluation`；`run_one.py --no_evaluate` 可主�
 - **几何畸变 (Distortion)**: 基于官方给定的累加标签掩膜、轴向修正因子和 7 个指定靶点位置自动判定畸变是否达标。
 - **辅助学术指标**: 额外提供广义对比度噪声比（gCNR）、对比度噪声比（CNR）、峰值旁瓣电平（PSLR）、积分旁瓣电平（ISLR）以及基于参考图的图像结构相似度（SSIM）、峰值信噪比（PSNR）与平均绝对误差（MAE）等分析。
 
-*(注：in-vivo H5 中的 `all_envdb_norm` 是打包阶段生成的多角度 DAS 参考图，不等同于带物理靶标的 PICMUS GT。因此在体颈动脉场景会自动跳过 phantom ROI、点目标和 PICMUS 分组定量，只做图像重建与对比拼接。)*
+*(注：in-vivo H5 中的 `reference_iq_db` 是打包阶段生成的多角度 DAS 参考图，不等同于带物理靶标的 PICMUS GT。因此在体颈动脉场景会自动跳过 phantom ROI、点目标和 PICMUS 分组定量，只做图像重建与对比拼接。)*
 
 ---
 

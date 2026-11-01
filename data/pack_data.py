@@ -4,6 +4,7 @@ import argparse
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+import sys
 
 import h5py
 import matplotlib
@@ -23,6 +24,8 @@ DYNAMIC_RANGE = 60.0
 TGC_ALPHA = 0.5
 F_NUMBER = 1.5
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+from data.h5_schema import write_h5_schema
 DEFAULT_SOURCE_ROOT = PROJECT_ROOT / "data" / "PICMUS"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -602,7 +605,7 @@ def build_embedded_config(items, output_path, row_block, storage=None):
             "db_formula": "20*log10(envelope/reference)",
             "clipped_db_range": [-DYNAMIC_RANGE, 0.0],
             "mapped_range": [0.0, 1.0],
-            "norm_reference_dataset": "/all_norm_ref",
+            "norm_reference_dataset": "/reference_iq_ref",
             "norm_reference_formula": "ground_truth_peak / input_scale_ref",
         },
     }
@@ -650,7 +653,7 @@ def build_embedded_config(items, output_path, row_block, storage=None):
     storage = storage or {"iq": {"dtype": "float16", "normalize": True}}
     available = {"iq"} | set(storage) | ({"analytic_rf"} if "rf" in storage else set())
     config = {
-        "schema_version": 2,
+        "schema_version": 3,
         "dataset": {
             "id": output_path.stem,
             "type": "PICMUS",
@@ -668,20 +671,20 @@ def build_embedded_config(items, output_path, row_block, storage=None):
             "padding": {
                 "value": 0.0,
                 "valid_length_datasets": {
-                    domain: {"iq": "/valid_time_samples", "rf": "/rf_length", "analytic_rf": "/ar_len"}[domain]
+                    domain: {"iq": "/iq_length", "rf": "/rf_length", "analytic_rf": "/ar_length"}[domain]
                     for domain in storage
                 },
             },
             "sample_metadata": "config_yaml.source_samples",
             "units": {
-                "fs": "Hz",
+                "iq_fs": "Hz",
                 "c": "m/s",
                 "fc": "Hz",
                 "pitch": "m",
                 "x_grid": "m",
                 "z_grid": "m",
-                "angles": "rad",
-                "time_start_vector": "s",
+                "iq_angles": "rad",
+                "iq_t0": "s",
             },
             "coordinate_system": {
                 "x": "lateral_positive_right",
@@ -702,12 +705,11 @@ def build_embedded_config(items, output_path, row_block, storage=None):
                     "mode": "complex_rms",
                     "formula": "sqrt(mean(I^2 + Q^2) + epsilon)",
                     "epsilon": 1.0e-12,
-                    "scale_reference_dataset": "/all_scale_ref",
+                    "scale_reference_dataset": "/linear_scale_ref",
                     "scale_reference_source": "paired_official_PICMUS_IQ",
                 },
                 # PICMUS 的输入本身就是基带 IQ；没有在打包阶段执行抽取。
-                # 采样率相关元数据统一放在 config_yaml，避免遗留 gt_fs 等
-                # 根字段造成“GT 采样率/输入采样率”语义混淆。
+                # 根级 iq_fs 记录 IQ 采样率；source/packed 字段记录处理来源与抽取配置。
                 "decimation_factor": 1,
                 "source_sampling_frequency_hz": float(items[0]["fs"]),
                 "packed_sampling_frequency_hz": float(items[0]["fs"]),
@@ -718,7 +720,7 @@ def build_embedded_config(items, output_path, row_block, storage=None):
             "ground_truth": ground_truth,
             "training_targets": {
                 "domain_targets": {
-                    domain: {ground_truth_algorithm: {"db": "/all_envdb_norm", "kind": "image_reference", "source_domain": "iq"}}
+                    domain: {ground_truth_algorithm: {"db": "/reference_iq_db", "kind": "image_reference", "source_domain": "iq"}}
                     for domain in available
                 },
             },
@@ -757,7 +759,7 @@ def build_embedded_config(items, output_path, row_block, storage=None):
     if "rf" in storage:
         config["generation"]["input_rf"] = {
             "source": "PICMUS_real_RF", "carrier_frequency_source": "paired_official_IQ.modulation_frequency",
-            "scale_reference_dataset": "/all_scale_ref",
+            "scale_reference_dataset": "/linear_scale_ref",
         }
         if "iq" not in storage:
             source_fs = float(items[0]["rf_fs"])
@@ -776,7 +778,7 @@ def build_embedded_config(items, output_path, row_block, storage=None):
     if "analytic_rf" in storage:
         config["generation"]["input_analytic_rf"] = {
             "source": "PICMUS_real_RF", "operation": "scipy.signal.hilbert along time before padding",
-            "scale_reference_dataset": "/all_scale_ref",
+            "scale_reference_dataset": "/linear_scale_ref",
         }
     return config
 
@@ -1001,29 +1003,30 @@ def pack_dataset(
         raise OverflowError("GT 转换为 float16 后产生 NaN/Inf")
 
     with atomic_h5_output(output_path) as hf:
+        write_h5_schema(hf)
         hf.create_dataset("acquisition_id", data=[item["meta"]["name"] for item in items], dtype=h5py.string_dtype("utf-8"))
         hf.create_dataset(
-            "all_envdb_norm",
+            "reference_iq_db",
             data=packed_gt,
             compression="gzip",
             compression_opts=4,
         )
 
         hf.create_dataset(
-            "all_scale_ref",
+            "linear_scale_ref",
             data=np.array([item["scale_ref"] for item in items], dtype=np.float32),
         )
         hf.create_dataset(
-            "all_norm_ref",
+            "reference_iq_ref",
             data=np.array([item["norm_ref"] for item in items], dtype=np.float32),
         )
         hf.create_dataset(
-            "valid_time_samples",
+            "iq_length",
             data=np.array([item["I"].shape[2] for item in items], dtype=np.int32),
         )
 
         hf.create_dataset(
-            "time_start_vector",
+            "iq_t0",
             data=np.concatenate([item["t0"] for item in items], axis=0).astype(
                 np.float32, copy=False
             ),
@@ -1032,17 +1035,19 @@ def pack_dataset(
         )
 
         scalar_dtypes = {
-            "fs": np.float32,
+            "iq_fs": np.float32,
             "c": np.float32,
             "fc": np.float32,
             "pitch": np.float32,
             "num_channels": np.int32,
         }
         for meta_key, dtype in scalar_dtypes.items():
-            hf.create_dataset(meta_key, data=dtype(base[meta_key]))
-        for meta_key in ("z_grid", "x_grid", "angles"):
+            source_key = "fs" if meta_key == "iq_fs" else meta_key
+            hf.create_dataset(meta_key, data=dtype(base[source_key]))
+        for meta_key in ("z_grid", "x_grid", "iq_angles"):
+            source_key = "angles" if meta_key == "iq_angles" else meta_key
             hf.create_dataset(
-                meta_key, data=np.asarray(base[meta_key], dtype=np.float32)
+                meta_key, data=np.asarray(base[source_key], dtype=np.float32)
             )
 
         string_dtype = h5py.string_dtype(encoding="utf-8")
@@ -1053,7 +1058,7 @@ def pack_dataset(
         )
         hf.create_dataset("config_yaml", data=config_yaml, dtype=string_dtype)
         if "iq" in storage:
-            for key, component in (("all_multi_I", "I"), ("all_multi_Q", "Q")):
+            for key, component in (("iq_i", "I"), ("iq_q", "Q")):
                 write_channels(hf, key, items, component, storage["iq"])
         for domain, fields in (("rf", ("rf",)), ("analytic_rf", ("ar_i", "ar_q"))):
             if domain not in storage:
@@ -1064,7 +1069,7 @@ def pack_dataset(
             hf.create_dataset(f"{prefix}_fs", data=np.float32(items[0]["rf_fs"]))
             hf.create_dataset(f"{prefix}_angles", data=items[0]["rf_angles"])
             hf.create_dataset(f"{prefix}_t0", data=np.concatenate([item["rf_t0"] for item in items]))
-            hf.create_dataset("rf_length" if domain == "rf" else "ar_len", data=np.array([item[fields[0]].shape[2] for item in items], dtype=np.int32))
+            hf.create_dataset("rf_length" if domain == "rf" else "ar_length", data=np.array([item[fields[0]].shape[2] for item in items], dtype=np.int32))
 
     if save_gt_images_enabled:
         save_gt_images(items, output_path.parent / "gt_preview")

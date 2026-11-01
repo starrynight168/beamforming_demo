@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from algorithms.common import dynamic_aperture_channel_count, interpolate_channel_samples, spatial_temporal_covariance
 from algorithms.mv import RowDynamicMVBeamformerIQ
+from data.h5_schema import require_h5_schema
 
 
 def rf_mv(raw, x, z, angle, fs, c, pitch, t0, loading, ratio, temporal_win, device, f_number=1.5, dynamic_aperture=True, interp="cubic", fbss=True, complex_weights=False):
@@ -221,20 +222,21 @@ def main():
     settings = resolve(args.settings_dir)
     args.output = resolve(args.output_dir) / f"{h5_path.stem}_sample_{args.sample_idx}"
     with h5py.File(h5_path, "r") as f:
+        require_h5_schema(f)
         if args.sample_idx >= len(f["acquisition_id"]):
             parser.error("sample_idx exceeds H5 sample count")
         acquisition = f["acquisition_id"][args.sample_idx].decode()
         region = f["body_region"][args.sample_idx].decode()
         x = f["x_grid"][:].astype(np.float32)
         z = f["z_grid"][:].astype(np.float32)
-        angles_iq = f["angles"][:]
+        angles_iq = f["iq_angles"][:]
         selected = int(np.argmin(np.abs(angles_iq)))
         angle = float(angles_iq[selected])
-        fs, c, pitch, fc = (float(f[k][()]) for k in ("fs", "c", "pitch", "fc"))
-        t0 = float(f["time_start_vector"][args.sample_idx, selected])
-        scale = float(f["all_scale_ref"][args.sample_idx])
-        i = f["all_multi_I"][args.sample_idx, selected:selected+1].astype(np.float32) * scale
-        q = f["all_multi_Q"][args.sample_idx, selected:selected+1].astype(np.float32) * scale
+        fs, c, pitch, fc = (float(f[k][()]) for k in ("iq_fs", "c", "pitch", "fc"))
+        t0 = float(f["iq_t0"][args.sample_idx, selected])
+        scale = float(f["linear_scale_ref"][args.sample_idx])
+        i = f["iq_i"][args.sample_idx, selected:selected+1].astype(np.float32) * scale
+        q = f["iq_q"][args.sample_idx, selected:selected+1].astype(np.float32) * scale
     path = resolve(args.rf_path) if args.rf_path else resolve(args.rf_root) / region / (acquisition + ".npz")
     angles = np.load(settings / "steering_angles.npy")
     angle_idx = int(np.argmin(np.abs(angles - angle)))

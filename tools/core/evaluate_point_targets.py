@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import algorithms.mv as mv
+from data.h5_schema import require_h5_schema
 try:
     from data.scripts.simulate_point_targets import load_reference, simulate_rf
 except ModuleNotFoundError as exc:
@@ -224,6 +225,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rows = []
     with h5py.File(h5_path, "r") as handle:
+        require_h5_schema(handle)
         ids = handle["acquisition_id"].asstr()[:]
         if len(scenes) != len(ids):
             raise ValueError("Embedded scene metadata does not match H5 sample count")
@@ -246,9 +248,9 @@ def main():
             raw, measured_snr = simulate_rf(target_data, geom, int(scene["seed"]),
                                             float(scene["snr_db_target"]), device)
             raw = raw.T.copy()
-            scale_ref = float(handle["all_scale_ref"][idx])
-            iq_i = handle["all_multi_I"][idx, 0].astype(np.float32)[None] * scale_ref
-            iq_q = handle["all_multi_Q"][idx, 0].astype(np.float32)[None] * scale_ref
+            scale_ref = float(handle["linear_scale_ref"][idx])
+            iq_i = handle["iq_i"][idx, 0].astype(np.float32)[None] * scale_ref
+            iq_q = handle["iq_q"][idx, 0].astype(np.float32)[None] * scale_ref
             for scale in args.grid_scales:
                 full_x = scaled_grid(geom["x_grid"].astype(np.float32), scale)
                 xs = full_x[np.abs(full_x - target_x) <= args.lateral_roi_mm / 1000]

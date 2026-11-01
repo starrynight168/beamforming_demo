@@ -21,6 +21,7 @@ from matplotlib.gridspec import GridSpec
 from algorithms.shared_core.images import require_current_rf_envelope_method, to_db, to_envelope
 from algorithms.shared_core.signals import rf_to_analytic, rf_to_iq
 from algorithms.shared_core.data import load_input, load_input_from_h5, load_target
+from data.h5_schema import require_h5_schema
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WINDOW_CHOICES = ["rect", "tukey", "hann", "hamming", "blackman", "kaiser"]
@@ -237,6 +238,7 @@ def resolve_project_path(path, project_root):
 
 
 def ground_truth_db(hf, sample_idx, signal_domain=None):
+    require_h5_schema(hf)
     config = yaml.safe_load(hf["config_yaml"][()])
     definition = config["generation"]["ground_truth"]
     dynamic_range = float(definition["dynamic_range_db"])
@@ -303,7 +305,7 @@ def load_from_h5(h5_path, sample_idx=0, signal_domain="iq"):
             if not np.all(np.isfinite(grid)) or not np.all(np.diff(grid) > 0):
                 raise ValueError(f"{name} 必须全部有限且严格递增")
         if not np.all(np.isfinite(angles)) or not np.all(np.isfinite(t0_vec)):
-            raise ValueError("angles/time_start_vector 包含 NaN/Inf")
+            raise ValueError("iq_angles/iq_t0 包含 NaN/Inf")
 
         gt_data = None
         has_gt = False

@@ -35,14 +35,14 @@ class DataUtilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mismatched.h5"
             with h5py.File(path, "w") as handle:
-                handle.create_dataset("all_multi_I", data=np.zeros((2, 1, 4, 1)))
-                handle.create_dataset("all_multi_Q", data=np.zeros((1, 1, 4, 1)))
-                handle.create_dataset("valid_time_samples", data=np.array([2, 2]))
+                handle.create_dataset("iq_i", data=np.zeros((2, 1, 4, 1)))
+                handle.create_dataset("iq_q", data=np.zeros((1, 1, 4, 1)))
+                handle.create_dataset("iq_length", data=np.array([2, 2]))
 
                 status, problems = run_checks(handle)
 
             self.assertEqual(status, "失败")
-            self.assertIn("all_multi_I / all_multi_Q 形状不一致", problems)
+            self.assertIn("iq_i / iq_q 形状不一致", problems)
 
     def test_compact_sequence_round_trip(self) -> None:
         values = np.arange(12, dtype=np.int32)
@@ -192,7 +192,7 @@ class DataPipelineTests(unittest.TestCase):
                 with h5py.File(output, "r") as handle, patch("data.check_data.DATA_DIR", root):
                     status, problems = run_checks(handle)
                     self.assertEqual(status, "通过", problems)
-                    self.assertEqual("all_multi_I" in handle, "iq" in domains)
+                    self.assertEqual("iq_i" in handle, "iq" in domains)
                     if "rf" not in domains:
                         with self.assertRaises(KeyError):
                             load_input_from_h5(handle, 0, "rf")
@@ -201,14 +201,14 @@ class DataPipelineTests(unittest.TestCase):
                         self.assertTrue(np.isfinite(sample["real"]).all())
                         self.assertTrue(np.isfinite(sample["imag"]).all())
                         if domain == "iq" and "iq" in domains:
-                            scale = float(handle["all_scale_ref"][1])
+                            scale = float(handle["linear_scale_ref"][1])
                             with h5py.File(root / scenes[1]["iq"], "r") as source:
                                 expected_i = source["US/US_DATASET0000/data/real"][:].transpose(0, 2, 1) / scale
                                 expected_q = source["US/US_DATASET0000/data/imag"][:].transpose(0, 2, 1) / scale
                             np.testing.assert_allclose(sample["real"], expected_i, rtol=5e-4, atol=5e-4)
                             np.testing.assert_allclose(sample["imag"], expected_q, rtol=5e-4, atol=5e-4)
                         if domain in ("rf", "analytic_rf"):
-                            scale = float(handle["all_scale_ref"][1])
+                            scale = float(handle["linear_scale_ref"][1])
                             np.testing.assert_allclose(sample["real"], raw[1]/scale, rtol=5e-4, atol=5e-4)
                             expected_q = hilbert(raw[1], axis=1).imag/scale if domain == "analytic_rf" else np.zeros_like(raw[1])
                             np.testing.assert_allclose(sample["imag"], expected_q, rtol=5e-4, atol=5e-4)
@@ -303,14 +303,14 @@ class DataPipelineTests(unittest.TestCase):
             with h5py.File(output, "r") as handle:
                 status, problems = run_checks(handle)
                 self.assertEqual(status, "通过", problems)
-                self.assertEqual(handle["all_multi_I"].shape, (2, 2, 128, 4))
+                self.assertEqual(handle["iq_i"].shape, (2, 2, 128, 4))
                 config = yaml.safe_load(handle["config_yaml"][()])
                 generation = config["generation"]
                 self.assertEqual(generation["ground_truth"]["algorithm"], "reference")
                 self.assertEqual(generation["ground_truth"]["signal_domain"], "iq")
                 self.assertEqual(
                     generation["training_targets"]["domain_targets"]["iq"]["reference"]["db"],
-                    "/all_envdb_norm",
+                    "/reference_iq_db",
                 )
                 self.assertIn(
                     "generated_multi_angle_das",
@@ -324,7 +324,7 @@ class DataPipelineTests(unittest.TestCase):
             sample = load_from_h5(output, 0)
             self.assertTrue(sample.has_gt)
             with h5py.File(output, "r") as handle:
-                expected_gt = handle["all_envdb_norm"][0]
+                expected_gt = handle["reference_iq_db"][0]
             np.testing.assert_allclose(sample.gt_data, expected_gt)
             self.assertTrue(read_sample_meta(output, 0)["has_gt"])
             self.assertTrue(scene_has_gt({"h5_path": str(output), "sample_idx": 0}))
@@ -357,19 +357,19 @@ class DataPipelineTests(unittest.TestCase):
                 self.assertIn("config_yaml.dataset 必须是字典", problems)
                 self.assertIn("config_yaml.h5_schema.units.c 应为 m/s", problems)
 
-                del handle["valid_time_samples"]
-                handle.create_dataset("valid_time_samples", data=np.array([64.5, 64.5]))
+                del handle["iq_length"]
+                handle.create_dataset("iq_length", data=np.array([64.5, 64.5]))
                 status, problems = run_checks(handle)
                 self.assertEqual(status, "失败")
                 self.assertIn(
-                    "valid_time_samples 必须是长度 2 的一维整数数组",
+                    "iq_length 必须是长度 2 的一维整数数组",
                     problems,
                 )
 
-                handle["all_envdb_norm"][0, 0, 0, 0] = 1.5
+                handle["reference_iq_db"][0, 0, 0, 0] = 1.5
                 status, problems = run_checks(handle)
                 self.assertTrue(
-                    any("all_envdb_norm 必须位于 [0,1]" in problem for problem in problems),
+                    any("reference_iq_db 必须位于 [0,1]" in problem for problem in problems),
                     problems,
                 )
 

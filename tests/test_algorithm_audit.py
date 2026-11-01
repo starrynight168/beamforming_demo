@@ -127,13 +127,14 @@ class AlgorithmAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             h5_path = Path(directory) / "input.h5"
             with h5py.File(h5_path, "w") as handle:
-                handle.create_dataset("all_multi_I", data=np.zeros((2, 1, 1, 1)))
-                handle.create_dataset("all_envdb_norm", data=np.zeros((1, 1, 2, 2)))
+                handle["h5_schema_version"] = np.uint8(3)
+                handle.create_dataset("iq_i", data=np.zeros((2, 1, 1, 1)))
+                handle.create_dataset("reference_iq_db", data=np.zeros((1, 1, 2, 2)))
                 handle.create_dataset("config_yaml", data=yaml.safe_dump({
                     "generation": {
                         "ground_truth": {"algorithm": "mv", "signal_domain": "iq"},
                         "training_targets": {
-                            "domain_targets": {"iq": {"mv": {"db": "/all_envdb_norm"}}}
+                            "domain_targets": {"iq": {"mv": {"db": "/reference_iq_db"}}}
                         },
                     }
                 }))
@@ -148,15 +149,16 @@ class AlgorithmAuditTests(unittest.TestCase):
                     "ground_truth": {"algorithm": "mv", "signal_domain": "iq"},
                     "training_targets": {
                         "domain_targets": {
-                            "iq": {"mv": {"signal": {"real": "/mv_i", "imag": "/mv_q"}}}
+                            "iq": {"mv": {"signal": {"real": "/mv_iq_i", "imag": "/mv_iq_q"}}}
                         }
                     },
                 }
             }
             with h5py.File(h5_path, "w") as handle:
+                handle["h5_schema_version"] = np.uint8(3)
                 handle.create_dataset("config_yaml", data=yaml.safe_dump(config))
-                handle.create_dataset("mv_i", data=np.zeros((1, 1, 2, 2)))
-                handle.create_dataset("mv_q", data=np.ones((1, 1, 2, 2)))
+                handle.create_dataset("mv_iq_i", data=np.zeros((1, 1, 2, 2)))
+                handle.create_dataset("mv_iq_q", data=np.ones((1, 1, 2, 2)))
             self.assertTrue(scene_has_gt({"h5_path": str(h5_path), "sample_idx": 0}))
 
     def test_cache_signature_tracks_cli_file_dependencies(self):
@@ -263,10 +265,11 @@ class AlgorithmAuditTests(unittest.TestCase):
             h5_path = root / "input.h5"
             gt = np.array([[1.0, 0.5], [0.0, 0.25]], dtype=np.float32)
             with h5py.File(h5_path, "w") as handle:
-                handle.create_dataset("all_multi_I", data=np.zeros((1, 1, 2, 1)))
+                handle["h5_schema_version"] = np.uint8(3)
+                handle.create_dataset("iq_i", data=np.zeros((1, 1, 2, 1)))
                 handle.create_dataset("x_grid", data=[-0.001, 0.001])
                 handle.create_dataset("z_grid", data=[0.001, 0.002])
-                handle.create_dataset("all_envdb_norm", data=gt[None, None])
+                handle.create_dataset("reference_iq_db", data=gt[None, None])
                 handle.create_dataset("config_yaml", data=yaml.safe_dump({
                     "generation": {
                         "ground_truth": {
@@ -276,7 +279,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                         },
                         "training_targets": {
                             "domain_targets": {
-                                "iq": {"mv": {"db": "/all_envdb_norm"}}
+                                "iq": {"mv": {"db": "/reference_iq_db"}}
                             }
                         },
                     }
@@ -726,7 +729,7 @@ class AlgorithmAuditTests(unittest.TestCase):
             ):
                 h5_path = Path(temp_dir) / "sample.h5"
                 embedded_config = {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "dataset": {"id": "simulation"},
                     "generation": {
                         "storage": {
@@ -736,7 +739,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                         "ground_truth": {"algorithm": "mv", "signal_domain": "iq"},
                         "training_targets": {
                             "domain_targets": {
-                                "iq": {"mv": {"db": "/all_envdb_norm"}}
+                                "iq": {"mv": {"db": "/reference_iq_db"}}
                             }
                         },
                     },
@@ -749,21 +752,21 @@ class AlgorithmAuditTests(unittest.TestCase):
                     ],
                 }
                 with h5py.File(h5_path, "w") as hf:
-                    hf.create_dataset("all_multi_I", data=np.zeros((1, 3, 8, 4)))
-                    hf.create_dataset("all_multi_Q", data=np.zeros((1, 3, 8, 4)))
+                    hf["h5_schema_version"] = np.uint8(3)
+                    hf.create_dataset("iq_i", data=np.zeros((1, 3, 8, 4)))
+                    hf.create_dataset("iq_q", data=np.zeros((1, 3, 8, 4)))
                     hf.create_dataset("acquisition_id", data=["simulation_contrast_speckle"])
-                    hf.create_dataset("body_region", data=["simulation"])
-                    hf.create_dataset("valid_time_samples", data=[8])
-                    hf.create_dataset("time_start_vector", data=np.zeros((1, 3)))
-                    hf.create_dataset("angles", data=[-0.1, 0.0, 0.1])
+                    hf.create_dataset("iq_length", data=[8])
+                    hf.create_dataset("iq_t0", data=np.zeros((1, 3)))
+                    hf.create_dataset("iq_angles", data=[-0.1, 0.0, 0.1])
                     hf.create_dataset("z_grid", data=[0.001, 0.002])
                     hf.create_dataset("x_grid", data=[-0.001, 0.001])
-                    hf.create_dataset("fs", data=20e6)
+                    hf.create_dataset("iq_fs", data=20e6)
                     hf.create_dataset("c", data=1540.0)
                     hf.create_dataset("fc", data=5e6)
                     hf.create_dataset("pitch", data=0.0003)
                     hf.create_dataset("num_channels", data=4)
-                    hf.create_dataset("all_envdb_norm", data=np.zeros(gt_shape))
+                    hf.create_dataset("reference_iq_db", data=np.zeros(gt_shape))
                     hf.create_dataset(
                         "config_yaml",
                         data=yaml.safe_dump(embedded_config),
@@ -787,7 +790,7 @@ class AlgorithmAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             h5_path = Path(temp_dir) / "rf-only.h5"
             config = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "dataset": {"id": "rf_sample"},
                 "generation": {
                     "storage": {
@@ -801,6 +804,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                 "source_samples": [{"id": "rf_sample", "phantom_mode": "in_vivo"}],
             }
             with h5py.File(h5_path, "w") as hf:
+                hf["h5_schema_version"] = np.uint8(3)
                 hf.create_dataset("config_yaml", data=yaml.safe_dump(config))
                 hf.create_dataset("acquisition_id", data=["rf_sample"])
                 hf.create_dataset("body_region", data=["region"])

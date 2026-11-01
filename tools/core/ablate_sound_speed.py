@@ -41,6 +41,7 @@ from algorithms.common import (  # noqa: E402
     unit_interval_float,
 )
 from evaluation.evaluate import db_to_display, local_ssim, psnr  # noqa: E402
+from data.h5_schema import require_h5_schema  # noqa: E402
 
 
 def resolve_path(path):
@@ -138,10 +139,21 @@ class SpeedOfSoundEvaluator:
         ) = load_from_h5(self.h5_path, self.sample_idx)
 
         with h5py.File(self.h5_path, "r") as hf:
-            self.reference_key = ("all_envdb_das_norm" if "all_envdb_das_norm" in hf else "all_envdb_norm") if reference_key == "auto" else reference_key
+            require_h5_schema(hf)
+            config = yaml.safe_load(hf["config_yaml"][()])
+            if reference_key == "auto":
+                ground_truth = config["generation"]["ground_truth"]
+                entry = config["generation"]["training_targets"]["domain_targets"][
+                    ground_truth["signal_domain"]
+                ][ground_truth["algorithm"]]
+                path = entry.get("db")
+                if not path:
+                    raise ValueError("Configured ground truth has no dB image field")
+                self.reference_key = str(path).lstrip("/")
+            else:
+                self.reference_key = reference_key
             if self.reference_key not in hf:
                 raise ValueError(f"Reference field not found: {self.reference_key}")
-            config = yaml.safe_load(hf["config_yaml"][()])
             source_dr = float(config["generation"]["ground_truth"]["dynamic_range_db"])
             image = np.asarray(hf[self.reference_key][self.sample_idx], dtype=np.float32).squeeze()
             if not np.isfinite(source_dr) or source_dr <= 0 or not np.isfinite(image).all() or np.any((image < 0) | (image > 1)):
@@ -649,7 +661,7 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--h5_path", required=True, help="Path to in-vivo H5 dataset")
-    parser.add_argument("--reference_key", default="auto", help="Normalized H5 reference field; auto prefers all_envdb_das_norm")
+    parser.add_argument("--reference_key", default="auto", help="Normalized H5 reference field; auto uses configured ground truth")
     parser.add_argument(
         "--sample_idx", type=nonnegative_int, default=0, help="H5 sample index"
     )

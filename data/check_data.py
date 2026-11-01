@@ -22,18 +22,20 @@ ROOT = DATA_DIR.parent
 sys.path.insert(0, str(ROOT))
 
 from algorithms.shared_core.data import load_input_from_h5
+from data.h5_schema import require_h5_schema
 LOG_DIR = DATA_DIR / "logs"
 
 KEY_FIELDS = (
-    "all_multi_I",
-    "all_multi_Q",
-    "all_envdb_norm",
-    "all_scale_ref",
-    "all_norm_ref",
-    "fs",
-    "time_start_vector",
-    "valid_time_samples",
-    "angles",
+    "iq_i",
+    "iq_q",
+    "h5_schema_version",
+    "reference_iq_db",
+    "linear_scale_ref",
+    "reference_iq_ref",
+    "iq_fs",
+    "iq_t0",
+    "iq_length",
+    "iq_angles",
     "z_grid",
     "x_grid",
     "c",
@@ -254,9 +256,9 @@ def _config_mapping(config, key, label, problems):
 def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> None:
     """Validate config schema."""
     schema_version = config.get("schema_version")
-    if type(schema_version) is not int or schema_version != 2:
+    if type(schema_version) is not int or schema_version != 3:
         problems.append(
-            f"config_yaml.schema_version 应为整数 2,实际为 {schema_version}",
+            f"config_yaml.schema_version 应为整数 3,实际为 {schema_version}",
         )
 
     dataset = _config_mapping(config, "dataset", "config_yaml.dataset", problems)
@@ -287,14 +289,14 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
         problems,
     )
     expected_units = {
-        "fs": "Hz",
+        "iq_fs": "Hz",
         "c": "m/s",
         "fc": "Hz",
         "pitch": "m",
         "x_grid": "m",
         "z_grid": "m",
-        "angles": "rad",
-        "time_start_vector": "s",
+        "iq_angles": "rad",
+        "iq_t0": "s",
     }
     for key, expected_unit in expected_units.items():
         if key not in units:
@@ -352,8 +354,8 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
         "config_yaml.generation.training_targets.domain_targets.iq.reference",
         problems,
     )
-    if reference_target.get("db") != "/all_envdb_norm":
-        problems.append("ground_truth reference target 应指向 /all_envdb_norm")
+    if reference_target.get("db") != "/reference_iq_db":
+        problems.append("ground_truth reference target 应指向 /reference_iq_db")
     storage = _config_mapping(
         generation,
         "storage",
@@ -375,13 +377,13 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
     layouts = {domain: ["sample", "angle", "time", "channel"] for domain in stored_inputs}
     if schema.get("input_layouts") != layouts:
         problems.append("h5_schema.input_layouts 与保存的域不一致")
-    lengths = {"iq": "/valid_time_samples", "rf": "/rf_length", "analytic_rf": "/ar_len"}
+    lengths = {"iq": "/iq_length", "rf": "/rf_length", "analytic_rf": "/ar_length"}
     if padding.get("valid_length_datasets") != {domain: lengths[domain] for domain in stored_inputs if domain in lengths}:
         problems.append("h5_schema.padding.valid_length_datasets 与保存的域不一致")
     for domain in stored_inputs:
         reference = domain_targets.get(domain, {}).get("reference", {})
-        if reference.get("db") != "/all_envdb_norm" or reference.get("kind") != "image_reference":
-            problems.append(f"{domain} 必须明确关联图像参考 /all_envdb_norm")
+        if reference.get("db") != "/reference_iq_db" or reference.get("kind") != "image_reference":
+            problems.append(f"{domain} 必须明确关联图像参考 /reference_iq_db")
     reference_fs = ground_truth.get("reference_sampling_frequency_hz")
     if (
         type(reference_fs) not in (int, float)
@@ -395,14 +397,14 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
         "config_yaml.generation.input_iq.normalization",
         problems,
     )
-    if input_norm.get("scale_reference_dataset") != "/all_scale_ref":
+    if input_norm.get("scale_reference_dataset") != "/linear_scale_ref":
         problems.append(
-            "input_iq.normalization.scale_reference_dataset 应指向 /all_scale_ref",
+            "input_iq.normalization.scale_reference_dataset 应指向 /linear_scale_ref",
         )
     decimation = input_iq.get("decimation_factor")
     source_fs = input_iq.get("source_sampling_frequency_hz")
     packed_fs = input_iq.get("packed_sampling_frequency_hz")
-    root_fs = scalar_float(hf, "fs")
+    root_fs = scalar_float(hf, "iq_fs")
     if type(decimation) is not int or decimation < 1:
         problems.append(f"input_iq.decimation_factor 非法: {decimation}")
     elif type(source_fs) not in (int, float) or type(packed_fs) not in (int, float):
@@ -421,13 +423,13 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
             source_fs_value / decimation, packed_fs_value, rtol=1e-5, atol=1.0
         ):
             problems.append(
-                "input_iq source_sampling_frequency_hz/decimation_factor 与 packed fs 不一致"
+                "input_iq source_sampling_frequency_hz/decimation_factor 与 packed iq_fs 不一致"
             )
         elif root_fs is None or not np.isclose(
             packed_fs_value, root_fs, rtol=1e-5, atol=1.0
         ):
             problems.append(
-                "input_iq.packed_sampling_frequency_hz 与根数据集 fs 不一致"
+                "input_iq.packed_sampling_frequency_hz 与根数据集 iq_fs 不一致"
             )
         elif "ddc" not in input_iq and type(reference_fs) in (int, float) and not np.isclose(
             reference_fs, source_fs_value, rtol=1e-5, atol=1.0
@@ -488,34 +490,38 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
         elif (
             angles_valid
             and indices_valid
-            and "angles" in hf
-            and hf["angles"].dtype.kind in "iuf"
+            and "iq_angles" in hf
+            and hf["iq_angles"].dtype.kind in "iuf"
             and (
-                selected_indices.shape != hf["angles"].shape
+                selected_indices.shape != hf["iq_angles"].shape
                 or not np.allclose(
                     all_angles[selected_indices],
-                    hf["angles"][:],
+                    hf["iq_angles"][:],
                     rtol=1e-5,
                     atol=1e-6,
                 )
             )
         ):
-            problems.append("config_yaml 输入角度记录与根数据集 angles 不一致")
+            problems.append("config_yaml 输入角度记录与根数据集 iq_angles 不一致")
     gt_norm = _config_mapping(
         ground_truth,
         "normalization",
         "config_yaml.generation.ground_truth.normalization",
         problems,
     )
-    if gt_norm.get("norm_reference_dataset") != "/all_norm_ref":
+    if gt_norm.get("norm_reference_dataset") != "/reference_iq_ref":
         problems.append(
-            "ground_truth.normalization.norm_reference_dataset 应指向 /all_norm_ref",
+            "ground_truth.normalization.norm_reference_dataset 应指向 /reference_iq_ref",
         )
 
 
 def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
     """Execute run checks."""
     problems: list[str] = []
+    try:
+        require_h5_schema(hf)
+    except ValueError as exc:
+        problems.append(str(exc))
     stored_inputs = {}
     if "config_yaml" in hf:
         try:
@@ -525,7 +531,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
     if not isinstance(stored_inputs, dict):
         stored_inputs = {}
     required = REQUIRED_FIELDS if "iq" in stored_inputs or not stored_inputs else tuple(
-        key for key in REQUIRED_FIELDS if key not in ("all_multi_I", "all_multi_Q")
+        key for key in REQUIRED_FIELDS if key not in ("iq_i", "iq_q")
     ) + ("acquisition_id",)
     missing = [key for key in required if key not in hf]
     if missing:
@@ -546,8 +552,8 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
     if invalid_datasets:
         return "失败", problems
 
-    iq_dataset = hf.get("all_multi_I")
-    q_dataset = hf.get("all_multi_Q")
+    iq_dataset = hf.get("iq_i")
+    q_dataset = hf.get("iq_q")
     iq_shape = None
     if isinstance(iq_dataset, h5py.Dataset):
         iq_shape = iq_dataset.shape
@@ -556,7 +562,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
             or min(iq_shape[0], iq_shape[1], iq_shape[3]) < 1
             or iq_shape[2] < 2
         ):
-            problems.append(f"all_multi_I 应为非空 [N,A,T,C] 且 T>=2，实际 {iq_shape}")
+            problems.append(f"iq_i 应为非空 [N,A,T,C] 且 T>=2，实际 {iq_shape}")
             iq_shape = None
 
     if (
@@ -564,12 +570,12 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
         and isinstance(q_dataset, h5py.Dataset)
         and iq_dataset.shape != q_dataset.shape
     ):
-        problems.append("all_multi_I / all_multi_Q 形状不一致")
+        problems.append("iq_i / iq_q 形状不一致")
 
-    for key in ("all_envdb_norm",):
+    for key in ("reference_iq_db",):
         if key in hf and hf[key].dtype != np.float16:
             problems.append(f"{key} 类型应为 float16，实际为 {hf[key].dtype}")
-    for key in ("fs", "c", "fc", "pitch"):
+    for key in ("iq_fs", "c", "fc", "pitch"):
         if key in hf:
             if hf[key].shape != ():
                 problems.append(f"{key} 必须是标量 dataset")
@@ -581,25 +587,25 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
         )
     if "num_channels" in hf and hf["num_channels"].shape != ():
         problems.append("num_channels 必须是标量 dataset")
-    for key in ("all_scale_ref", "all_norm_ref"):
+    for key in ("linear_scale_ref", "reference_iq_ref"):
         if key in hf and hf[key].dtype != np.float32:
             problems.append(f"{key} 类型应为 float32，实际为 {hf[key].dtype}")
-    for key in ("time_start_vector", "angles", "z_grid", "x_grid"):
+    for key in ("iq_t0", "iq_angles", "z_grid", "x_grid"):
         if key in hf and hf[key].dtype != np.float32:
             problems.append(f"{key} 类型应为 float32，实际为 {hf[key].dtype}")
-    if "valid_time_samples" in hf and hf["valid_time_samples"].dtype != np.int32:
+    if "iq_length" in hf and hf["iq_length"].dtype != np.int32:
         problems.append(
-            f"valid_time_samples 类型应为 int32，实际为 {hf['valid_time_samples'].dtype}",
+            f"iq_length 类型应为 int32，实际为 {hf['iq_length'].dtype}",
         )
 
-    if "all_envdb_norm" in hf:
-        gt_shape = hf["all_envdb_norm"].shape
+    if "reference_iq_db" in hf:
+        gt_shape = hf["reference_iq_db"].shape
         if (
             len(gt_shape) != 4
             or gt_shape[1] != 1
             or min(gt_shape[0], gt_shape[2], gt_shape[3]) < 1
         ):
-            problems.append(f"all_envdb_norm 应为 [N,1,H,W]，实际 {gt_shape}")
+            problems.append(f"reference_iq_db 应为 [N,1,H,W]，实际 {gt_shape}")
         elif iq_shape is not None and gt_shape[0] != iq_shape[0]:
             problems.append("输入 IQ 与 GT 帧数不一致")
         elif (
@@ -609,24 +615,24 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
         ):
             problems.append("GT 空间形状必须匹配 z_grid/x_grid")
 
-    if iq_shape is not None and "time_start_vector" in hf:
-        time_start = np.asarray(hf["time_start_vector"][:])
+    if iq_shape is not None and "iq_t0" in hf:
+        time_start = np.asarray(hf["iq_t0"][:])
         if (
             time_start.shape != iq_shape[:2]
             or time_start.dtype.kind not in "iuf"
             or not np.isfinite(time_start).all()
         ):
-            problems.append("time_start_vector 必须是匹配 IQ [N,A] 的有限数组")
+            problems.append("iq_t0 必须是匹配 IQ [N,A] 的有限数组")
 
-    if iq_shape is not None and "angles" in hf:
-        angles = np.asarray(hf["angles"][:])
+    if iq_shape is not None and "iq_angles" in hf:
+        angles = np.asarray(hf["iq_angles"][:])
         if (
             angles.ndim != 1
             or angles.size != iq_shape[1]
             or angles.dtype.kind not in "iuf"
             or not np.isfinite(angles).all()
         ):
-            problems.append("angles 必须是匹配输入角度维的有限一维数组")
+            problems.append("iq_angles 必须是匹配输入角度维的有限一维数组")
 
     if iq_shape is not None and "num_channels" in hf:
         try:
@@ -644,9 +650,9 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
         and isinstance(iq_dataset, h5py.Dataset)
         and isinstance(q_dataset, h5py.Dataset)
         and iq_dataset.shape == q_dataset.shape
-        and "valid_time_samples" in hf
+        and "iq_length" in hf
     ):
-        valid_ds = hf["valid_time_samples"]
+        valid_ds = hf["iq_length"]
         valid = np.asarray(valid_ds[:])
         n_samples, _, n_time, _ = iq_shape
         if (
@@ -655,25 +661,25 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
             or valid.size != n_samples
         ):
             problems.append(
-                f"valid_time_samples 必须是长度 {n_samples} 的一维整数数组",
+                f"iq_length 必须是长度 {n_samples} 的一维整数数组",
             )
         elif np.any((valid < MIN_DATA_POINTS) | (valid > n_time)):
             problems.append(
-                f"valid_time_samples 必须位于 [{MIN_DATA_POINTS},{n_time}],实际={valid.tolist()}",
+                f"iq_length 必须位于 [{MIN_DATA_POINTS},{n_time}],实际={valid.tolist()}",
             )
         else:
             for sample_idx, valid_time in enumerate(valid):
                 if valid_time >= n_time:
                     continue
-                i_tail = hf["all_multi_I"][sample_idx, :, valid_time:, :]
-                q_tail = hf["all_multi_Q"][sample_idx, :, valid_time:, :]
+                i_tail = hf["iq_i"][sample_idx, :, valid_time:, :]
+                q_tail = hf["iq_q"][sample_idx, :, valid_time:, :]
                 if np.any(i_tail != 0) or np.any(q_tail != 0):
                     problems.append(
-                        f"样本 {sample_idx} 在 valid_time_samples={valid_time} 之后包含非零 IQ",
+                        f"样本 {sample_idx} 在 iq_length={valid_time} 之后包含非零 IQ",
                     )
 
     if iq_shape is not None:
-        for key in ("all_scale_ref", "all_norm_ref"):
+        for key in ("linear_scale_ref", "reference_iq_ref"):
             if key not in hf:
                 continue
             values = np.asarray(hf[key][:])
@@ -696,7 +702,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
             elif not np.isfinite(grid).all() or not np.all(np.diff(grid) > 0):
                 problems.append(f"{key} 必须全部有限且严格递增")
 
-    for key in ("fs", "c", "fc", "pitch"):
+    for key in ("iq_fs", "c", "fc", "pitch"):
         if key in hf:
             value = scalar_float(hf, key)
             if value is None or not np.isfinite(value) or value <= 0:
@@ -726,7 +732,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
                 )
                 validate_config_schema(config, hf, problems)
                 samples = config.get("source_samples")
-                n_samples = hf["all_envdb_norm"].shape[0] if "all_envdb_norm" in hf else 0
+                n_samples = hf["reference_iq_db"].shape[0] if "reference_iq_db" in hf else 0
                 if not isinstance(samples, list) or len(samples) != n_samples:
                     problems.append(
                         "config_yaml.source_samples 数量必须与 H5 样本数一致",
@@ -824,8 +830,8 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
                 if convention.get("base") != "PICMUS_ROOT":
                     problems.append("config_yaml.path_convention.base 应为 PICMUS_ROOT")
 
-    domain_fields = {"iq": ("all_multi_I", "all_multi_Q"), "rf": ("rf",), "analytic_rf": ("ar_i", "ar_q")}
-    count = len(hf["all_envdb_norm"]) if "all_envdb_norm" in hf else 0
+    domain_fields = {"iq": ("iq_i", "iq_q"), "rf": ("rf",), "analytic_rf": ("ar_i", "ar_q")}
+    count = len(hf["reference_iq_db"]) if "reference_iq_db" in hf else 0
     if "acquisition_id" in hf and hf["acquisition_id"].shape != (count,):
         problems.append("acquisition_id 样本数与 GT 不一致")
     for domain, options in stored_inputs.items():
@@ -855,14 +861,14 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
 
     gt_min = np.inf
     gt_max = -np.inf
-    for key in ("all_multi_I", "all_multi_Q", "all_envdb_norm"):
+    for key in ("iq_i", "iq_q", "reference_iq_db"):
         if key in hf and hf[key].shape and hf[key].dtype.kind in "iuf":
             for sample_idx in range(hf[key].shape[0]):
                 arr = np.asarray(hf[key][sample_idx])
                 finite_mask = np.isfinite(arr)
                 if not finite_mask.all():
                     problems.append(f"{key} 第 {sample_idx} 帧包含 NaN/Inf")
-                if key == "all_envdb_norm" and arr.size and finite_mask.any():
+                if key == "reference_iq_db" and arr.size and finite_mask.any():
                     finite = arr[finite_mask]
                     gt_min = min(gt_min, float(np.min(finite)))
                     gt_max = max(gt_max, float(np.max(finite)))
@@ -871,7 +877,7 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
         gt_min < -1e-3 or gt_max > 1.0 + 1e-3
     ):
         problems.append(
-            f"all_envdb_norm 必须位于 [0,1]，实际范围 [{gt_min:g},{gt_max:g}]"
+            f"reference_iq_db 必须位于 [0,1]，实际范围 [{gt_min:g},{gt_max:g}]"
         )
 
     return ("通过" if not problems else "失败"), problems
@@ -893,13 +899,13 @@ def inspect_file(path: Path) -> bool:
         with h5py.File(path, "r") as hf:
             status, problems = run_checks(hf)
             file_size = path.stat().st_size / 1024**2
-            input_field = next((key for key in ("all_multi_I", "rf", "ar_i") if key in hf), "all_multi_I")
+            input_field = next((key for key in ("iq_i", "rf", "ar_i") if key in hf), "iq_i")
             input_shape = dataset_shape(hf, input_field)
-            gt_shape = dataset_shape(hf, "all_envdb_norm")
+            gt_shape = dataset_shape(hf, "reference_iq_db")
             n_frames = input_shape[0] if input_shape else "?"
             input_shape = format_shape(input_shape) if input_shape else "缺失"
             gt_shape = format_shape(gt_shape) if gt_shape else "无"
-            fs = scalar_float(hf, {"rf": "rf_fs", "ar_i": "ar_fs"}.get(input_field, "fs"))
+            fs = scalar_float(hf, {"rf": "rf_fs", "ar_i": "ar_fs"}.get(input_field, "iq_fs"))
             gt_reference_fs = None
             decimation = None
             config_dataset = hf.get("config_yaml")

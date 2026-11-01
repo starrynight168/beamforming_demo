@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from evaluation.evaluate import load_picmus_context
+from data.h5_schema import require_h5_schema
 
 
 def parse_args():
@@ -384,6 +385,7 @@ def list_h5_files():
 def inspect_h5(path):
     """Execute inspect h5."""
     with h5py.File(path, "r") as hf:
+        require_h5_schema(hf)
         if "config_yaml" not in hf or "acquisition_id" not in hf:
             raise ValueError("当前 H5 必须包含 config_yaml 和 acquisition_id")
         raw_config = hf["config_yaml"][()]
@@ -398,8 +400,8 @@ def inspect_h5(path):
         if not isinstance(declared, dict):
             raise ValueError("generation.storage.inputs 必须是映射")
         definitions = {
-            "iq": ("all_multi_I", "all_multi_Q", "fs", "angles", "time_start_vector", "valid_time_samples"),
-            "analytic_rf": ("ar_i", "ar_q", "ar_fs", "ar_angles", "ar_t0", "ar_len"),
+            "iq": ("iq_i", "iq_q", "iq_fs", "iq_angles", "iq_t0", "iq_length"),
+            "analytic_rf": ("ar_i", "ar_q", "ar_fs", "ar_angles", "ar_t0", "ar_length"),
             "rf": ("rf", None, "rf_fs", "rf_angles", "rf_t0", "rf_length"),
         }
         available = []
@@ -439,7 +441,7 @@ def inspect_h5(path):
             raise ValueError(f"{data_domain} 起始时间或角度形状与输入不匹配")
         if not np.isfinite(hf[angles_name][:]).all() or not np.isfinite(hf[starts_name][:]).all():
             raise ValueError(f"{data_domain} 角度或时间起点必须有限")
-        required = {"body_region", "c", "fc", "pitch", "num_channels", "z_grid", "x_grid"}
+        required = {"c", "fc", "pitch", "num_channels", "z_grid", "x_grid"}
         missing = sorted(required - set(hf.keys()))
         if missing:
             raise ValueError(f"H5 缺少公共成像字段:{', '.join(missing)}")

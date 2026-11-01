@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 
 import h5py
+import yaml
+from data.h5_schema import require_h5_schema
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -53,9 +55,13 @@ def choice(prompt, choices, default=0):
 
 def sample_input(h5_path):
     with h5py.File(h5_path, "r") as f:
-        field = next((key for key in ("acquisition_id", "all_multi_I", "rf", "ar_i") if key in f), None)
-        if field is None:
-            raise ValueError("H5 未保存可识别的输入样本。")
+        require_h5_schema(f)
+        config = yaml.safe_load(f["config_yaml"][()])
+        inputs = config["generation"]["storage"]["inputs"]
+        domain = next((name for name in ("iq", "analytic_rf", "rf") if name in inputs), None)
+        if domain is None:
+            raise ValueError("H5 未声明已保存的输入域。")
+        field = {"iq": "iq_i", "analytic_rf": "ar_i", "rf": "rf"}[domain]
         count = f[field].shape[0]
         print(f"H5 共 {count} 帧，输入范围 0–{count - 1}。")
         selected = number("样本序号", 0, int, lambda value: 0 <= value < count)

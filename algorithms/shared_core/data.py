@@ -6,6 +6,7 @@ import yaml
 from scipy.signal import firwin
 
 from algorithms.shared_core.signals import rf_to_analytic, rf_to_iq
+from data.h5_schema import require_h5_schema
 
 
 def _require(hf, fields, message):
@@ -56,11 +57,11 @@ def _sampling(hf, values, sample_idx, *, fs_key, t0_key, length_key, angles_key)
 
 
 def _scale(hf, sample_idx, required=False):
-    if required and "all_scale_ref" not in hf:
-        raise KeyError("Normalized inputs and teacher targets require H5 all_scale_ref")
-    scale = float(hf["all_scale_ref"][sample_idx]) if "all_scale_ref" in hf else 1.0
+    if required and "linear_scale_ref" not in hf:
+        raise KeyError("Normalized inputs and teacher targets require H5 linear_scale_ref")
+    scale = float(hf["linear_scale_ref"][sample_idx]) if "linear_scale_ref" in hf else 1.0
     if not np.isfinite(scale) or scale <= 0:
-        raise ValueError("all_scale_ref must be finite and positive")
+        raise ValueError("linear_scale_ref must be finite and positive")
     return scale
 
 
@@ -124,20 +125,31 @@ def ddc_settings(hf, source_fs):
 
 
 def load_input_from_h5(hf, sample_idx, domain="iq"):
+    require_h5_schema(hf)
     if not isinstance(sample_idx, (int, np.integer)) or isinstance(sample_idx, bool):
         raise ValueError("sample_idx must be an integer")
     if domain not in ("rf", "analytic_rf", "iq"):
         raise ValueError("domain must be rf, analytic_rf or iq")
-    cache_names = (("all_multi_I", "all_multi_Q") if domain == "iq" else
-                   ("ar_i", "ar_q") if domain == "analytic_rf" else ())
+    if domain == "iq":
+        cache_names = ("iq_i", "iq_q")
+        fs_key, t0_key, length_key, angles_key = "iq_fs", "iq_t0", "iq_length", "iq_angles"
+    elif domain == "analytic_rf":
+        cache_names = ("ar_i", "ar_q")
+        fs_key, t0_key, length_key, angles_key = "ar_fs", "ar_t0", "ar_length", "ar_angles"
+    else:
+        cache_names = ()
     if any(field in hf for field in cache_names):
         _require(hf, cache_names, f"{domain.upper()} cache is incomplete; check storage.inputs")
         real = _frame(hf, cache_names[0], sample_idx)
         imag = _frame(hf, cache_names[1], sample_idx)
         if real.shape != imag.shape:
             raise ValueError("Cached complex components must have matching dimensions")
-        keys = (dict(fs_key="fs", t0_key="time_start_vector", length_key="valid_time_samples", angles_key="angles")
-                if domain == "iq" else dict(fs_key="ar_fs", t0_key="ar_t0", length_key="ar_len", angles_key="ar_angles"))
+        keys = dict(
+            fs_key=fs_key,
+            t0_key=t0_key,
+            length_key=length_key,
+            angles_key=angles_key,
+        )
         real, fs, t0, angles = _sampling(hf, real, sample_idx, **keys)
         imag = imag[:, :real.shape[1]]
         if not np.isfinite(imag).all():
@@ -156,9 +168,9 @@ def load_input_from_h5(hf, sample_idx, domain="iq"):
             fs, fc, coefficients, factor, normalization = ddc_settings(hf, fs)
             real, imag = rf_to_iq(real, fs, fc, t0, coefficients, factor)
             fs /= factor
-            if "all_scale_ref" not in hf and normalization["mode"] == "none":
+            if "linear_scale_ref" not in hf and normalization["mode"] == "none":
                 scale = 1.0
-            elif "all_scale_ref" not in hf:
+            elif "linear_scale_ref" not in hf:
                 epsilon = normalization["epsilon"]
                 if normalization["mode"] == "complex_rms":
                     scale = float(np.sqrt(np.mean(real**2 + imag**2) + epsilon))

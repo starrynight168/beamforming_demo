@@ -9,6 +9,7 @@ import csv
 import json
 import math
 import os
+import sys
 from pathlib import Path
 
 import h5py
@@ -39,6 +40,9 @@ PICMUS_OFFICIAL_Z_CORRECTION_MM = 0.2
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, os.pardir))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+from data.h5_schema import require_h5_schema
 PICMUS_ROOT = os.path.join(PROJECT_ROOT, "data", "PICMUS")
 
 
@@ -181,7 +185,8 @@ def h5_embedded_config(hf):
 def read_sample_meta(h5_path, sample_idx):
     """Read sample meta."""
     with h5py.File(h5_path, "r") as hf:
-        sample_axis = "all_multi_I" if "all_multi_I" in hf else "acquisition_id"
+        require_h5_schema(hf)
+        sample_axis = "iq_i" if "iq_i" in hf else "acquisition_id"
         n_samples = int(hf[sample_axis].shape[0])
         if not 0 <= sample_idx < n_samples:
             raise IndexError(f"sample index {sample_idx} is outside [0, {n_samples - 1}]")
@@ -199,10 +204,10 @@ def read_sample_meta(h5_path, sample_idx):
                 raise ValueError(f"domain_targets.{domain}.{algorithm}.signal must be a mapping")
             target_paths.extend(pair.values())
         has_gt = any(path and str(path).lstrip("/") in hf for path in target_paths)
-        if "all_envdb_norm" in hf:
-            gt_shape = hf["all_envdb_norm"].shape
+        if "reference_iq_db" in hf:
+            gt_shape = hf["reference_iq_db"].shape
             if not gt_shape or gt_shape[0] != n_samples:
-                raise ValueError(f"all_envdb_norm 样本数必须与 {sample_axis} 一致")
+                raise ValueError(f"reference_iq_db 样本数必须与 {sample_axis} 一致")
         dataset_meta = config.get("dataset", {})
         if dataset_meta is None:
             dataset_meta = {}
@@ -250,8 +255,7 @@ def picmus_distortion_z_offset_mm(h5_path, source):
     if source != "simulation":
         return 0.0
     with h5py.File(h5_path, "r") as hf:
-        if "config_yaml" not in hf:
-            return PICMUS_OFFICIAL_Z_CORRECTION_MM
+        require_h5_schema(hf)
         config = h5_embedded_config(hf)
     evaluation = config.get("evaluation")
     if evaluation is None:
@@ -278,6 +282,7 @@ def picmus_distortion_z_offset_mm(h5_path, source):
 def load_grids(h5_path):
     """Load grids."""
     with h5py.File(h5_path, "r") as hf:
+        require_h5_schema(hf)
         x_mm = hf["x_grid"][:].astype(float) * 1000.0
         z_mm = hf["z_grid"][:].astype(float) * 1000.0
     for name, grid in (("x_grid", x_mm), ("z_grid", z_mm)):

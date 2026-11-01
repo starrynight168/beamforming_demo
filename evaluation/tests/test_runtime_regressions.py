@@ -254,24 +254,25 @@ class WizardFlowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "packed.h5"
             with h5py.File(path, "w") as handle:
-                handle["all_multi_I"] = np.zeros((1, 3, 8, 4), dtype=np.float32)
-                handle["all_multi_Q"] = np.zeros((1, 3, 8, 4), dtype=np.float32)
+                handle["h5_schema_version"] = np.uint8(3)
+                handle["iq_i"] = np.zeros((1, 3, 8, 4), dtype=np.float32)
+                handle["iq_q"] = np.zeros((1, 3, 8, 4), dtype=np.float32)
                 handle["acquisition_id"] = ["sample"]
                 handle["body_region"] = ["simulation"]
-                handle["valid_time_samples"] = np.array([8], dtype=np.int32)
-                handle["time_start_vector"] = np.zeros((1, 3), dtype=np.float32)
-                handle["angles"] = np.array([-0.2, 0.0, 0.2], dtype=np.float32)
+                handle["iq_length"] = np.array([8], dtype=np.int32)
+                handle["iq_t0"] = np.zeros((1, 3), dtype=np.float32)
+                handle["iq_angles"] = np.array([-0.2, 0.0, 0.2], dtype=np.float32)
                 handle["z_grid"] = np.array([0.01, 0.02], dtype=np.float32)
                 handle["x_grid"] = np.linspace(-0.01, 0.01, 5, dtype=np.float32)
                 for name, value in {
-                    "fs": 20e6,
+                    "iq_fs": 20e6,
                     "c": 1540.0,
                     "fc": 5e6,
                     "pitch": 0.0003,
                     "num_channels": 4,
                 }.items():
                     handle[name] = value
-                handle["all_envdb_norm"] = np.zeros((1, 1, 2, 5), dtype=np.float32)
+                handle["reference_iq_db"] = np.zeros((1, 1, 2, 5), dtype=np.float32)
                 handle["config_yaml"] = yaml.safe_dump(
                     {
                         "generation": {
@@ -281,7 +282,7 @@ class WizardFlowTests(unittest.TestCase):
                             },
                             "ground_truth": {"algorithm": "mv", "signal_domain": "iq"},
                             "training_targets": {
-                                "domain_targets": {"iq": {"mv": {"db": "/all_envdb_norm"}}}
+                                "domain_targets": {"iq": {"mv": {"db": "/reference_iq_db"}}}
                             },
                         },
                         "source_samples": [

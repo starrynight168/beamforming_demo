@@ -25,6 +25,7 @@ from algorithms.common import (
     result_cache_signature,
 )
 from evaluation.evaluate import load_picmus_context
+from data.h5_schema import require_h5_schema
 
 ROOT = Path(__file__).resolve().parent
 
@@ -257,6 +258,7 @@ def scene_has_gt(scene, signal_domain="iq"):
     h5_path = resolve_path(scene["h5_path"])
     sample_idx = int(scene["sample_idx"])
     with h5py.File(h5_path, "r") as hf:
+        require_h5_schema(hf)
         config = yaml.safe_load(hf["config_yaml"][()])
         generation = config["generation"]
         ground_truth = generation["ground_truth"]
