@@ -386,8 +386,8 @@ def inspect_h5(path):
     """Execute inspect h5."""
     with h5py.File(path, "r") as hf:
         require_h5_schema(hf)
-        if "config_yaml" not in hf or "acquisition_id" not in hf:
-            raise ValueError("当前 H5 必须包含 config_yaml 和 acquisition_id")
+        if "config_yaml" not in hf:
+            raise ValueError("当前 H5 必须包含 config_yaml")
         raw_config = hf["config_yaml"][()]
         if isinstance(raw_config, bytes):
             raw_config = raw_config.decode("utf-8", errors="replace")
@@ -399,16 +399,16 @@ def inspect_h5(path):
         declared = storage.get("inputs", {}) if isinstance(storage, dict) else {}
         if not isinstance(declared, dict):
             raise ValueError("generation.storage.inputs 必须是映射")
-        definitions = {
-            "iq": ("iq_i", "iq_q", "iq_fs", "iq_angles", "iq_t0", "iq_length"),
-            "analytic_rf": ("ar_i", "ar_q", "ar_fs", "ar_angles", "ar_t0", "ar_length"),
-            "rf": ("rf", None, "rf_fs", "rf_angles", "rf_t0", "rf_length"),
-        }
         available = []
-        for domain, fields in definitions.items():
+        for domain in ("iq", "rf", "analytic_rf"):
             if domain not in declared:
                 continue
-            required = [field for field in fields if field is not None]
+            if domain == "iq":
+                required = ("iq_i", "iq_q", "iq_fs", "iq_angles", "iq_t0", "iq_length")
+            elif domain == "rf":
+                required = ("rf", "rf_fs", "rf_angles", "rf_t0", "rf_length")
+            else:
+                required = ("ar_i", "ar_q", "ar_fs", "ar_angles", "ar_t0", "ar_length")
             missing = sorted(set(required) - set(hf.keys()))
             if missing:
                 raise ValueError(f"storage.inputs.{domain} 声明的字段缺失:{', '.join(missing)}")
@@ -423,9 +423,17 @@ def inspect_h5(path):
             raise ValueError("H5 未保存可用的 rf、analytic_rf 或 iq 输入")
         default_domain = next((d for d in ("iq", "analytic_rf", "rf") if d in available), available[0])
         data_domain = next((d for d in ("iq", "analytic_rf", "rf") if d in stored_domains), stored_domains[0])
-        data_name, imag_name, fs_name, angles_name, starts_name, length_name = definitions[data_domain]
-        n = len(hf["acquisition_id"])
+        if data_domain == "iq":
+            data_name, imag_name = "iq_i", "iq_q"
+            fs_name, angles_name, starts_name, length_name = "iq_fs", "iq_angles", "iq_t0", "iq_length"
+        elif data_domain == "rf":
+            data_name, imag_name = "rf", None
+            fs_name, angles_name, starts_name, length_name = "rf_fs", "rf_angles", "rf_t0", "rf_length"
+        else:
+            data_name, imag_name = "ar_i", "ar_q"
+            fs_name, angles_name, starts_name, length_name = "ar_fs", "ar_angles", "ar_t0", "ar_length"
         shape = hf[data_name].shape
+        n = len(hf["acquisition_id"]) if "acquisition_id" in hf else shape[0]
         if len(shape) != 4 or shape[0] != n or min(shape[1], shape[3]) < 1 or shape[2] < 2:
             raise ValueError(f"{data_name} 必须是非空 [N,A,T,C] 数组")
         if imag_name and hf[data_name].shape != hf[imag_name].shape:
@@ -465,9 +473,11 @@ def inspect_h5(path):
         targets = generation.get("training_targets", {}) if isinstance(generation, dict) else {}
         ground_truth = generation.get("ground_truth", {}) if isinstance(generation, dict) else {}
         target_domains = targets.get("domain_targets", {}) if isinstance(targets, dict) else {}
+        if not isinstance(ground_truth, dict) or not ground_truth.get("algorithm") or ground_truth.get("signal_domain") not in ("rf", "analytic_rf", "iq"):
+            raise ValueError("config_yaml.generation.ground_truth 必须明确 algorithm 和 signal_domain")
         gt_by_domain = {}
         for domain in ("rf", "analytic_rf", "iq"):
-            algorithm = ground_truth.get("algorithm") if isinstance(ground_truth, dict) else None
+            algorithm = ground_truth["algorithm"]
             entry = target_domains.get(domain, {}).get(algorithm, {}) if isinstance(target_domains, dict) else {}
             paths = [entry.get(name) for name in ("db", "envelope") if isinstance(entry, dict) and entry.get(name)]
             if not paths and domain != "rf" and isinstance(entry, dict):
@@ -475,7 +485,7 @@ def inspect_h5(path):
                 if isinstance(signal, dict):
                     paths = [signal.get("real"), signal.get("imag")]
             gt_by_domain[domain] = bool(paths and all(path and path in hf for path in paths))
-        main_domain = ground_truth.get("signal_domain", default_domain) if isinstance(ground_truth, dict) else default_domain
+        main_domain = ground_truth["signal_domain"]
         gt = "有" if gt_by_domain.get(main_domain, False) else "无"
         angles = a
         fs = scalar_values[fs_name]
@@ -501,21 +511,23 @@ def inspect_h5(path):
             ]
         elif (
             isinstance(samples, dict)
-            and samples.get("encoding") == "root_labels_with_path_template"
+            and samples.get("encoding") in ("root_labels", "root_labels_with_path_template")
             and samples.get("count") == n
         ):
-            id_dataset = str(samples.get("acquisition_id_dataset", "/acquisition_id"))
+            id_dataset = str(samples["acquisition_id_dataset"])
             if id_dataset not in hf or hf[id_dataset].shape != (n,):
                 raise ValueError("EPFL 紧凑样本元数据缺少有效 acquisition_id 标签")
             names = [
                 str(value.decode("utf-8") if isinstance(value, bytes) else value)
                 for value in hf[id_dataset][:]
             ]
-            dataset_id = str((config.get("dataset") or {}).get("id", "")).lower()
-            is_in_vivo = "invivo" in dataset_id or "volunteer" in dataset_id
+            is_in_vivo = (
+                samples.get("phantom_mode") == "in_vivo"
+                or samples.get("phantom_source") == "in_vivo"
+            )
             in_vivo = [is_in_vivo] * n
         else:
-            raise ValueError("config_yaml.source_samples 数量必须与 H5 样本数一致")
+            raise ValueError("H5 必须声明每个样本的来源标识")
     return {
         "n": n,
         "a": a,
@@ -752,7 +764,7 @@ def main():
             (state["base_config"].get("params", {}) or {}).get("signal_domain", info["default_domain"]),
         )
         if default not in info["domains"]:
-            default = info["default_domain"]
+            raise ValueError(f"所选 signal_domain={default!r} 未保存在 H5 输入中")
         state["signal_domain"] = ask_choice(
             "请选择算法输入信号域",
             options,

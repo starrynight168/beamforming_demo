@@ -16,6 +16,7 @@ def _require(hf, fields, message):
 
 
 def _metadata(hf):
+    require_h5_schema(hf)
     _require(hf, ("config_yaml",), "H5 requires config_yaml to describe its processing")
     config = yaml.safe_load(hf["config_yaml"][()])
     if not isinstance(config, dict) or not isinstance(config.get("generation"), dict):
@@ -75,10 +76,11 @@ def input_is_normalized(hf, domain):
 
 
 def _rf_frame(hf, sample_idx):
-    _require(hf, ("rf",), "RF input was not saved; select rf in storage.inputs")
+    _require(hf, ('rf',), "RF input was not saved; select rf in storage.inputs")
     return _sampling(
-        hf, _frame(hf, "rf", sample_idx), sample_idx,
-        fs_key="rf_fs", t0_key="rf_t0", length_key="rf_length", angles_key="rf_angles",
+        hf, _frame(hf, 'rf', sample_idx), sample_idx,
+        fs_key='rf_fs', t0_key='rf_t0',
+        length_key='rf_length', angles_key='rf_angles',
     )
 
 
@@ -101,7 +103,7 @@ def ddc_settings(hf, source_fs):
         raise ValueError("input_iq.decimation_factor must be a positive integer")
     fs = settings.get("source_sampling_frequency_hz")
     if fs is None or not np.isfinite(fs) or fs <= 0 or not np.isclose(fs, source_fs, rtol=1e-6):
-        raise ValueError("input_iq source sampling frequency must match rf_fs")
+        raise ValueError("input_iq.source_sampling_frequency_hz must match rf_fs")
     acquisition = config.get("acquisition")
     if not isinstance(acquisition, dict):
         raise ValueError("config_yaml.acquisition must describe the acquisition settings")
@@ -144,18 +146,14 @@ def load_input_from_h5(hf, sample_idx, domain="iq"):
         imag = _frame(hf, cache_names[1], sample_idx)
         if real.shape != imag.shape:
             raise ValueError("Cached complex components must have matching dimensions")
-        keys = dict(
-            fs_key=fs_key,
-            t0_key=t0_key,
-            length_key=length_key,
-            angles_key=angles_key,
-        )
+        keys = dict(fs_key=fs_key, t0_key=t0_key,
+                    length_key=length_key, angles_key=angles_key)
         real, fs, t0, angles = _sampling(hf, real, sample_idx, **keys)
         imag = imag[:, :real.shape[1]]
         if not np.isfinite(imag).all():
             raise ValueError("Valid complex samples must be finite")
         normalized = input_is_normalized(hf, domain)
-        scale = _scale(hf, sample_idx, required=domain == "iq" or normalized)
+        scale = _scale(hf, sample_idx, required=normalized)
         if not normalized:
             real, imag = real / scale, imag / scale
     else:

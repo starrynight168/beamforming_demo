@@ -9,14 +9,19 @@ import csv
 import json
 import math
 import os
-import sys
 from pathlib import Path
+import sys
 
 import h5py
 import numpy as np
 import yaml
 from scipy.ndimage import gaussian_filter
 from scipy.stats import kstest
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from data.h5_schema import require_h5_schema
 
 EPSILON = 1e-9
 PASS_THRESHOLD = 0.5
@@ -40,9 +45,6 @@ PICMUS_OFFICIAL_Z_CORRECTION_MM = 0.2
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, os.pardir))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-from data.h5_schema import require_h5_schema
 PICMUS_ROOT = os.path.join(PROJECT_ROOT, "data", "PICMUS")
 
 
@@ -186,28 +188,40 @@ def read_sample_meta(h5_path, sample_idx):
     """Read sample meta."""
     with h5py.File(h5_path, "r") as hf:
         require_h5_schema(hf)
-        sample_axis = "iq_i" if "iq_i" in hf else "acquisition_id"
+        config = h5_embedded_config(hf)
+        generation = config.get("generation", {})
+        storage = generation.get("storage", {}) if isinstance(generation, dict) else {}
+        stored_inputs = storage.get("inputs", {}) if isinstance(storage, dict) else {}
+        input_domain = next((domain for domain in ("iq", "rf", "analytic_rf") if domain in stored_inputs), None)
+        if input_domain is None:
+            raise ValueError("H5 config_yaml.generation.storage.inputs 未声明输入域")
+        if "acquisition_id" in hf:
+            sample_axis = "acquisition_id"
+        elif input_domain == "iq":
+            sample_axis = "iq_i"
+        elif input_domain == "rf":
+            sample_axis = "rf"
+        else:
+            sample_axis = "ar_i"
         n_samples = int(hf[sample_axis].shape[0])
         if not 0 <= sample_idx < n_samples:
             raise IndexError(f"sample index {sample_idx} is outside [0, {n_samples - 1}]")
-        config = h5_embedded_config(hf)
-        generation = config.get("generation", {})
         ground_truth = generation.get("ground_truth", {})
         targets = generation.get("training_targets", {})
         domain = ground_truth["signal_domain"]
         algorithm = ground_truth["algorithm"]
         entry = targets.get("domain_targets", {}).get(domain, {}).get(algorithm, {})
-        target_paths = [entry.get("db"), entry.get("envelope")]
+        target_paths = [path for path in (entry.get("db"), entry.get("envelope")) if path]
         if domain != "rf":
             pair = entry.get("signal", {})
             if not isinstance(pair, dict):
                 raise ValueError(f"domain_targets.{domain}.{algorithm}.signal must be a mapping")
-            target_paths.extend(pair.values())
+            target_paths.extend(path for path in pair.values() if path)
         has_gt = any(path and str(path).lstrip("/") in hf for path in target_paths)
-        if "reference_iq_db" in hf:
-            gt_shape = hf["reference_iq_db"].shape
-            if not gt_shape or gt_shape[0] != n_samples:
-                raise ValueError(f"reference_iq_db 样本数必须与 {sample_axis} 一致")
+        for path in target_paths:
+            key = str(path).lstrip("/") if path else None
+            if key in hf and (not hf[key].shape or hf[key].shape[0] != n_samples):
+                raise ValueError(f"{key} 样本数必须与 {sample_axis} 一致")
         dataset_meta = config.get("dataset", {})
         if dataset_meta is None:
             dataset_meta = {}

@@ -48,17 +48,18 @@ def write_picmus_sample(
         else ""
     )
     with h5py.File(path, "w") as handle:
-        handle["h5_schema_version"] = np.uint8(3)
+        handle["h5_schema_version"] = 3
         handle["iq_i"] = np.zeros((1, 1, 1, 1))
         handle["x_grid"] = np.linspace(-0.025, 0.025, 201)
         handle["z_grid"] = np.linspace(0.005, 0.055, 201)
         if has_gt:
-            handle["reference_iq_db"] = np.zeros((1, 1, 201, 201))
+            handle["mv_iq_db"] = np.zeros((1, 1, 201, 201))
         handle["config_yaml"] = yaml.safe_dump(
             {
                 "generation": {
+                    "storage": {"inputs": {"iq": {"dtype": "float32", "normalize": False}}},
                     "ground_truth": {"algorithm": "mv", "signal_domain": "iq", "dynamic_range_db": 60.0},
-                    "training_targets": {"domain_targets": {"iq": {"mv": {"db": "/reference_iq_db"}}}},
+                    "training_targets": {"domain_targets": {"iq": {"mv": {"db": "/mv_iq_db"}}}},
                 },
                 "source_samples": [
                     {
@@ -504,13 +505,14 @@ class EvaluationInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.h5"
             with h5py.File(path, "w") as handle:
-                handle["h5_schema_version"] = np.uint8(3)
+                handle["h5_schema_version"] = 3
                 handle.create_dataset("iq_i", data=np.zeros((1, 1, 1, 1)))
                 handle.create_dataset(
                     "config_yaml",
                     data=yaml.safe_dump({
                         "dataset": [],
-                        "generation": {"ground_truth": {"signal_domain": "iq", "algorithm": "mv"},
+                        "generation": {"storage": {"inputs": {"iq": {"dtype": "float32", "normalize": False}}},
+                                       "ground_truth": {"signal_domain": "iq", "algorithm": "mv"},
                                        "training_targets": {"domain_targets": {"iq": {"mv": {}}}}},
                         "source_samples": [{"id": "sample"}],
                     }),
@@ -529,19 +531,26 @@ class EvaluationInputTests(unittest.TestCase):
                 "phantom_path": "phantom.h5",
             }
             with h5py.File(path, "w") as handle:
-                handle["h5_schema_version"] = np.uint8(3)
+                handle["h5_schema_version"] = 3
                 handle.create_dataset("iq_i", data=np.zeros((2, 1, 1, 1)))
-                handle.create_dataset("reference_iq_db", data=np.zeros((1, 1, 2, 2)))
+                handle.create_dataset("iq_fs", data=20e6)
+                handle.create_dataset("mv_iq_db", data=np.zeros((1, 1, 2, 2)))
                 handle.create_dataset(
                     "config_yaml",
                     data=yaml.safe_dump({
                         "generation": {
+                            "storage": {"inputs": {"iq": {"dtype": "float32", "normalize": False}}},
                             "ground_truth": {"signal_domain": "iq", "algorithm": "mv"},
-                            "training_targets": {"domain_targets": {"iq": {"mv": {"db": "/reference_iq_db"}}}},
+                            "training_targets": {"domain_targets": {"iq": {"mv": {"db": "/mv_iq_db"}}}},
                         },
                         "source_samples": [sample_meta, sample_meta],
                     }),
                 )
+            with self.assertRaisesRegex(ValueError, "样本数必须与 iq_i 一致"):
+                read_sample_meta(path, sample_idx=1)
+            with h5py.File(path, "r+") as handle:
+                del handle["mv_iq_db"]
+                handle["mv_iq_db"] = 0.0
             with self.assertRaisesRegex(ValueError, "样本数必须与 iq_i 一致"):
                 read_sample_meta(path, sample_idx=1)
 
@@ -554,12 +563,13 @@ class EvaluationInputTests(unittest.TestCase):
                                    "acquisition_id_dataset": "/acquisition_id",
                                    "phantom_mode": "in_vivo", "phantom_source": "in_vivo"},
                 "generation": {
+                    "storage": {"inputs": {"rf": {"dtype": "float32", "normalize": False}}},
                     "ground_truth": {"algorithm": "mv", "signal_domain": "rf"},
                     "training_targets": {"domain_targets": {"rf": {"mv": {"db": "/mv_rf_db"}}}},
                 },
             }
             with h5py.File(path, "w") as handle:
-                handle["h5_schema_version"] = np.uint8(3)
+                handle["h5_schema_version"] = 3
                 handle["acquisition_id"] = np.array([b"rf_sample"])
                 handle["rf"] = np.zeros((1, 1, 8, 2), np.float32)
                 handle["mv_rf_db"] = np.zeros((1, 1, 2, 2), np.float16)
@@ -577,7 +587,7 @@ class EvaluationInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.h5"
             with h5py.File(path, "w") as handle:
-                handle["h5_schema_version"] = np.uint8(3)
+                handle["h5_schema_version"] = 3
                 handle.create_dataset("config_yaml", data=b"evaluation: []\n")
 
             with self.assertRaisesRegex(ValueError, "config_yaml.evaluation must be a mapping"):

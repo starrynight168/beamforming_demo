@@ -10,6 +10,7 @@ from scipy.signal import firwin, hilbert
 
 from algorithms.shared_core.data import load_input, load_target
 from algorithms.shared_core.signals import rf_to_analytic, rf_to_iq
+from data.h5_schema import write_h5_schema
 
 
 class SignalDataTests(unittest.TestCase):
@@ -44,13 +45,13 @@ class SignalDataTests(unittest.TestCase):
 
     def create_file(self, *, scale=3.0, cached_iq=False):
         with h5py.File(self.path, "w") as hf:
-            hf["h5_schema_version"] = np.uint8(3)
+            write_h5_schema(hf)
             padded = np.pad(self.rf, ((0, 0), (0, 16), (0, 0)), constant_values=np.nan)
-            hf["rf"] = padded[None]
-            hf["rf_fs"] = 20e6
-            hf["rf_t0"] = self.starts[None]
-            hf["rf_angles"] = [-0.1, 0.1]
-            hf["rf_length"] = [self.rf.shape[1]]
+            hf['rf'] = padded[None]
+            hf['rf_fs'] = 20e6
+            hf['rf_t0'] = self.starts[None]
+            hf['rf_angles'] = [-0.1, 0.1]
+            hf['rf_length'] = [self.rf.shape[1]]
             hf["x_grid"] = [-0.001, 0.001]
             hf["z_grid"] = [0.01, 0.02, 0.03]
             if scale is not None:
@@ -61,10 +62,10 @@ class SignalDataTests(unittest.TestCase):
                 )
                 hf["iq_i"] = np.full((1, 2, 10, 3), 4.0, dtype=np.float16)
                 hf["iq_q"] = np.full((1, 2, 10, 3), -2.0, dtype=np.float16)
-                hf["iq_fs"] = 10e6
+                hf['iq_fs'] = 10e6
                 hf["iq_t0"] = self.starts[None]
                 hf["iq_length"] = [7]
-                hf["iq_angles"] = [-0.1, 0.1]
+                hf['iq_angles'] = [-0.1, 0.1]
             for field, value in (("mv_iq_i", 1.0), ("mv_iq_q", 2.0), ("mv_rf", -3.0),
                                  ("mv_ar_i", 4.0), ("mv_ar_q", 5.0)):
                 hf[field] = np.full((1, 1, 3, 2), value, dtype=np.float16)
@@ -108,7 +109,7 @@ class SignalDataTests(unittest.TestCase):
         self.config["generation"]["storage"] = {"inputs": {"rf": {"dtype": "float32", "normalize": True}}}
         self.create_file(scale=4.0)
         with h5py.File(self.path, "r+") as hf:
-            hf["rf"][:] = hf["rf"][:] / 4.0
+            hf['rf'][:] = hf['rf'][:] / 4.0
         np.testing.assert_array_equal(load_input(self.path, 0, "rf")["real"], self.rf / 4.0)
         np.testing.assert_array_equal(load_input(self.path, 0, "analytic_rf")["imag"], hilbert(self.rf, axis=1).imag / 4.0)
         expected = rf_to_iq(self.rf, 20e6, 5e6, self.starts, firwin(64, 0.4), 2)
@@ -135,9 +136,9 @@ class SignalDataTests(unittest.TestCase):
             hf["config_yaml"][()] = yaml.safe_dump(config)
             hf["ar_i"] = expected["real"][None] * 3
             hf["ar_q"] = expected["imag"][None] * 3
-            hf["ar_fs"], hf["ar_t0"] = 20e6, self.starts[None]
-            hf["ar_angles"], hf["ar_length"] = [-.1, .1], [260]
-            del hf["rf"]
+            hf['ar_fs'], hf['ar_t0'] = 20e6, self.starts[None]
+            hf['ar_angles'], hf['ar_length'] = [-.1, .1], [260]
+            del hf['rf']
         with patch("algorithms.shared_core.data.rf_to_analytic", side_effect=AssertionError("Cache must be used")):
             cached = load_input(self.path, 0, "analytic_rf")
         np.testing.assert_allclose(cached["real"], expected["real"], rtol=2e-7)
@@ -158,9 +159,9 @@ class SignalDataTests(unittest.TestCase):
         expected_imag = hilbert(self.rf, axis=1).imag
         with h5py.File(self.path, "r+") as hf:
             hf["ar_i"], hf["ar_q"] = self.rf[None], expected_imag[None]
-            hf["ar_fs"], hf["ar_t0"] = 20e6, self.starts[None]
-            hf["ar_angles"], hf["ar_length"] = [-.1, .1], [260]
-            del hf["rf"]
+            hf['ar_fs'], hf['ar_t0'] = 20e6, self.starts[None]
+            hf['ar_angles'], hf['ar_length'] = [-.1, .1], [260]
+            del hf['rf']
         result = load_input(self.path, 0, "analytic_rf")
         self.assertEqual(result["scale"], 1.)
         np.testing.assert_array_equal(result["real"], self.rf)
@@ -226,7 +227,7 @@ class SignalDataTests(unittest.TestCase):
         with self.assertRaisesRegex(KeyError, "outputs.rf.das"):
             load_target(self.path, 0, algorithm="das", domain="rf")
         with h5py.File(self.path, "r+") as hf:
-            del hf["rf"]
+            del hf['rf']
         with self.assertRaisesRegex(KeyError, "storage.inputs"):
             load_input(self.path, 0, "rf")
 
@@ -242,6 +243,28 @@ class SignalDataTests(unittest.TestCase):
             del hf["iq_q"]
         with self.assertRaisesRegex(KeyError, "IQ cache is incomplete"):
             load_input(self.path, 0, "iq")
+
+    def test_input_and_teacher_reject_missing_old_or_malformed_schema(self):
+        for version in (None, 2, 3.5, np.array([3], dtype=np.uint8)):
+            with self.subTest(version=version):
+                self.create_file()
+                with h5py.File(self.path, "r+") as hf:
+                    del hf["h5_schema_version"]
+                    if version is not None:
+                        hf["h5_schema_version"] = version
+                for loader in (load_input, load_target):
+                    with self.subTest(loader=loader.__name__), self.assertRaises(ValueError):
+                        loader(self.path, 0)
+
+    def test_unnormalized_iq_without_shared_scale_preserves_physical_units(self):
+        self.config["generation"]["storage"]["inputs"]["iq"] = {
+            "dtype": "float16", "normalize": False,
+        }
+        self.create_file(scale=None, cached_iq=True)
+        result = load_input(self.path, 0, "iq")
+        np.testing.assert_array_equal(result["real"], 4.0)
+        np.testing.assert_array_equal(result["imag"], -2.0)
+        self.assertEqual(result["scale"], 1.0)
 
     def test_sample_idx_and_domain_are_explicit(self):
         self.create_file()

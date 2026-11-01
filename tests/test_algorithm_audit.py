@@ -24,6 +24,7 @@ from algorithms.common import (
     aperture_window_from_dx,
     algorithm_source_paths,
     dynamic_aperture_channel_count,
+    ground_truth_db,
     interpolate_channel_samples,
     normalized_mv_weights,
     parse_selected_angles,
@@ -127,19 +128,36 @@ class AlgorithmAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             h5_path = Path(directory) / "input.h5"
             with h5py.File(h5_path, "w") as handle:
-                handle["h5_schema_version"] = np.uint8(3)
+                handle["h5_schema_version"] = 3
                 handle.create_dataset("iq_i", data=np.zeros((2, 1, 1, 1)))
-                handle.create_dataset("reference_iq_db", data=np.zeros((1, 1, 2, 2)))
+                handle.create_dataset("mv_iq_db", data=np.zeros((1, 1, 2, 2)))
                 handle.create_dataset("config_yaml", data=yaml.safe_dump({
                     "generation": {
                         "ground_truth": {"algorithm": "mv", "signal_domain": "iq"},
                         "training_targets": {
-                            "domain_targets": {"iq": {"mv": {"db": "/reference_iq_db"}}}
+                            "domain_targets": {"iq": {"mv": {"db": "/mv_iq_db"}}}
                         },
                     }
                 }))
             with self.assertRaisesRegex(ValueError, "GT 样本索引超出范围"):
                 scene_has_gt({"h5_path": str(h5_path), "sample_idx": 1})
+
+    def test_rf_input_uses_declared_iq_image_reference_without_rf_teacher_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reference.h5"
+            image = np.array([[[[1.0, 0.5], [0.0, 0.25]]]], dtype=np.float32)
+            with h5py.File(path, "w") as handle:
+                handle["h5_schema_version"] = 3
+                handle["reference_iq_db"] = image
+                handle["config_yaml"] = yaml.safe_dump({"generation": {
+                    "ground_truth": {"algorithm": "reference", "signal_domain": "iq", "dynamic_range_db": 60},
+                    "training_targets": {"domain_targets": {"rf": {"reference": {
+                        "db": "/reference_iq_db", "kind": "image_reference", "source_domain": "iq",
+                    }}}},
+                }})
+                np.testing.assert_array_equal(
+                    ground_truth_db(handle, 0, "rf"), image[0] * 60 - 60,
+                )
 
     def test_scene_detects_complex_teacher_without_display_cache(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -155,7 +173,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                 }
             }
             with h5py.File(h5_path, "w") as handle:
-                handle["h5_schema_version"] = np.uint8(3)
+                handle["h5_schema_version"] = 3
                 handle.create_dataset("config_yaml", data=yaml.safe_dump(config))
                 handle.create_dataset("mv_iq_i", data=np.zeros((1, 1, 2, 2)))
                 handle.create_dataset("mv_iq_q", data=np.ones((1, 1, 2, 2)))
@@ -265,11 +283,11 @@ class AlgorithmAuditTests(unittest.TestCase):
             h5_path = root / "input.h5"
             gt = np.array([[1.0, 0.5], [0.0, 0.25]], dtype=np.float32)
             with h5py.File(h5_path, "w") as handle:
-                handle["h5_schema_version"] = np.uint8(3)
+                handle["h5_schema_version"] = 3
                 handle.create_dataset("iq_i", data=np.zeros((1, 1, 2, 1)))
                 handle.create_dataset("x_grid", data=[-0.001, 0.001])
                 handle.create_dataset("z_grid", data=[0.001, 0.002])
-                handle.create_dataset("reference_iq_db", data=gt[None, None])
+                handle.create_dataset("mv_iq_db", data=gt[None, None])
                 handle.create_dataset("config_yaml", data=yaml.safe_dump({
                     "generation": {
                         "ground_truth": {
@@ -279,7 +297,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                         },
                         "training_targets": {
                             "domain_targets": {
-                                "iq": {"mv": {"db": "/reference_iq_db"}}
+                                "iq": {"mv": {"db": "/mv_iq_db"}}
                             }
                         },
                     }
@@ -739,7 +757,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                         "ground_truth": {"algorithm": "mv", "signal_domain": "iq"},
                         "training_targets": {
                             "domain_targets": {
-                                "iq": {"mv": {"db": "/reference_iq_db"}}
+                                "iq": {"mv": {"db": "/mv_iq_db"}}
                             }
                         },
                     },
@@ -752,7 +770,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                     ],
                 }
                 with h5py.File(h5_path, "w") as hf:
-                    hf["h5_schema_version"] = np.uint8(3)
+                    hf.create_dataset("h5_schema_version", data=3)
                     hf.create_dataset("iq_i", data=np.zeros((1, 3, 8, 4)))
                     hf.create_dataset("iq_q", data=np.zeros((1, 3, 8, 4)))
                     hf.create_dataset("acquisition_id", data=["simulation_contrast_speckle"])
@@ -766,7 +784,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                     hf.create_dataset("fc", data=5e6)
                     hf.create_dataset("pitch", data=0.0003)
                     hf.create_dataset("num_channels", data=4)
-                    hf.create_dataset("reference_iq_db", data=np.zeros(gt_shape))
+                    hf.create_dataset("mv_iq_db", data=np.zeros(gt_shape))
                     hf.create_dataset(
                         "config_yaml",
                         data=yaml.safe_dump(embedded_config),
@@ -798,13 +816,13 @@ class AlgorithmAuditTests(unittest.TestCase):
                         "outputs": {"dtype": "float32"},
                     },
                     "input_iq": {"decimation_factor": 1},
-                    "ground_truth": {},
+                    "ground_truth": {"algorithm": "mv", "signal_domain": "rf"},
                     "training_targets": {"domain_targets": {}},
                 },
                 "source_samples": [{"id": "rf_sample", "phantom_mode": "in_vivo"}],
             }
             with h5py.File(h5_path, "w") as hf:
-                hf["h5_schema_version"] = np.uint8(3)
+                hf.create_dataset("h5_schema_version", data=3)
                 hf.create_dataset("config_yaml", data=yaml.safe_dump(config))
                 hf.create_dataset("acquisition_id", data=["rf_sample"])
                 hf.create_dataset("body_region", data=["region"])
@@ -823,6 +841,22 @@ class AlgorithmAuditTests(unittest.TestCase):
             info = inspect_h5(h5_path)
             self.assertEqual(info["domains"], ["rf", "analytic_rf", "iq"])
             self.assertEqual(info["default_domain"], "iq")
+            for encoding in ("root_labels", "root_labels_with_path_template"):
+                config["source_samples"] = {
+                    "encoding": encoding, "count": 1,
+                    "acquisition_id_dataset": "/acquisition_id",
+                    "phantom_mode": "in_vivo", "phantom_source": "in_vivo",
+                }
+                with h5py.File(h5_path, "r+") as hf:
+                    hf["config_yaml"][()] = yaml.safe_dump(config)
+                info = inspect_h5(h5_path)
+                self.assertEqual(info["in_vivo"], [True])
+                self.assertEqual(info["names"], ["rf_sample"])
+            config["source_samples"]["encoding"] = "unsupported"
+            with h5py.File(h5_path, "r+") as hf:
+                hf["config_yaml"][()] = yaml.safe_dump(config)
+            with self.assertRaisesRegex(ValueError, "来源标识"):
+                inspect_h5(h5_path)
 
 
 if __name__ == "__main__":

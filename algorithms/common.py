@@ -305,7 +305,7 @@ def load_from_h5(h5_path, sample_idx=0, signal_domain="iq"):
             if not np.all(np.isfinite(grid)) or not np.all(np.diff(grid) > 0):
                 raise ValueError(f"{name} 必须全部有限且严格递增")
         if not np.all(np.isfinite(angles)) or not np.all(np.isfinite(t0_vec)):
-            raise ValueError("iq_angles/iq_t0 包含 NaN/Inf")
+            raise ValueError("采集角度或时间起点包含 NaN/Inf")
 
         gt_data = None
         has_gt = False

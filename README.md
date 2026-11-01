@@ -106,6 +106,8 @@ pip install -r requirements.txt
 
    `reference_iq_db` 是三种输入域共用的图像参考，来源仍记录为官方 IQ 重建或多角度 IQ-DAS，不作为 RF teacher 信号。RF 的采样率为 20.832 MHz，载频来自配对 IQ 的 5.208 MHz；RF 文件中的 `modulation_frequency=0` 表示未解调，不能作为载频。RF F-DMAS 在非线性成对运算前使用至少 6fc 的密深度网格，按该处理网格设计 1.5fc～2.5fc 带通，支持 PICMUS 的 4fc 原始 RF。原始输入要求 fs > 2fc，且采集时的实际信号带宽须低于输入 Nyquist；插值不能恢复采集时已混叠的频谱。
 
+共享 Python 文件在两个工程中使用同一版本。参考图和教师字段按 `config_yaml.generation.training_targets.domain_targets` 读取；`kind: image_reference` 表示已生成的图像参考，可供不同输入域评估，无需 RF 波束信号的 Hilbert 包络元数据。
+
 4. **进行数据完整性体检**：
    验证必需字段、数据类型、形状、有限性、归一化尺度、路径元数据和 contract 一致性。模体类型支持 `contrast_speckle`/`resolution_distortion` 与 `simulation`/`experiments` 的组合，以及 `in_vivo`/`in_vivo`；前四种组合的 `phantom_path` 必须指向 `data/PICMUS` 下存在的文件，活体允许空模体路径。`iq_length` 必须是有效整数，其后的 IQ 必须保持零填充；`reference_iq_db` 必须为有限的 `[N,1,H,W]` 且位于 `[0,1]`：
    ```bash

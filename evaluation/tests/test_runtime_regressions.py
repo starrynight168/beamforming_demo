@@ -254,13 +254,13 @@ class WizardFlowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "packed.h5"
             with h5py.File(path, "w") as handle:
-                handle["h5_schema_version"] = np.uint8(3)
                 handle["iq_i"] = np.zeros((1, 3, 8, 4), dtype=np.float32)
                 handle["iq_q"] = np.zeros((1, 3, 8, 4), dtype=np.float32)
                 handle["acquisition_id"] = ["sample"]
                 handle["body_region"] = ["simulation"]
                 handle["iq_length"] = np.array([8], dtype=np.int32)
                 handle["iq_t0"] = np.zeros((1, 3), dtype=np.float32)
+                handle["h5_schema_version"] = 3
                 handle["iq_angles"] = np.array([-0.2, 0.0, 0.2], dtype=np.float32)
                 handle["z_grid"] = np.array([0.01, 0.02], dtype=np.float32)
                 handle["x_grid"] = np.linspace(-0.01, 0.01, 5, dtype=np.float32)
@@ -272,7 +272,7 @@ class WizardFlowTests(unittest.TestCase):
                     "num_channels": 4,
                 }.items():
                     handle[name] = value
-                handle["reference_iq_db"] = np.zeros((1, 1, 2, 5), dtype=np.float32)
+                handle["mv_iq_db"] = np.zeros((1, 1, 2, 5), dtype=np.float32)
                 handle["config_yaml"] = yaml.safe_dump(
                     {
                         "generation": {
@@ -282,7 +282,7 @@ class WizardFlowTests(unittest.TestCase):
                             },
                             "ground_truth": {"algorithm": "mv", "signal_domain": "iq"},
                             "training_targets": {
-                                "domain_targets": {"iq": {"mv": {"db": "/reference_iq_db"}}}
+                                "domain_targets": {"iq": {"mv": {"db": "/mv_iq_db"}}}
                             },
                         },
                         "source_samples": [
