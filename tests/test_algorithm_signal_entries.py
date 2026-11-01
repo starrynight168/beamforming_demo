@@ -36,7 +36,7 @@ class AlgorithmSignalEntryTests(unittest.TestCase):
                         "x_grid": np.linspace(-.0003,.0003,3)}.items():
                     h[name] = value
                 h["config_yaml"] = yaml.safe_dump({"generation": {"storage": {"inputs": {
-                    "analytic_rf": {"dtype": "float32", "normalize": True}}},
+                    "analytic_rf": {"dtype": "float32", "normalization": "rms"}}},
                     "ground_truth": {}, "training_targets": {}}})
             module = importlib.import_module("algorithms.mv")
             argv = ["mv", "--h5_path", str(path), "--output_dir", str(root),
@@ -90,7 +90,7 @@ class AlgorithmSignalEntryTests(unittest.TestCase):
                         "num_channels": 4, "z_grid": z,
                         "x_grid": np.linspace(-.0003,.0003,3)}.items():
                     h[key]=value
-                h['config_yaml']=yaml.safe_dump({'acquisition':{'fc_hz':fc},'generation':{'storage':{'inputs':{'rf':{'dtype':'float32','normalize':False}}},'input_iq':{'source_sampling_frequency_hz':fs,'packed_sampling_frequency_hz':fs,'decimation_factor':1,'ddc':{'phase_sign_q':-1,'mixing_gain':1.,'cutoff_hz':4e6,'num_taps':64,'lowpass':'firwin_64_then_filtfilt','resampling':'scipy_resample_poly_kaiser_12'},'normalization':{'mode':'complex_rms','epsilon':1e-12}},'ground_truth':{},'training_targets':{}}})
+                h['config_yaml']=yaml.safe_dump({'acquisition':{'fc_hz':fc},'generation':{'storage':{'inputs':{'rf':{'dtype':'float32','normalization':'none'}}},'input_iq':{'source_sampling_frequency_hz':fs,'packed_sampling_frequency_hz':fs,'decimation_factor':1,'ddc':{'phase_sign_q':-1,'mixing_gain':1.,'cutoff_hz':4e6,'num_taps':64,'lowpass':'firwin_64_then_filtfilt','resampling':'scipy_resample_poly_kaiser_12'},'normalization':{'mode':'complex_rms','epsilon':1e-12}},'ground_truth':{},'training_targets':{}}})
             for method in ('das','mv','ccmv','esbmv','gcfmv','cmsaw','fdmas'):
                 module=importlib.import_module('algorithms.'+method)
                 for domain in ('iq','analytic_rf','rf'):

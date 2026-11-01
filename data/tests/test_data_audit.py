@@ -151,10 +151,28 @@ class DataUtilityTests(unittest.TestCase):
 class DataPipelineTests(unittest.TestCase):
     def test_storage_rejects_unsupported_options(self):
         from data.pack_data import validate_storage
-        for storage in ({}, {"unknown": {}}, {"rf": {}}, {"iq": {"dtype": "int16", "normalize": True}},
-                        {"rf": {"dtype": "float32", "normalize": "false"}}):
+        for storage in ({}, {"unknown": {}}, {"rf": {}}, {"iq": {"dtype": "int16", "normalization": "rms"}},
+                        {"rf": {"dtype": "float32", "normalization": "false"}}):
             with self.subTest(storage=storage), self.assertRaises(ValueError):
                 validate_storage(storage)
+
+    def test_normalization_modes_and_reference_precision(self):
+        for mode in ("none", "rms", "env_std"):
+            for dtype in ("float16", "float32"):
+                with self.subTest(mode=mode, dtype=dtype), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    scenes = self._write_sources(root)
+                    output = root / "packed.h5"
+                    pack_dataset(scenes, output, root, save_gt_images_enabled=False,
+                                 storage={"iq": {"dtype": dtype, "normalization": mode}}, output_dtype=dtype)
+                    with h5py.File(output) as handle, h5py.File(root / scenes[0]["iq"]) as source, patch("data.check_data.DATA_DIR", root):
+                        real, imag = (source[f"US/US_DATASET0000/data/{key}"][:] for key in ("real", "imag"))
+                        expected_scale = {"none": 1., "rms": np.sqrt(np.mean(real**2 + imag**2) + 1e-12),
+                                          "env_std": np.std(np.hypot(real, imag)) + 1e-12}[mode]
+                        self.assertAlmostEqual(float(handle["linear_scale_ref"][0]), expected_scale, places=5)
+                        np.testing.assert_allclose(handle["iq_i"][0], real.transpose(0, 2, 1) / expected_scale, rtol=5e-4, atol=5e-4)
+                        self.assertEqual(handle["reference_iq_db"].dtype, np.dtype(dtype))
+                        self.assertEqual(run_checks(handle), ("通过", []))
 
     def test_configurable_signal_domains_round_trip(self):
         from itertools import combinations
@@ -186,7 +204,7 @@ class DataPipelineTests(unittest.TestCase):
                         if "probe_geometry" in base:
                             del base["probe_geometry"]
                         base.create_dataset("probe_geometry", data=[[-0.00045, -0.00015, 0.00015, 0.00045], [0]*4, [0]*4])
-                storage = {domain: {"dtype": "float32" if (domain == "rf") != reverse_storage else "float16", "normalize": (domain != "rf") != reverse_storage} for domain in domains}
+                storage = {domain: {"dtype": "float32" if (domain == "rf") != reverse_storage else "float16", "normalization": "rms" if ((domain != "rf") != reverse_storage) else "none"} for domain in domains}
                 output = root / "packed.h5"
                 pack_dataset(scenes, output, root, save_gt_images_enabled=False, storage=storage)
                 with h5py.File(output, "r") as handle, patch("data.check_data.DATA_DIR", root):

@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 from evaluation.evaluate import load_picmus_context
 from data.h5_schema import require_h5_schema
+from algorithms.shared_core.labels import target_label
 
 
 def parse_args():
@@ -534,6 +535,7 @@ def inspect_h5(path):
         "t": t,
         "c": c,
         "gt": gt,
+        "gt_label": target_label(config, main_domain, ground_truth["algorithm"]) if gt == "有" else "无",
         "angles": angles,
         "fs": fs,
         "fc": fc,
@@ -600,7 +602,7 @@ def choose_sample(path, teaching=True):
         print(f"  fs: {info['fs'] / 1e6:.3f} MHz")
     if info["fc"] is not None:
         print(f"  fc: {info['fc'] / 1e6:.3f} MHz")
-    print(f"  GT: {info['gt']}")
+    print(f"  GT: {info['gt_label']}")
 
     if info["n"] <= 20:
         options = []

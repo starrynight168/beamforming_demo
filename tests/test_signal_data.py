@@ -39,7 +39,7 @@ class SignalDataTests(unittest.TestCase):
                         "analytic_rf": {"mv": {"signal": {"real": "/mv_ar_i", "imag": "/mv_ar_q"}, "angles": {"selection": "input", "indices": [0, 1]}}},
                     },
                 },
-                "storage": {"inputs": {"rf": {"dtype": "float32", "normalize": False}}, "outputs": {"dtype": "float16"}},
+                "storage": {"inputs": {"rf": {"dtype": "float32", "normalization": "none"}}, "outputs": {"dtype": "float16"}},
             },
         }
 
@@ -58,7 +58,7 @@ class SignalDataTests(unittest.TestCase):
                 hf["linear_scale_ref"] = [scale]
             if cached_iq:
                 self.config["generation"]["storage"]["inputs"].setdefault(
-                    "iq", {"dtype": "float16", "normalize": True}
+                    "iq", {"dtype": "float16", "normalization": "rms"}
                 )
                 hf["iq_i"] = np.full((1, 2, 10, 3), 4.0, dtype=np.float16)
                 hf["iq_q"] = np.full((1, 2, 10, 3), -2.0, dtype=np.float16)
@@ -94,7 +94,7 @@ class SignalDataTests(unittest.TestCase):
     def test_raw_iq_cache_is_normalized_using_the_recorded_scale(self):
         for dtype in (np.float16, np.float32):
             with self.subTest(dtype=dtype):
-                self.config["generation"]["storage"] = {"inputs": {"iq": {"dtype": np.dtype(dtype).name, "normalize": False}}}
+                self.config["generation"]["storage"] = {"inputs": {"iq": {"dtype": np.dtype(dtype).name, "normalization": "none"}}}
                 self.create_file(scale=4.0, cached_iq=True)
                 with h5py.File(self.path, "r+") as hf:
                     for field in ("iq_i", "iq_q"):
@@ -106,7 +106,7 @@ class SignalDataTests(unittest.TestCase):
                 np.testing.assert_array_equal(result["imag"], -2.0)
 
     def test_normalized_rf_is_restored_before_analytic_and_iq_conversion(self):
-        self.config["generation"]["storage"] = {"inputs": {"rf": {"dtype": "float32", "normalize": True}}}
+        self.config["generation"]["storage"] = {"inputs": {"rf": {"dtype": "float32", "normalization": "rms"}}}
         self.create_file(scale=4.0)
         with h5py.File(self.path, "r+") as hf:
             hf['rf'][:] = hf['rf'][:] / 4.0
@@ -116,15 +116,15 @@ class SignalDataTests(unittest.TestCase):
         np.testing.assert_array_equal(load_input(self.path, 0, "iq")["real"], expected[0] / 4.0)
 
     def test_normalized_rf_requires_its_saved_scale(self):
-        self.config["generation"]["storage"] = {"inputs": {"rf": {"dtype": "float16", "normalize": True}}}
+        self.config["generation"]["storage"] = {"inputs": {"rf": {"dtype": "float16", "normalization": "rms"}}}
         self.create_file(scale=None)
         with self.assertRaisesRegex(KeyError, "linear_scale_ref"):
             load_input(self.path, 0, "rf")
 
-    def test_new_input_normalization_declaration_must_be_boolean(self):
-        self.config["generation"]["storage"] = {"inputs": {"iq": {"dtype": "float32", "normalize": "false"}}}
+    def test_input_normalization_requires_a_supported_method(self):
+        self.config["generation"]["storage"] = {"inputs": {"iq": {"dtype": "float32", "normalization": "false"}}}
         self.create_file(cached_iq=True)
-        with self.assertRaisesRegex(ValueError, "normalize must be explicit"):
+        with self.assertRaisesRegex(ValueError, "normalization=rms/env_std/none"):
             load_input(self.path, 0)
 
     def test_analytic_cache_can_be_used_without_rf_and_matches_derived_values(self):
@@ -132,7 +132,7 @@ class SignalDataTests(unittest.TestCase):
         expected = load_input(self.path, 0, "analytic_rf")
         with h5py.File(self.path, "r+") as hf:
             config = yaml.safe_load(hf["config_yaml"][()])
-            config["generation"]["storage"] = {"inputs": {"analytic_rf": {"dtype": "float32", "normalize": False}}}
+            config["generation"]["storage"] = {"inputs": {"analytic_rf": {"dtype": "float32", "normalization": "none"}}}
             hf["config_yaml"][()] = yaml.safe_dump(config)
             hf["ar_i"] = expected["real"][None] * 3
             hf["ar_q"] = expected["imag"][None] * 3
@@ -154,7 +154,7 @@ class SignalDataTests(unittest.TestCase):
             load_input(self.path, 0, "analytic_rf")
 
     def test_physical_analytic_cache_without_teacher_scale_keeps_its_units(self):
-        self.config["generation"]["storage"] = {"inputs": {"analytic_rf": {"dtype": "float32", "normalize": False}}}
+        self.config["generation"]["storage"] = {"inputs": {"analytic_rf": {"dtype": "float32", "normalization": "none"}}}
         self.create_file(scale=None)
         expected_imag = hilbert(self.rf, axis=1).imag
         with h5py.File(self.path, "r+") as hf:
@@ -167,7 +167,7 @@ class SignalDataTests(unittest.TestCase):
         np.testing.assert_array_equal(result["real"], self.rf)
         np.testing.assert_array_equal(result["imag"], expected_imag)
         with h5py.File(self.path, "r+") as hf:
-            self.config["generation"]["storage"]["inputs"]["analytic_rf"]["normalize"] = True
+            self.config["generation"]["storage"]["inputs"]["analytic_rf"]["normalization"] = "rms"
             hf["config_yaml"][()] = yaml.safe_dump(self.config)
         with self.assertRaisesRegex(KeyError, "linear_scale_ref"):
             load_input(self.path, 0, "analytic_rf")
@@ -258,7 +258,7 @@ class SignalDataTests(unittest.TestCase):
 
     def test_unnormalized_iq_without_shared_scale_preserves_physical_units(self):
         self.config["generation"]["storage"]["inputs"]["iq"] = {
-            "dtype": "float16", "normalize": False,
+            "dtype": "float16", "normalization": "none",
         }
         self.create_file(scale=None, cached_iq=True)
         result = load_input(self.path, 0, "iq")

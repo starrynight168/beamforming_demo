@@ -7,6 +7,7 @@ from scipy.signal import firwin
 
 from algorithms.shared_core.signals import rf_to_analytic, rf_to_iq
 from data.h5_schema import require_h5_schema
+from algorithms.shared_core.normalization import storage_normalization_mode
 
 
 def _require(hf, fields, message):
@@ -68,11 +69,10 @@ def _scale(hf, sample_idx, required=False):
 
 def input_is_normalized(hf, domain):
     inputs = _metadata(hf)["generation"].get("storage", {}).get("inputs")
-    if not isinstance(inputs, dict):
-        raise ValueError("H5 must declare generation.storage.inputs")
-    if domain not in inputs or type(inputs[domain].get("normalize")) is not bool:
-        raise ValueError(f"generation.storage.inputs.{domain}.normalize must be explicit")
-    return inputs[domain]["normalize"]
+    storage_normalization_mode(inputs)
+    if domain not in inputs:
+        raise ValueError(f"generation.storage.inputs.{domain} must be explicit")
+    return inputs[domain]["normalization"] != "none"
 
 
 def _rf_frame(hf, sample_idx):

@@ -57,7 +57,7 @@ def write_picmus_sample(
         handle["config_yaml"] = yaml.safe_dump(
             {
                 "generation": {
-                    "storage": {"inputs": {"iq": {"dtype": "float32", "normalize": False}}},
+                    "storage": {"inputs": {"iq": {"dtype": "float32", "normalization": "none"}}},
                     "ground_truth": {"algorithm": "mv", "signal_domain": "iq", "dynamic_range_db": 60.0},
                     "training_targets": {"domain_targets": {"iq": {"mv": {"db": "/mv_iq_db"}}}},
                 },
@@ -511,7 +511,7 @@ class EvaluationInputTests(unittest.TestCase):
                     "config_yaml",
                     data=yaml.safe_dump({
                         "dataset": [],
-                        "generation": {"storage": {"inputs": {"iq": {"dtype": "float32", "normalize": False}}},
+                        "generation": {"storage": {"inputs": {"iq": {"dtype": "float32", "normalization": "none"}}},
                                        "ground_truth": {"signal_domain": "iq", "algorithm": "mv"},
                                        "training_targets": {"domain_targets": {"iq": {"mv": {}}}}},
                         "source_samples": [{"id": "sample"}],
@@ -539,7 +539,7 @@ class EvaluationInputTests(unittest.TestCase):
                     "config_yaml",
                     data=yaml.safe_dump({
                         "generation": {
-                            "storage": {"inputs": {"iq": {"dtype": "float32", "normalize": False}}},
+                            "storage": {"inputs": {"iq": {"dtype": "float32", "normalization": "none"}}},
                             "ground_truth": {"signal_domain": "iq", "algorithm": "mv"},
                             "training_targets": {"domain_targets": {"iq": {"mv": {"db": "/mv_iq_db"}}}},
                         },
@@ -563,7 +563,7 @@ class EvaluationInputTests(unittest.TestCase):
                                    "acquisition_id_dataset": "/acquisition_id",
                                    "phantom_mode": "in_vivo", "phantom_source": "in_vivo"},
                 "generation": {
-                    "storage": {"inputs": {"rf": {"dtype": "float32", "normalize": False}}},
+                    "storage": {"inputs": {"rf": {"dtype": "float32", "normalization": "none"}}},
                     "ground_truth": {"algorithm": "mv", "signal_domain": "rf"},
                     "training_targets": {"domain_targets": {"rf": {"mv": {"db": "/mv_rf_db"}}}},
                 },

@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from algorithms.shared_core.data import load_input_from_h5
 from data.h5_schema import require_h5_schema
+from algorithms.shared_core.normalization import storage_normalization_mode
 LOG_DIR = DATA_DIR / "logs"
 
 KEY_FIELDS = (
@@ -368,12 +369,18 @@ def validate_config_schema(config: dict, hf: h5py.File, problems: list[str]) -> 
         "config_yaml.generation.storage.inputs",
         problems,
     )
-    if not stored_inputs or set(stored_inputs) - {"rf", "analytic_rf", "iq"}:
+    if not stored_inputs:
         problems.append("storage.inputs 必须选择 rf、analytic_rf、iq 中至少一种")
-    for domain, options in stored_inputs.items():
-        if (not isinstance(options, dict) or options.get("dtype") not in ("float16", "float32")
-                or type(options.get("normalize")) is not bool):
-            problems.append(f"storage.inputs.{domain} 的 dtype/normalize 非法")
+    try:
+        storage_normalization_mode(stored_inputs)
+    except ValueError as exc:
+        problems.append(str(exc))
+    output_settings = storage.get("outputs")
+    if (not isinstance(output_settings, dict) or set(output_settings) != {"dtype"}
+            or output_settings["dtype"] not in ("float16", "float32")):
+        problems.append("storage.outputs requires dtype=float16/float32")
+    elif hf["reference_iq_db"].dtype != np.dtype(output_settings["dtype"]):
+        problems.append("reference_iq_db dtype does not match storage.outputs.dtype")
     layouts = {domain: ["sample", "angle", "time", "channel"] for domain in stored_inputs}
     if schema.get("input_layouts") != layouts:
         problems.append("h5_schema.input_layouts 与保存的域不一致")
@@ -572,9 +579,6 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
     ):
         problems.append("iq_i / iq_q 形状不一致")
 
-    for key in ("reference_iq_db",):
-        if key in hf and hf[key].dtype != np.float16:
-            problems.append(f"{key} 类型应为 float16，实际为 {hf[key].dtype}")
     for key in ("iq_fs", "c", "fc", "pitch"):
         if key in hf:
             if hf[key].shape != ():

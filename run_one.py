@@ -26,6 +26,7 @@ from algorithms.common import (
 )
 from evaluation.evaluate import load_picmus_context
 from data.h5_schema import require_h5_schema
+from algorithms.shared_core.labels import target_label
 
 ROOT = Path(__file__).resolve().parent
 
@@ -520,7 +521,10 @@ def main():
     image_names = []
     if has_gt and gt is not None:
         images.append(gt)
-        titles.append("Ground Truth")
+        with h5py.File(resolve_path(scene["h5_path"]), "r") as hf:
+            metadata = yaml.safe_load(hf["config_yaml"][()])
+        teacher = metadata["generation"]["ground_truth"]["algorithm"]
+        titles.append(target_label(metadata, params["signal_domain"], teacher))
         image_names.append("ground_truth")
     for method, label in zip(methods, labels, strict=True):
         path = scene_dir / method / f"{method}.npy"

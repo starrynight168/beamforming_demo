@@ -1,6 +1,7 @@
 import h5py
 import yaml
 from data.h5_schema import require_h5_schema
+from algorithms.shared_core.labels import target_label
 
 from .interactive import ROOT, choice, number, output_input, path_input, run, sample_input
 from .registry import TOOLS
@@ -25,17 +26,15 @@ def ask_field(field, state):
             require_h5_schema(f)
             config = yaml.safe_load(f["config_yaml"][()])
             targets = config["generation"]["training_targets"]["domain_targets"]
-            fields = sorted(
-                {
-                    entry["db"].lstrip("/")
-                    for entries in targets.values()
-                    for entry in entries.values()
-                    if entry.get("db")
-                }
-            )
+            fields = {}
+            for domain, entries in targets.items():
+                for algorithm, entry in entries.items():
+                    if entry.get("db"):
+                        name = entry["db"].lstrip("/")
+                        fields.setdefault(name, target_label(config, domain, algorithm))
         if not fields:
             raise ValueError("H5 缺少可用的归一化参考图。")
-        return key, choice(label, [(name, name) for name in fields])
+        return key, choice(label, [(name, f"{label} [{name}]") for name, label in sorted(fields.items())])
     if kind in {"choice", "flag"}:
         return key, choice(label, default)
     rules = {

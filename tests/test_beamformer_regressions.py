@@ -608,7 +608,7 @@ class BeamformerRegressionTests(unittest.TestCase):
                     "    inputs:\n"
                     "      iq:\n"
                     "        dtype: float32\n"
-                    "        normalize: true\n"
+                    "        normalization: rms\n"
                     "  ground_truth: {}\n"
                     "  training_targets: {}\n"
                 )

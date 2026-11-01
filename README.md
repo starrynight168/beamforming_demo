@@ -98,7 +98,7 @@ pip install -r requirements.txt
    # --only 也支持 experiments 或 in_vivo
    ```
 
-   当前 H5 根字段 `h5_schema_version` 为 3，`config_yaml.schema_version` 也为 3；旧版 H5 不受支持，必须重新打包。IQ 字段为 `iq_i`、`iq_q`、`iq_fs`、`iq_t0`、`iq_angles`、`iq_length`；RF 字段为 `rf`、`rf_fs`、`rf_t0`、`rf_angles`、`rf_length`；解析 RF 字段为 `ar_i`、`ar_q`、`ar_fs`、`ar_t0`、`ar_angles`、`ar_length`。图像参考字段为 `reference_iq_db`，显示参考为 `reference_iq_ref`，每样本共同尺度为 `linear_scale_ref`。保存哪些输入域由 [data/config.yaml](data/config.yaml) 的 `storage.inputs` 决定，默认保存原始 RF（float32、不归一化）和官方 IQ（float16、归一化）。可以只保留 `rf`、`analytic_rf`、`iq` 中一种或多种，每种都明确配置 `dtype: float16/float32` 和 `normalize: true/false`。另一个配置可用 `--config 路径` 指定。
+   当前 H5 根字段 `h5_schema_version` 为 3，`config_yaml.schema_version` 也为 3；旧版 H5 不受支持，必须重新打包。IQ 字段为 `iq_i`、`iq_q`、`iq_fs`、`iq_t0`、`iq_angles`、`iq_length`；RF 字段为 `rf`、`rf_fs`、`rf_t0`、`rf_angles`、`rf_length`；解析 RF 字段为 `ar_i`、`ar_q`、`ar_fs`、`ar_t0`、`ar_angles`、`ar_length`。图像参考字段为 `reference_iq_db`，显示参考为 `reference_iq_ref`，每样本共同尺度为 `linear_scale_ref`。保存哪些输入域由 [data/config.yaml](data/config.yaml) 的 `storage.inputs` 决定，默认保存原始 RF（float32、不归一化）和官方 IQ（float16、归一化）。可以只保留 `rf`、`analytic_rf`、`iq` 中一种或多种，每种都明确配置 `dtype: float16/float32` 和 `normalization: rms/env_std/none`。另一个配置可用 `--config 路径` 指定。 `storage.outputs.dtype: float16/float32` 控制参考图精度，参考尺度仍为 float32。非 `none` 的输入域必须使用同一种方法，共用按官方 IQ 计算的每帧 `linear_scale_ref`；全部为 `none` 时参考值为 1。`none` 表示不缩放幅度，与文件压缩无关；旧字段 `normalize` 不受支持。
 
    解析 RF 由原始 RF 沿时间轴做 Hilbert 变换后保存；RF 和解析 RF 保留各自的采样率、起始时间与有效长度。三种域共用从配对官方 IQ 计算的 `linear_scale_ref`，以保持缩放口径一致。即使只保存 RF，配对官方 IQ 仍用于尺度标定和图像参考生成。
 

@@ -751,7 +751,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                     "dataset": {"id": "simulation"},
                     "generation": {
                         "storage": {
-                            "inputs": {"iq": {"dtype": "float32", "normalize": False}},
+                            "inputs": {"iq": {"dtype": "float32", "normalization": "none"}},
                             "outputs": {"dtype": "float32"},
                         },
                         "ground_truth": {"algorithm": "mv", "signal_domain": "iq"},
@@ -812,7 +812,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                 "dataset": {"id": "rf_sample"},
                 "generation": {
                     "storage": {
-                        "inputs": {"rf": {"dtype": "float32", "normalize": False}},
+                        "inputs": {"rf": {"dtype": "float32", "normalization": "none"}},
                         "outputs": {"dtype": "float32"},
                     },
                     "input_iq": {"decimation_factor": 1},

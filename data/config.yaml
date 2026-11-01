@@ -2,10 +2,12 @@ storage:
   inputs:
     rf:
       dtype: float32
-      normalize: false
+      normalization: none
     iq:
       dtype: float16
-      normalize: true
+      normalization: rms
     # analytic_rf:
     #   dtype: float16
-    #   normalize: true
+    #   normalization: rms
+  outputs:
+    dtype: float16

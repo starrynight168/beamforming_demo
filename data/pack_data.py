@@ -26,6 +26,7 @@ F_NUMBER = 1.5
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 from data.h5_schema import write_h5_schema
+from algorithms.shared_core.normalization import normalization_scale, storage_normalization_mode
 DEFAULT_SOURCE_ROOT = PROJECT_ROOT / "data" / "PICMUS"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -140,23 +141,6 @@ def validate_physical_parameters(fs, c, fc, pitch):
         np.isfinite(value) and value > 0 for value in (fs, c, fc, pitch)
     ):
         raise ValueError("fs/c/fc/pitch 必须是有限正数")
-
-
-def complex_rms_normalization(i_data, q_data):
-    """Execute complex rms normalization."""
-    i_data = np.asarray(i_data, dtype=np.float32)
-    q_data = np.asarray(q_data, dtype=np.float32)
-    if i_data.shape != q_data.shape or i_data.ndim != 3 or min(i_data.shape) < 1:
-        raise ValueError(
-            f"输入 IQ 必须是形状一致的非空 [angle,channel,time]，实际 {i_data.shape}/{q_data.shape}"
-        )
-    if not np.isfinite(i_data).all() or not np.isfinite(q_data).all():
-        raise ValueError("输入 IQ 包含 NaN/Inf")
-    signal_power = float(np.mean(i_data**2 + q_data**2))
-    if not np.isfinite(signal_power) or signal_power <= 0:
-        raise ValueError("输入 IQ 没有有效信号")
-    rms = np.sqrt(signal_power + 1e-12)
-    return i_data / rms, q_data / rms, rms
 
 
 def read_gt(gt_path):
@@ -401,11 +385,11 @@ def process_scene(scene, source_root, row_block=24, storage=None):
     with h5py.File(iq_path, "r") as f:
         i_data = f[f"{BASE}/data/real"][:]
         q_data = f[f"{BASE}/data/imag"][:]
-        i_norm, q_norm, scale_ref = complex_rms_normalization(i_data, q_data)
+        settings = {"iq": {"dtype": "float16", "normalization": "rms"}} if storage is None else storage
+        scale_ref = normalization_scale(i_data, q_data, storage_normalization_mode(settings))
         i_raw_trans = np.transpose(i_data.astype(np.float32), (0, 2, 1))
         q_raw_trans = np.transpose(q_data.astype(np.float32), (0, 2, 1))
-        i_trans = np.transpose(i_norm, (0, 2, 1)).astype(np.float32)
-        q_trans = np.transpose(q_norm, (0, 2, 1)).astype(np.float32)
+        i_trans, q_trans = i_raw_trans, q_raw_trans
 
         fs = _read_h5_scalar(f, f"{BASE}/sampling_frequency")
         c = _read_h5_scalar(f, f"{BASE}/sound_speed")
@@ -584,7 +568,7 @@ def compact_sequence_config(values):
     return array.tolist()
 
 
-def build_embedded_config(items, output_path, row_block, storage=None):
+def build_embedded_config(items, output_path, row_block, storage=None, output_dtype="float16"):
     """Build embedded config."""
     has_official_gt = any(
         item["meta"]["gt"] and not item["meta"]["gt"].startswith("generated:")
@@ -650,7 +634,8 @@ def build_embedded_config(items, output_path, row_block, storage=None):
             },
         }
 
-    storage = storage or {"iq": {"dtype": "float16", "normalize": True}}
+    storage = {"iq": {"dtype": "float16", "normalization": "rms"}} if storage is None else storage
+    norm_mode = storage_normalization_mode(storage)
     available = {"iq"} | set(storage) | ({"analytic_rf"} if "rf" in storage else set())
     config = {
         "schema_version": 3,
@@ -702,8 +687,10 @@ def build_embedded_config(items, output_path, row_block, storage=None):
                     np.arange(len(items[0]["angles"]), dtype=np.int64),
                 ),
                 "normalization": {
-                    "mode": "complex_rms",
-                    "formula": "sqrt(mean(I^2 + Q^2) + epsilon)",
+                    "mode": "complex_rms" if norm_mode == "rms" else norm_mode,
+                    "formula": {"rms": "sqrt(mean(I^2 + Q^2) + epsilon)",
+                                "env_std": "std(sqrt(I^2 + Q^2)) + epsilon",
+                                "none": "none; scale reference is 1"}[norm_mode],
                     "epsilon": 1.0e-12,
                     "scale_reference_dataset": "/linear_scale_ref",
                     "scale_reference_source": "paired_official_PICMUS_IQ",
@@ -716,6 +703,7 @@ def build_embedded_config(items, output_path, row_block, storage=None):
             },
             "storage": {
                 "inputs": storage,
+                "outputs": {"dtype": output_dtype},
             },
             "ground_truth": ground_truth,
             "training_targets": {
@@ -947,13 +935,9 @@ def validate_shared_metadata(items):
 
 
 def validate_storage(storage):
-    if not isinstance(storage, dict) or not storage or set(storage) - {"rf", "analytic_rf", "iq"}:
+    if not storage:
         raise ValueError("storage.inputs 必须选择 rf、analytic_rf、iq 中至少一种")
-    for domain, options in storage.items():
-        if (not isinstance(options, dict) or set(options) != {"dtype", "normalize"}
-                or options["dtype"] not in ("float16", "float32")
-                or type(options["normalize"]) is not bool):
-            raise ValueError(f"storage.inputs.{domain} 必须声明 dtype: float16/float32 和 normalize: true/false")
+    storage_normalization_mode(storage)
     return storage
 
 
@@ -961,10 +945,7 @@ def write_channels(handle, name, items, component, options):
     arrays = []
     for item in items:
         values = item[component]
-        if component in ("I", "Q"):
-            if not options["normalize"]:
-                values = values * item["scale_ref"]
-        elif options["normalize"]:
+        if options["normalization"] != "none":
             values = values / item["scale_ref"]
         arrays.append({component: values})
     values = pad_and_concat(arrays, component).astype(options["dtype"])
@@ -980,12 +961,15 @@ def pack_dataset(
     row_block=24,
     save_gt_images_enabled=True,
     storage=None,
+    output_dtype="float16",
 ):
     """Execute pack dataset."""
     output_path = Path(output_path)
     if output_path.exists():
         raise FileExistsError(f"输出文件已存在，请先移除或更换路径: {output_path}")
-    storage = validate_storage({"iq": {"dtype": "float16", "normalize": True}} if storage is None else storage)
+    if output_dtype not in ("float16", "float32"):
+        raise ValueError("storage.outputs.dtype must be float16 or float32")
+    storage = validate_storage({"iq": {"dtype": "float16", "normalization": "rms"}} if storage is None else storage)
     items = [process_scene(scene, source_root, row_block=row_block, storage=storage) for scene in scenes]
     validate_shared_metadata(items)
     if set(storage) & {"rf", "analytic_rf"}:
@@ -996,11 +980,11 @@ def pack_dataset(
     base = items[0]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     packed_gt = np.concatenate([item["gt"] for item in items], axis=0).astype(
-        np.float16,
+        output_dtype,
         copy=False,
     )
     if not np.isfinite(packed_gt).all():
-        raise OverflowError("GT 转换为 float16 后产生 NaN/Inf")
+        raise OverflowError(f"GT 转换为 {output_dtype} 后产生 NaN/Inf")
 
     with atomic_h5_output(output_path) as hf:
         write_h5_schema(hf)
@@ -1052,7 +1036,7 @@ def pack_dataset(
 
         string_dtype = h5py.string_dtype(encoding="utf-8")
         config_yaml = yaml.safe_dump(
-            build_embedded_config(items, output_path, row_block, storage),
+            build_embedded_config(items, output_path, row_block, storage, output_dtype),
             sort_keys=False,
             allow_unicode=True,
         )
@@ -1114,9 +1098,12 @@ def main():
     with args.config.open(encoding="utf-8") as stream:
         config = yaml.safe_load(stream)
     if (not isinstance(config, dict) or set(config) != {"storage"}
-            or not isinstance(config["storage"], dict) or set(config["storage"]) != {"inputs"}):
-        raise ValueError("打包配置必须包含 storage.inputs")
+            or not isinstance(config["storage"], dict) or set(config["storage"]) != {"inputs", "outputs"}):
+        raise ValueError("打包配置必须包含 storage.inputs 和 storage.outputs")
     storage = validate_storage(config["storage"]["inputs"])
+    outputs = config["storage"]["outputs"]
+    if not isinstance(outputs, dict) or set(outputs) != {"dtype"} or outputs["dtype"] not in ("float16", "float32"):
+        raise ValueError("storage.outputs requires dtype: float16/float32")
     source_root = Path(args.source_root)
     out_dir = Path(args.out_dir)
     choices = (
@@ -1136,6 +1123,7 @@ def main():
             row_block=args.row_block,
             save_gt_images_enabled=not args.no_save_gt_images,
             storage=storage,
+            output_dtype=outputs["dtype"],
         )
 
 

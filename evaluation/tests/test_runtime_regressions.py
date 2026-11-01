@@ -277,7 +277,7 @@ class WizardFlowTests(unittest.TestCase):
                     {
                         "generation": {
                             "storage": {
-                                "inputs": {"iq": {"dtype": "float32", "normalize": False}},
+                                "inputs": {"iq": {"dtype": "float32", "normalization": "none"}},
                                 "outputs": {"dtype": "float32"},
                             },
                             "ground_truth": {"algorithm": "mv", "signal_domain": "iq"},
