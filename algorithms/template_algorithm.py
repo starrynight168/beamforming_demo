@@ -8,7 +8,7 @@ run_all.py expect, so keep them intact:
     results/<scene>/<method>/<method>.png   # rendered figure
     results/<scene>/<method>/params.json    # run parameters
 
-Reusable pieces live in algorithms/common.py: input loading and angle selection
+Reusable pieces live in algorithms/shared_core/common.py: input loading and angle selection
 (prepare_beamforming_input), device handling and GPU timing (run_beamformer),
 envelope-to-dB conversion (envelope_to_db), and standard artifact output
 (save_algorithm_result). Use them instead of re-implementing the boilerplate.
@@ -19,14 +19,18 @@ returns (i_output, q_output); see data/scripts/pack_EPFL.py for the discovery
 contract.
 """
 
+# ruff: noqa: E402
+
 import argparse
-import sys
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+if __package__:
+    from algorithms.bootstrap import initialize_project_path
+else:
+    from bootstrap import initialize_project_path
 
-from algorithms.common import (
+PROJECT_ROOT = initialize_project_path(__file__)
+
+from algorithms.shared_core.common import (
     add_common_arguments,
     add_io_arguments,
     prepare_beamforming_input,
@@ -70,7 +74,7 @@ def beamform(input_data, args):
     helpers, which keeps device handling, GPU timing and the dB conversion
     consistent with the other algorithms:
 
-        from algorithms.common import envelope_to_db, run_beamformer
+        from algorithms.shared_core.common import envelope_to_db, run_beamformer
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         i_out, q_out, elapsed = run_beamformer(
             beamformer, input_data.i_data, input_data.q_data,

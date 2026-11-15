@@ -19,55 +19,85 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from algorithms import das
 from algorithms.cmsaw import validate_cmsaw_params
-from algorithms.common import (
+from algorithms.shared_core.beamforming import (
     aperture_window_1d,
     aperture_window_from_dx,
-    algorithm_source_paths,
     dynamic_aperture_channel_count,
-    ground_truth_db,
     interpolate_channel_samples,
     normalized_mv_weights,
+    spatial_temporal_covariance,
+)
+from algorithms.shared_core.common import (
+    algorithm_source_paths,
+    ground_truth_db,
     parse_selected_angles,
     result_cache_signature,
     save_algorithm_result,
-    spatial_temporal_covariance,
 )
 from run_one import can_reuse_existing, scene_has_gt
 from run_one import main as run_scene
-from tools.core.ablate_sound_speed import (
-    SpeedOfSoundEvaluator,
-    dense_grid_sweep,
-    multi_section_search,
-)
-from tools.run_ablation_cn import (
+from tools.code.ablate_sound_speed import method_c, parse_c_values
+from tools.code.run_ablation import (
     can_reuse_flat_result,
     choose_values,
+    collect_ablation_individual_images,
     find_matching_ablation_run,
     method_output_path,
     numeric_range_values,
     preserve_ground_truth,
     run_ablation_evaluation,
+    save_ablation_overview,
+    should_evaluate_ablation,
+    validate_available_signal_domains,
     validate_values,
 )
-from tools.core.compare_rf_iq import main as compare_rf_iq_main
-from tools.core.evaluate_point_targets import (
+from tools.code.compare_rf_iq import main as compare_rf_iq_main, validate_time_axis
+from tools.code.evaluate_point_targets import (
     main as point_target_main,
     parse_args as parse_point_target_args,
 )
-from tools.run_wizard_cn import (
+from tools.shared.workflow_common import (
     ALGORITHMS,
-    ask_algorithm_param,
     ask_multi_choice,
     configured_choice_index,
     inspect_h5,
-    reusable_scene_id,
     sample_can_be_evaluated,
+)
+from tools.shared.interactive import run as run_tool_process
+from tools.shared.tool_wizard import run_registered_tool
+from tools.code.run_wizard import (
+    ask_algorithm_param,
+    evaluation_enabled,
+    reusable_scene_id,
     validate_algorithm_param,
     validate_select_angles,
 )
 
 
 class AlgorithmAuditTests(unittest.TestCase):
+    def test_tool_wrapper_does_not_create_output_before_child_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "pending-output"
+            with patch("tools.shared.interactive.run_process", return_value=0) as run_process:
+                run_tool_process("compare_rf_iq.py", ["--output_dir", str(output)])
+            self.assertFalse(output.exists())
+            self.assertIsNone(run_process.call_args.args[2])
+
+    def test_menu_native_tools_dispatch_to_their_entry_modules(self):
+        for script, module in (
+            ("run_wizard.py", "tools.code.run_wizard"),
+            ("run_ablation.py", "tools.code.run_ablation"),
+        ):
+            with self.subTest(script=script), patch(f"{module}.main") as main:
+                run_registered_tool(script)
+                main.assert_called_once_with()
+
+    def test_wizard_enables_evaluation_only_with_display_and_picmus_gt(self):
+        self.assertTrue(evaluation_enabled(True, True))
+        self.assertFalse(evaluation_enabled(True, False))
+        self.assertFalse(evaluation_enabled(False, True))
+        self.assertFalse(evaluation_enabled(False, False))
+
     def test_ablation_uses_only_flattened_method_outputs(self):
         scene_dir = Path("run") / "scene"
         self.assertEqual(
@@ -85,7 +115,7 @@ class AlgorithmAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "config.algorithms"):
             ask_multi_choice("algorithms", list(ALGORITHMS.items()), ["das", "unknown"])
         with (
-            patch("tools.run_wizard_cn.read_line", side_effect=["das,das", "das"]),
+            patch("tools.shared.workflow_common.read_line", side_effect=["das,das", "das"]),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(
@@ -94,16 +124,16 @@ class AlgorithmAuditTests(unittest.TestCase):
             )
 
     def test_wizard_numeric_parameter_types_follow_algorithm_cli(self):
-        with patch("tools.run_wizard_cn.ask_text", return_value="0.5"):
+        with patch("tools.code.run_wizard.ask_text", return_value="0.5"):
             self.assertEqual(ask_algorithm_param("mv", "mv_dl", 0), 0.5)
         with (
-            patch("tools.run_wizard_cn.ask_text", side_effect=["1.5", "3"]),
+            patch("tools.code.run_wizard.ask_text", side_effect=["1.5", "3"]),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(ask_algorithm_param("esbmv", "num_eig", 0.0), 3)
 
     def test_wizard_accepts_nullable_gcf_defaults_and_single_angle_index(self):
-        with patch("tools.run_wizard_cn.ask_text", return_value=""):
+        with patch("tools.code.run_wizard.ask_text", return_value=""):
             self.assertIsNone(ask_algorithm_param("gcfmv", "tx_subarray_ratio", None))
             self.assertIsNone(ask_algorithm_param("gcfmv", "gcf_tx_low_bins", None))
         self.assertEqual(validate_select_angles("0,"), "0,")
@@ -206,76 +236,77 @@ class AlgorithmAuditTests(unittest.TestCase):
             target = preserve_ground_truth(scene, root)
             np.testing.assert_array_equal(np.load(target), gt)
 
-    def test_sound_speed_search_requires_a_shrinking_bracket(self):
-        cache = {}
-
-        def evaluate(speed):
-            result = {
-                "c": float(speed), "ssim": 1 - ((speed - 1300) / 300) ** 2,
-                "psnr": 20, "mae_db": 1, "elapsed_sec": 0,
-            }
-            cache[float(speed)] = result
-            return result
-
-        evaluator = SimpleNamespace(cache=cache, evaluate_c=evaluate)
-        with self.assertRaisesRegex(ValueError, "at least 3"):
-            multi_section_search(evaluator, 1000, 1600, num_sections=2)
-        with contextlib.redirect_stdout(io.StringIO()):
-            for sections in (3, 4):
-                cache.clear()
-                best, history, interval = multi_section_search(
-                    evaluator, 1000, 1600, num_sections=sections, tol=5, max_iter=20
+    def test_signal_domain_ablation_overview_does_not_share_one_gt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = []
+            outputs = []
+            for index, domain in enumerate(("iq", "rf"), 1):
+                scene_dir = root / domain
+                scene_dir.mkdir()
+                output = np.full((2, 2), -index, dtype=np.float32)
+                np.save(scene_dir / "das.npy", output)
+                outputs.append(output)
+                rows.append(
+                    {
+                        "status": "ok",
+                        "scene_id": domain,
+                        "result_dir": str(scene_dir),
+                        "parameter": "signal_domain",
+                        "value": domain,
+                    }
                 )
-                self.assertLessEqual(interval[1] - interval[0], 5)
-                self.assertAlmostEqual(best["c"], 1300, delta=5)
-                self.assertTrue(history)
-            grid = dense_grid_sweep(evaluator, 1000, 1600, step=250)
-            self.assertEqual([row["c"] for row in grid], [1000, 1250, 1500, 1600])
+            np.save(root / "ground_truth.npy", np.zeros((2, 2), dtype=np.float32))
+            save_ablation_overview(rows, root, "das", "signal_domain")
+            comparison = np.load(root / "data" / "ablation_comparison.npy")
+            self.assertEqual(comparison.shape, (2, 2, 2))
+            np.testing.assert_array_equal(comparison, outputs)
 
-    def test_sound_speed_evaluator_uses_instance_options(self):
-        evaluator = object.__new__(SpeedOfSoundEvaluator)
-        evaluator.z_grid = np.array([0.01, 0.02], dtype=np.float32)
-        evaluator.x_grid = np.array([-0.001, 0.001], dtype=np.float32)
-        evaluator.n_elem = 2
-        evaluator.pitch = 0.0003
-        evaluator.fc = 5e6
-        evaluator.fs = 20e6
-        evaluator.sel_t0 = np.zeros(1, dtype=np.float32)
-        evaluator.sel_angles = np.zeros(1, dtype=np.float32)
-        evaluator.sel_i = np.ones((1, 4, 2), dtype=np.float32)
-        evaluator.sel_q = np.zeros((1, 4, 2), dtype=np.float32)
-        evaluator.mv_dl = 0.01
-        evaluator.fbss = True
-        evaluator.subarray_ratio = 0.5
-        evaluator.temporal_win = 3
-        evaluator.mv_options = SimpleNamespace(
-            f_number=1.2,
-            dynamic_aperture=False,
-            window="hann",
-            interp="nearest",
-        )
-        evaluator.tgc = False
-        evaluator.dr = 60.0
-        evaluator.gt_display = np.ones((2, 2), dtype=np.float32)
-        evaluator.cache = {}
+    def test_signal_domain_ablation_keeps_each_ground_truth_with_its_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = []
+            for index, domain in enumerate(("iq", "rf"), 1):
+                scene_dir = root / domain
+                scene_dir.mkdir()
+                (scene_dir / "das.png").write_bytes(b"result")
+                (scene_dir / "ground_truth.png").write_bytes(domain.encode())
+                rows.append(
+                    {
+                        "status": "ok",
+                        "scene_id": domain,
+                        "result_dir": str(scene_dir),
+                        "parameter": "signal_domain",
+                        "value": domain,
+                        "index": index,
+                    }
+                )
+            output_dir = collect_ablation_individual_images(
+                rows, root, "das", "signal_domain"
+            )
+            self.assertEqual(
+                (output_dir / "01_signal_domain_iq_ground_truth.png").read_bytes(),
+                b"iq",
+            )
+            self.assertEqual(
+                (output_dir / "02_signal_domain_rf_ground_truth.png").read_bytes(),
+                b"rf",
+            )
 
-        captured = {}
+    def test_sound_speed_values_require_finite_unique_positive_values(self):
+        self.assertEqual(parse_c_values("1430,1540,1620"), [1430.0, 1540.0, 1620.0])
+        with self.assertRaisesRegex(ValueError, "至少需要两个取值"):
+            parse_c_values("1540")
+        with self.assertRaisesRegex(ValueError, "不能重复"):
+            parse_c_values("1540.0001,1540.0002")
+        with self.assertRaisesRegex(ValueError, "有限正数"):
+            parse_c_values("-1,1540")
+        with self.assertRaisesRegex(ValueError, "逗号分隔的数字"):
+            parse_c_values("fast,1540")
 
-        class FakeBeamformer:
-            def __init__(self, *args, **kwargs):
-                captured["options"] = kwargs["options"]
-
-            def __call__(self, *args):
-                return np.ones((2, 2)), np.zeros((2, 2))
-
-        with patch(
-            "tools.core.ablate_sound_speed.mv.RowDynamicMVBeamformerIQ",
-            FakeBeamformer,
-        ):
-            result = evaluator.evaluate_c(1500.0)
-
-        self.assertIs(captured["options"], evaluator.mv_options)
-        self.assertNotIn("display", result)
+    def test_sound_speed_metric_method_label(self):
+        self.assertEqual(method_c("c=1540"), 1540.0)
+        self.assertIsNone(method_c("c=invalid"))
 
     def test_runner_common_overrides_and_stored_gt_range(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -331,6 +362,26 @@ class AlgorithmAuditTests(unittest.TestCase):
             comparison = np.load(scene_dir / "comparison.npy")
             np.testing.assert_array_equal(comparison[0], gt * 60 - 60)
 
+    def test_runner_rejects_unsupported_algorithm_before_reading_scene(self):
+        project_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = Path(temp_dir) / "output"
+            args = argparse.Namespace(
+                config=str(project_root / "config.yaml"),
+                scene="simulation_contrast_speckle",
+                algorithms="das,missing_algorithm",
+                output_root=str(output_root),
+                python_exe=sys.executable,
+                no_evaluate=True,
+                no_individual_images=True,
+                keep_existing=False,
+                extra_algorithm_args=[],
+            )
+            with patch("run_one.parse_args", return_value=args):
+                with self.assertRaisesRegex(FileNotFoundError, "Algorithm module not found"):
+                    run_scene()
+            self.assertFalse(output_root.exists())
+
     def test_algorithm_entrypoints_support_direct_and_module_execution(self):
         project_root = Path(__file__).resolve().parents[1]
         for name in (
@@ -353,8 +404,8 @@ class AlgorithmAuditTests(unittest.TestCase):
             root = Path(temp_dir)
             h5_path = root / "input.h5"
             h5_path.write_bytes(b"input")
-            with patch("algorithms.common.PROJECT_ROOT", root), patch(
-                "algorithms.common.algorithm_source_paths", return_value=()
+            with patch("algorithms.shared_core.common.PROJECT_ROOT", root), patch(
+                "algorithms.shared_core.common.algorithm_source_paths", return_value=()
             ):
                 self.assertEqual(
                     result_cache_signature("input.h5", "das"),
@@ -366,7 +417,7 @@ class AlgorithmAuditTests(unittest.TestCase):
             root = Path(temp_dir)
             h5_path = root / "input.h5"
             h5_path.write_bytes(b"input")
-            with patch("algorithms.common.PROJECT_ROOT", root):
+            with patch("algorithms.shared_core.common.PROJECT_ROOT", root):
                 for source_path in algorithm_source_paths("mban"):
                     if not source_path.is_relative_to(root):
                         continue
@@ -377,6 +428,23 @@ class AlgorithmAuditTests(unittest.TestCase):
                 model_path.write_text("changed", encoding="utf-8")
                 after = result_cache_signature("input.h5", "mban")
             self.assertNotEqual(before["sources"], after["sources"])
+            with patch("algorithms.shared_core.common.PROJECT_ROOT", root):
+                for relative in (
+                    "eval_core/hardware.py",
+                    "shared_core/checkpoints.py",
+                    "shared_core/hardware_layers.py",
+                ):
+                    target = root / "train" / relative
+                    before = result_cache_signature("input.h5", "mban")
+                    target.write_text(
+                        target.read_text(encoding="utf-8") + " changed",
+                        encoding="utf-8",
+                    )
+                    after = result_cache_signature("input.h5", "mban")
+                    source_key = str(target.resolve())
+                    self.assertNotEqual(
+                        before["sources"][source_key], after["sources"][source_key]
+                    )
 
     def test_mv_weight_solver_matches_formula_and_handles_singular_covariance(self):
         covariance = torch.tensor(
@@ -560,6 +628,27 @@ class AlgorithmAuditTests(unittest.TestCase):
 
             self.assertEqual(find_matching_ablation_run(root, expected), matching.parent)
 
+    def test_ablation_keep_existing_rejects_incomplete_prior_run(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            expected = {
+                "angles1": {"params": {"select_angles": "1"}},
+                "angles3": {"params": {"select_angles": "3"}},
+            }
+            config_dir = root / "ablation_20261026_120000" / "configs"
+            config_dir.mkdir(parents=True)
+            (config_dir / "angles1.yaml").write_text(
+                yaml.safe_dump(expected["angles1"]), encoding="utf-8"
+            )
+
+            self.assertIsNone(find_matching_ablation_run(root, expected))
+
+    def test_rf_iq_time_axis_accepts_a_valid_prefix_only(self):
+        full = np.arange(8, dtype=np.float64) / 20.0
+        np.testing.assert_allclose(validate_time_axis(full, 5, 0.0, 20.0), full[:5])
+        with self.assertRaisesRegex(ValueError, "时间轴"):
+            validate_time_axis(full + 0.01, 5, 0.0, 20.0)
+
     def test_cmsaw_depth_smoothing_requires_odd_window(self):
         base = (0.5, 2, 1.0, 0.5, 90.0, 9)
         validate_cmsaw_params(*base, 3)
@@ -582,6 +671,12 @@ class AlgorithmAuditTests(unittest.TestCase):
         self.assertEqual(validate_values("depth_smooth_rows", 1, [1, 3]), [1, 3])
         self.assertEqual(validate_values("f_number", 1.5, [1, 2]), [1, 2])
 
+    def test_nullable_numeric_ablation_defaults_reject_booleans(self):
+        with self.assertRaisesRegex(ValueError, "tx_subarray_ratio"):
+            validate_values("tx_subarray_ratio", None, [True])
+        with self.assertRaisesRegex(ValueError, "gcf_tx_low_bins"):
+            validate_values("gcf_tx_low_bins", None, [False])
+
     def test_point_target_duplicate_methods_and_loadings_are_rejected(self):
         for option, values in (("--methods", ("mv", "mv")), ("--loadings", ("0.1", "0.1"))):
             with self.subTest(option=option), patch.object(
@@ -593,8 +688,8 @@ class AlgorithmAuditTests(unittest.TestCase):
 
     def test_point_target_cli_reports_missing_optional_simulator(self):
         with (
-            patch("tools.core.evaluate_point_targets.load_reference", None),
-            patch("tools.core.evaluate_point_targets.simulate_rf", None),
+            patch("tools.code.evaluate_point_targets.load_reference", None),
+            patch("tools.code.evaluate_point_targets.simulate_rf", None),
             patch.object(sys, "argv", ["evaluate_point_targets.py"]),
             self.assertRaisesRegex(
                 ModuleNotFoundError,
@@ -614,7 +709,7 @@ class AlgorithmAuditTests(unittest.TestCase):
             input_data = SimpleNamespace(
                 extent_mm=(0, 1, 1, 0), sample=SimpleNamespace(has_gt=False)
             )
-            with patch("algorithms.common.save_figure"):
+            with patch("algorithms.shared_core.common.save_figure"):
                 output = save_algorithm_result(
                     np.zeros((2, 2)), input_data, args, "das", "DAS", 0.0,
                     extra_params={"cache_signature": "stale"},
@@ -646,11 +741,11 @@ class AlgorithmAuditTests(unittest.TestCase):
                     )
                     with (
                         patch.object(das, "args", args, create=True),
-                        patch.object(das, "device", torch.device("cpu")),
+                        patch.object(das, "resolve_device", return_value=torch.device("cpu")),
                     ):
                         beamformer = das.DASBeamformerIQ(
                             np.array([1.5, 2.0, 2.5]), np.array([0.0]),
-                            1, 1.0, 1.0, 0.0, 1.0, np.zeros(1), angles,
+                            1, 1.0, 1.0, 0.0, 1.0, np.zeros(1), angles, options=args, device="cpu",
                         )
                         i_output, q_output = beamformer(
                             i_data, q_data, angles, np.zeros(1), 1.0
@@ -658,42 +753,50 @@ class AlgorithmAuditTests(unittest.TestCase):
                     np.testing.assert_allclose(i_output[:, 0], [0.0, 7.0, 0.0], atol=1e-6)
                     np.testing.assert_allclose(q_output, 0.0, atol=1e-6)
 
-    def test_dr_ablation_skips_metric_subprocesses(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            np.save(root / "ablation_comparison.npy", np.zeros((2, 2, 2)))
-            rows = [{"status": "ok", "parameter": "dr", "value": 40, "index": 1}]
-            with patch("tools.run_ablation_cn.subprocess.run") as run:
-                result = run_ablation_evaluation(
-                    rows, root, root / "input.h5", 0, True, 60
-                )
-            self.assertIsNone(result)
-            run.assert_not_called()
-            self.assertFalse((root / "metrics").exists())
+    def test_non_comparable_ablation_skips_metric_subprocesses(self):
+        for parameter in ("dr", "signal_domain"):
+            with self.subTest(parameter=parameter), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                np.save(root / "ablation_comparison.npy", np.zeros((2, 2, 2)))
+                rows = [{"status": "ok", "parameter": parameter, "value": 40, "index": 1}]
+                with patch("tools.code.run_ablation.run_process") as run:
+                    result = run_ablation_evaluation(
+                        rows, root, root / "input.h5", 0, "das", True, 60
+                    )
+                self.assertIsNone(result)
+                run.assert_not_called()
+                self.assertFalse((root / "metrics").exists())
 
     def test_numeric_range_rejects_nonfinite_and_nonadvancing_steps(self):
-        with patch("tools.run_ablation_cn.ask_text", side_effect=["0", "1", "inf"]):
+        with patch("tools.code.run_ablation.ask_text", side_effect=["0", "1", "inf"]):
             with self.assertRaisesRegex(ValueError, "有限数"):
                 numeric_range_values()
         with patch(
-            "tools.run_ablation_cn.ask_text",
+            "tools.code.run_ablation.ask_text",
             side_effect=["1e308", "1e308", "1"],
         ):
             with self.assertRaisesRegex(ValueError, "无法推进"):
                 numeric_range_values()
 
     def test_integer_ablation_range_returns_integers_and_categorical_values_are_checked(self):
-        with patch("tools.run_ablation_cn.ask_text", side_effect=["1", "5", "2"]):
+        with patch("tools.code.run_ablation.ask_text", side_effect=["1", "5", "2"]):
             self.assertEqual(numeric_range_values(integer=True), [1, 3, 5])
         with (
-            patch("tools.run_ablation_cn.ask_choice", return_value="range"),
-            patch("tools.run_ablation_cn.ask_text", side_effect=["1", "5", "2"]),
+            patch("tools.code.run_ablation.ask_choice", return_value="range"),
+            patch("tools.code.run_ablation.ask_text", side_effect=["1", "5", "2"]),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             values = choose_values("temporal_win", 3)
         self.assertEqual(values, [1, 3, 5])
         self.assertTrue(all(isinstance(value, int) for value in values))
         self.assertEqual(validate_values("signal_domain", "iq", ["rf", "iq"]), ["rf", "iq"])
+        self.assertFalse(should_evaluate_ablation("signal_domain", True))
+        self.assertFalse(should_evaluate_ablation("dr", True))
+        self.assertTrue(should_evaluate_ablation("mv_dl", True))
+        self.assertFalse(should_evaluate_ablation("mv_dl", False))
+        self.assertEqual(validate_available_signal_domains(["iq"], ["iq"]), ["iq"])
+        with self.assertRaisesRegex(ValueError, "当前 H5 不支持 signal_domain"):
+            validate_available_signal_domains(["rf", "iq"], ["iq"])
         with self.assertRaisesRegex(ValueError, "mv_axis"):
             validate_values("mv_axis", "rx", ["invalid"])
 

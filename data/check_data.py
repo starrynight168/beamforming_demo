@@ -21,9 +21,9 @@ DATA_DIR = Path(__file__).resolve().parent
 ROOT = DATA_DIR.parent
 sys.path.insert(0, str(ROOT))
 
-from algorithms.shared_core.data import load_input_from_h5
+from shared_core.data import load_input_from_h5
 from data.h5_schema import require_h5_schema
-from algorithms.shared_core.normalization import storage_normalization_mode
+from shared_core.normalization import storage_normalization_mode
 LOG_DIR = DATA_DIR / "logs"
 
 KEY_FIELDS = (

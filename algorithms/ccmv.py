@@ -1,22 +1,26 @@
 """Hasegawa 2020, Eq. (9), with full subarray sampling (Delta_n=1)."""
 
-from copy import deepcopy
-from pathlib import Path
-import sys
+# ruff: noqa: E402
 
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+if __package__:
+    from algorithms.bootstrap import initialize_project_path
+else:
+    from bootstrap import initialize_project_path
+
+initialize_project_path(__file__)
 
 from algorithms import mv
 
 METHOD_NAME = "ccmv"
-device = mv.device
-parser = deepcopy(mv.parser)
-parser.description = "CC-MV Beamforming"
-parser.set_defaults(mv_dl=0.1)
-args = None
+def build_parser(params=None):
+    parser = mv.build_parser(params)
+    parser.description = "CC-MV Beamforming"
+    parser.set_defaults(mv_dl=0.1)
+    return parser
+
+
 
 
 def cross_subarray_covariance(
@@ -48,16 +52,14 @@ class RowDynamicCCMVBeamformerIQ(mv.RowDynamicMVBeamformerIQ):
     def __init__(
         self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad,
         mv_dl=0.1, fbss=True, subarray_ratio=0.5, temporal_win=1, options=None,
+        device=None,
     ):
-        options = options if options is not None else parser.parse_args([])
+        options = options if options is not None else build_parser().parse_args([])
         super().__init__(
             z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad,
             mv_dl=mv_dl, fbss=fbss, subarray_ratio=subarray_ratio,
-            temporal_win=temporal_win, options=options,
+            temporal_win=temporal_win, options=options, device=device,
         )
-
-    def get_device(self):
-        return device
 
     def estimate_covariance(self, x_active, subarray_size, temporal_win, use_fbss):
         return cross_subarray_covariance(
@@ -71,13 +73,14 @@ class RowDynamicCCMVBeamformerIQ(mv.RowDynamicMVBeamformerIQ):
         )
 
 
-def main():
+def main(argv=None):
     mv.main(
+        argv,
         beamformer_class=RowDynamicCCMVBeamformerIQ,
         method_name=METHOD_NAME,
         method_label="CC-MV",
         covariance_label="Hasegawa 2020 Eq. (9), Delta_n=1 (including self-pairs)",
-        argument_parser=parser,
+        argument_parser=build_parser(),
     )
 
 

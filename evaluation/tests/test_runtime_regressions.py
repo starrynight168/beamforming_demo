@@ -1,7 +1,7 @@
 import json
-import sys
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,8 +13,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from algorithms.common import (
-    aperture_window_1d,
+from algorithms.shared_core.beamforming import aperture_window_1d
+from algorithms.shared_core.common import (
     merge_common_params,
     result_cache_signature,
 )
@@ -29,7 +29,7 @@ else:
     load_pack_config = None
     pack_code_fingerprint = None
     pack_generation_signature = None
-from evaluation.tests.test_evaluation_audit import (
+from evaluation.tests.picmus_fixtures import (
     update_sample_metadata,
     write_picmus_sample,
 )
@@ -41,8 +41,9 @@ from run_one import (
     select_algorithms,
     validate_algorithm_labels,
 )
-from tools.run_ablation_cn import can_reuse_flat_result, run_ablation_evaluation
-from tools.run_wizard_cn import build_config, inspect_h5, sample_can_be_evaluated
+from tools.code.run_ablation import can_reuse_flat_result, run_ablation_evaluation
+from tools.code.run_wizard import build_config
+from tools.shared.workflow_common import inspect_h5, sample_can_be_evaluated
 
 
 class ResultCacheTests(unittest.TestCase):
@@ -221,13 +222,20 @@ class WizardFlowTests(unittest.TestCase):
                 ),
                 ["GT", "DAS, reference"],
             )
-            np.save(root / "ablation_comparison.npy", np.zeros((2, 201, 201)))
+            data_dir = root / "data"
+            data_dir.mkdir()
+            np.save(data_dir / "ablation_comparison.npy", np.zeros((2, 201, 201)))
+            np.save(data_dir / "ground_truth.npy", np.zeros((201, 201)))
+            result_dir = root / "scene"
+            result_dir.mkdir()
+            np.save(result_dir / "das.npy", np.zeros((201, 201)))
             rows = [{"status": "ok", "parameter": "f_number", "value": 1.5, "index": 1}]
+            rows[0]["result_dir"] = str(result_dir)
             with patch(
-                "tools.run_ablation_cn.subprocess.run",
-                return_value=SimpleNamespace(returncode=0),
+                "tools.code.run_ablation.run_process",
+                return_value=0,
             ) as run:
-                run_ablation_evaluation(rows, root, h5_path, 0, True, 60)
+                run_ablation_evaluation(rows, root, h5_path, 0, "das", True, 60)
             command = run.call_args_list[0].args[0]
             self.assertNotIn("--config", command)
             self.assertEqual(command[command.index("--h5_path") + 1], str(h5_path))
@@ -399,7 +407,7 @@ class PackConfigTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                path.replace("\\", "/").endswith("algorithms/common.py")
+                path.replace("\\", "/").endswith("algorithms/shared_core/common.py")
                 for path in das_paths
             )
         )
@@ -408,7 +416,7 @@ class PackConfigTests(unittest.TestCase):
         config_path = Path("data/scripts/config.yaml")
         pipeline = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         pack_config = load_pack_config(config_path)
-        self.assertEqual(pack_config["reconstruction"]["interp"], "cubic")
+        self.assertEqual(pack_config["reconstruction"]["interp"], "linear")
         self.assertEqual(pack_config["algorithm_params"]["das"]["interp"], "linear")
         self.assertNotIn("interp", pack_config["algorithm_params"]["mv"])
 

@@ -1,17 +1,20 @@
 """Provide Python utilities for esbmv."""
 
-from copy import deepcopy
-import sys
-from pathlib import Path
+# ruff: noqa: E402
 
 import numpy as np
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+if __package__:
+    from algorithms.bootstrap import initialize_project_path
+else:
+    from bootstrap import initialize_project_path
+
+PROJECT_ROOT = initialize_project_path(__file__)
 
 from algorithms import mv
-from algorithms.common import (
+from algorithms.shared_core.common import (
+    resolve_device,
     closed_unit_interval_float,
     beamforming_depth_grid,
     beamformed_image_db,
@@ -27,34 +30,35 @@ from algorithms.common import (
 MAX_GPU_EIGH_SUBARRAY_SIZE = 32
 
 # ================= 命令行参数配置 =================
-parser = deepcopy(mv.parser)
-parser.description = "ESBMV Beamforming"
-# ---- ESBMV 子空间参数 ----
-parser.add_argument(
-    "--num_eig",
-    type=nonnegative_int,
-    default=0,
-    help="信号子空间特征向量数量;0 时使用 eig_threshold 自动选择",
-)
-parser.add_argument(
-    "--eig_threshold",
-    type=closed_unit_interval_float,
-    default=0.05,
-    help="自动选择时保留加载协方差中 lambda >= threshold * lambda_max 的特征向量",
-)
-parser.add_argument(
-    "--force_gpu_eigh",
-    action="store_true",
-    default=False,
-    help="强制在 GPU 上进行特征值分解",
-)
+def build_parser(params=None):
+    parser = mv.build_parser(params)
+    parser.description = "ESBMV Beamforming"
+    # ---- ESBMV 子空间参数 ----
+    parser.add_argument(
+        "--num_eig",
+        type=nonnegative_int,
+        default=0,
+        help="信号子空间特征向量数量;0 时使用 eig_threshold 自动选择",
+    )
+    parser.add_argument(
+        "--eig_threshold",
+        type=closed_unit_interval_float,
+        default=0.05,
+        help="自动选择时保留加载协方差中 lambda >= threshold * lambda_max 的特征向量",
+    )
+    parser.add_argument(
+        "--force_gpu_eigh",
+        action="store_true",
+        default=False,
+        help="强制在 GPU 上进行特征值分解",
+    )
+    return parser
 
-args = None
+
 
 METHOD_NAME = "esbmv"
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def project_signal_subspace(covariance, weights, num_eig, threshold, force_gpu=False):
@@ -76,10 +80,7 @@ class RowDynamicMVBeamformerIQ(mv.RowDynamicMVBeamformerIQ):
     normalize_covariance = True
 
     def get_options(self):
-        return args if args is not None else parser.parse_args([])
-
-    def get_device(self):
-        return device
+        return build_parser().parse_args([])
 
     def solve_weights(self, covariance, steering):
         weights = super().solve_weights(covariance, steering)
@@ -90,10 +91,10 @@ class RowDynamicMVBeamformerIQ(mv.RowDynamicMVBeamformerIQ):
 
 
 # ================= 主程序 =================
-def main():
+def main(argv=None):
     """Run the command-line workflow."""
-    global args
-    args = parser.parse_args()
+    args = build_parser().parse_args(argv)
+    device = resolve_device()
     h5_path = resolve_project_path(args.h5_path, PROJECT_ROOT)
     output_dir = f"{args.output_dir}/{METHOD_NAME}"
 
@@ -177,8 +178,7 @@ def main():
         mv_dl=args.mv_dl,
         fbss=args.fbss,
         subarray_ratio=args.subarray_ratio,
-        temporal_win=args.temporal_win,
-    )
+        temporal_win=args.temporal_win, options=args, device=device)
 
     print(f"Processing ESBMV (DL={args.mv_dl})...")
     i_out, q_out, dt = run_beamformer(

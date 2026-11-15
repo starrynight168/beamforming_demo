@@ -1,34 +1,42 @@
 """Provide Python utilities for mv."""
 
+# ruff: noqa: E402
+
 import argparse
-import sys
-from pathlib import Path
 
 import numpy as np
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+if __package__:
+    from algorithms.bootstrap import initialize_project_path
+else:
+    from bootstrap import initialize_project_path
 
-from algorithms.common import (
-    add_common_arguments,
-    add_io_arguments,
+PROJECT_ROOT = initialize_project_path(__file__)
+
+from algorithms.shared_core.beamforming import (
     build_row_dynamic_geometry,
-    beamforming_depth_grid,
-    beamformed_image_db,
     interpolate_channel_samples,
     interpolate_multi_angle_channel_samples,
     optional_aperture_window_1d,
-    nonnegative_float,
     normalized_mv_weights,
     mv_row_output,
+    spatial_temporal_covariance,
+)
+from algorithms.shared_core.common import (
+    resolve_device,
+    add_common_arguments,
+    add_io_arguments,
+    beamforming_depth_grid,
+    beamformed_image_db,
+    nonnegative_float,
+    positive_float,
     positive_odd_int,
     prepare_beamforming_input,
     print_physical_summary,
     resolve_project_path,
     run_beamformer,
     save_algorithm_result,
-    spatial_temporal_covariance,
     time_start_tensor,
     unit_interval_float,
     validate_db_output,
@@ -36,45 +44,48 @@ from algorithms.common import (
 )
 
 # ================= 命令行参数配置 =================
-parser = argparse.ArgumentParser(description="MV+FBSS Beamforming")
-add_common_arguments(parser, window_help="子阵空间平滑加权窗")
-parser.add_argument(
-    "--mv_axis", choices=("rx", "tx", "joint"), default="rx",
-    help="MV方向：rx接收端，tx接收DAS后发射端，joint收发联合",
-)
-parser.add_argument(
-    "--tx_subarray_ratio", type=unit_interval_float, default=None,
-    help="发射子阵比例；默认沿用subarray_ratio",
-)
+def build_parser(params=None):
+    parser = argparse.ArgumentParser(description="MV+FBSS Beamforming")
+    add_common_arguments(parser, params=params, window_help="子阵空间平滑加权窗")
+    parser.add_argument("--c", type=positive_float, default=None)
+    parser.add_argument(
+        "--mv_axis", choices=("rx", "tx", "joint"), default="rx",
+        help="MV方向：rx接收端，tx接收DAS后发射端，joint收发联合",
+    )
+    parser.add_argument(
+        "--tx_subarray_ratio", type=unit_interval_float, default=None,
+        help="发射子阵比例；默认沿用subarray_ratio",
+    )
 
-# ---- MV 核心参数 ----
-parser.add_argument("--mv_dl", type=nonnegative_float, default=0.0, help="对角加载系数")
-parser.add_argument(
-    "--fbss",
-    action="store_true",
-    default=True,
-    help="启用前向-后向空间平滑",
-)
-parser.add_argument("--no_fbss", dest="fbss", action="store_false", help="禁用 FBSS")
-parser.add_argument(
-    "--subarray_ratio",
-    type=unit_interval_float,
-    default=0.25,
-    help="子阵列比例 subarray_size = aperture_size * ratio",
-)
-parser.add_argument(
-    "--temporal_win",
-    type=positive_odd_int,
-    default=9,
-    help="协方差时间平均窗口,必须为正奇数;1 表示关闭",
-)
-add_io_arguments(parser)
-args = None
+    # ---- MV 核心参数 ----
+    parser.add_argument("--mv_dl", type=nonnegative_float, default=0.0, help="对角加载系数")
+    parser.add_argument(
+        "--fbss",
+        action="store_true",
+        default=True,
+        help="启用前向-后向空间平滑",
+    )
+    parser.add_argument("--no_fbss", dest="fbss", action="store_false", help="禁用 FBSS")
+    parser.add_argument(
+        "--subarray_ratio",
+        type=unit_interval_float,
+        default=0.25,
+        help="子阵列比例 subarray_size = aperture_size * ratio",
+    )
+    parser.add_argument(
+        "--temporal_win",
+        type=positive_odd_int,
+        default=9,
+        help="协方差时间平均窗口,必须为正奇数;1 表示关闭",
+    )
+    add_io_arguments(parser)
+    return parser
+
+
 
 METHOD_NAME = "mv"
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _JOINT_SNAPSHOT_TARGET_BYTES = 64 * 1024**2
 
 
@@ -102,6 +113,7 @@ class RowDynamicMVBeamformerIQ:
         subarray_ratio=0.5,
         temporal_win=1,
         options=None,
+        device=None,
         signal_domain=None,
     ):
         """Initialize the instance."""
@@ -111,7 +123,7 @@ class RowDynamicMVBeamformerIQ:
         if signal_domain not in ("iq", "rf", "analytic_rf"):
             raise ValueError("signal_domain must be iq, rf or analytic_rf")
         self.signal_domain = signal_domain
-        self.device = self.get_device()
+        self.device = resolve_device(device)
         mv_dl = nonnegative_float(mv_dl)
         geometry = build_row_dynamic_geometry(
             z_grid,
@@ -208,11 +220,7 @@ class RowDynamicMVBeamformerIQ:
 
                 x_flat = torch.complex(i_rx, q_rx) * valid_mask
                 row = self.row_cache[hz]
-                aperture_size, subarray_size, _subarray_count = (
-                    row["aperture_size"],
-                    row["subarray_size"],
-                    row["subarray_count"],
-                )
+                subarray_size = row["subarray_size"]
 
                 x_active = torch.gather(
                     x_flat, 1, row["ch_idx_t"]
@@ -397,7 +405,7 @@ class RowDynamicMVBeamformerIQ:
         return i_output.cpu().numpy(), q_output.cpu().numpy()
 
     def get_options(self):
-        return args if args is not None else parser.parse_args([])
+        return build_parser().parse_args([])
 
     def solve_weights(self, covariance, steering):
         return normalized_mv_weights(covariance, steering)
@@ -410,9 +418,6 @@ class RowDynamicMVBeamformerIQ:
 
     def estimate_joint_covariance(self, data, valid, axis, subarray_size, weights):
         return joint_spatial_covariance(data, valid, axis, subarray_size, self.use_fbss, weights)
-
-    def get_device(self):
-        return device
 
     def estimate_covariance(self, x_active, subarray_size, temporal_win, use_fbss):
         return spatial_temporal_covariance(
@@ -493,6 +498,8 @@ def _load_joint_covariance(covariance, dl_factor, eye):
 
 # ================= 主程序 =================
 def main(
+    argv=None,
+    *,
     beamformer_class=RowDynamicMVBeamformerIQ,
     method_name=METHOD_NAME,
     method_label="MV",
@@ -500,8 +507,8 @@ def main(
     argument_parser=None,
 ):
     """Run the command-line workflow."""
-    global args
-    args = (parser if argument_parser is None else argument_parser).parse_args()
+    args = (build_parser() if argument_parser is None else argument_parser).parse_args(argv)
+    device = resolve_device()
     h5_path = resolve_project_path(args.h5_path, PROJECT_ROOT)
     output_dir = f"{args.output_dir}/{method_name}"
 
@@ -513,7 +520,7 @@ def main(
     )
     sample = input_data.sample
     c, fc, fs, pitch, n_elem = (
-        sample.c,
+        sample.c if args.c is None else args.c,
         sample.fc,
         sample.fs,
         sample.pitch,
@@ -585,8 +592,7 @@ def main(
         fbss=args.fbss,
         subarray_ratio=args.subarray_ratio,
         temporal_win=args.temporal_win,
-        options=args,
-    )
+        options=args, device=device)
 
     print(f"Processing {method_label} (DL={args.mv_dl})...")
     i_out, q_out, dt = run_beamformer(

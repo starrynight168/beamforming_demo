@@ -1,25 +1,32 @@
 """Provide Python utilities for fdmas."""
 
+# ruff: noqa: E402
+
 import argparse
-import sys
-from pathlib import Path
 
 import numpy as np
 import torch
 from scipy.signal import filtfilt, firwin
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+if __package__:
+    from algorithms.bootstrap import initialize_project_path
+else:
+    from bootstrap import initialize_project_path
 
-from algorithms.common import (
-    add_common_arguments,
-    add_io_arguments,
+PROJECT_ROOT = initialize_project_path(__file__)
+
+from algorithms.shared_core.beamforming import (
     aperture_start_indices,
     aperture_window_1d,
     dynamic_aperture_channel_count,
+    interpolate_channel_samples,
+)
+from algorithms.shared_core.common import (
+    resolve_device,
+    add_common_arguments,
+    add_io_arguments,
     beamforming_depth_grid,
     beamformed_image_db,
-    interpolate_channel_samples,
     prepare_beamforming_input,
     print_physical_summary,
     resolve_project_path,
@@ -31,36 +38,39 @@ from algorithms.common import (
 )
 
 # ================= 命令行参数配置 =================
-parser = argparse.ArgumentParser(
-    description="F-DMAS beamforming for RF, analytic RF, and IQ data (H5)",
-)
-add_common_arguments(parser)
-add_io_arguments(parser, save_gt_help="保存GT对比图")
-parser.add_argument(
-    "--row_block",
-    type=int,
-    default=24,
-    help="GPU按深度方向分块行数;<=0 表示整幅一次计算",
-)
-args = None
+def build_parser(params=None):
+    parser = argparse.ArgumentParser(
+        description="F-DMAS beamforming for RF, analytic RF, and IQ data (H5)",
+    )
+    add_common_arguments(parser, params=params)
+    add_io_arguments(parser, save_gt_help="保存GT对比图")
+    parser.add_argument(
+        "--row_block",
+        type=int,
+        default=24,
+        help="GPU按深度方向分块行数;<=0 表示整幅一次计算",
+    )
+    return parser
+
+
 
 METHOD_NAME = "fdmas"
 RF_FILTER_TAPS = 33
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class FDMASBeamformerIQ:
     """Filtered delay-multiply-and-sum beamformer for channel signals."""
 
-    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad, options=None):
+    def __init__(self, z_grid, x_grid, n_elem, pitch, c, fc, fs, _t0_all, angles_rad, options=None, device=None):
         """Initialize the instance."""
-        self.options = options if options is not None else (args if args is not None else parser.parse_args([]))
+        self.device = resolve_device(device)
+        self.options = options if options is not None else build_parser().parse_args([])
         self.signal_domain = self.options.signal_domain
         self.height, self.width, self.N = len(z_grid), len(x_grid), n_elem
-        self.x_grid = torch.from_numpy(x_grid).float().to(device)
-        self.z_grid = torch.from_numpy(z_grid).float().to(device)
+        self.x_grid = torch.from_numpy(x_grid).float().to(self.device)
+        self.z_grid = torch.from_numpy(z_grid).float().to(self.device)
         self.pitch, self.fc, self.fs = pitch, float(fc), fs
         self.sc = fs / c
         self.rf_filter = None
@@ -85,7 +95,7 @@ class FDMASBeamformerIQ:
             -(n_elem - 1) / 2 * pitch,
             (n_elem - 1) / 2 * pitch,
             n_elem,
-            device=device,
+            device=self.device,
         )
         x_mesh, z_mesh = torch.meshgrid(self.x_grid, self.z_grid, indexing="xy")
         self.x_mesh, self.z_mesh = x_mesh, z_mesh
@@ -95,7 +105,7 @@ class FDMASBeamformerIQ:
         )
 
         win = torch.zeros(
-            (self.height, self.width, self.N), dtype=torch.float32, device=device
+            (self.height, self.width, self.N), dtype=torch.float32, device=self.device
         )
         for iz, depth in enumerate(self.z_grid):
             k = dynamic_aperture_channel_count(
@@ -106,13 +116,13 @@ class FDMASBeamformerIQ:
                 self.options.dynamic_aperture,
             )
             starts = aperture_start_indices(self.x_grid, n_elem, k, pitch)
-            channels = starts[:, None] + torch.arange(k, device=device)[None, :]
-            row_window = aperture_window_1d(k, self.options.window, device).expand(
+            channels = starts[:, None] + torch.arange(k, device=self.device)[None, :]
+            row_window = aperture_window_1d(k, self.options.window, self.device).expand(
                 self.width, -1
             )
             win[iz].scatter_(1, channels, row_window)
         self.window = win / (win.sum(-1, keepdim=True) + 1e-9)
-        self.ch = torch.arange(n_elem, device=device).view(1, 1, -1)
+        self.ch = torch.arange(n_elem, device=self.device).view(1, 1, -1)
 
     @staticmethod
     def _complex_fdmas(i_aligned, q_aligned, weights):
@@ -150,15 +160,15 @@ class FDMASBeamformerIQ:
         n_s = i_data.shape[1]
         max_sample = float(n_s - 1)
 
-        i_tensor = torch.from_numpy(i_data.astype(np.float32)).to(device)
-        q_tensor = torch.from_numpy(q_data.astype(np.float32)).to(device)
-        cos_a = torch.from_numpy(np.cos(selected_angles).astype(np.float32)).to(device)
-        sin_a = torch.from_numpy(np.sin(selected_angles).astype(np.float32)).to(device)
+        i_tensor = torch.from_numpy(i_data.astype(np.float32)).to(self.device)
+        q_tensor = torch.from_numpy(q_data.astype(np.float32)).to(self.device)
+        cos_a = torch.from_numpy(np.cos(selected_angles).astype(np.float32)).to(self.device)
+        sin_a = torch.from_numpy(np.sin(selected_angles).astype(np.float32)).to(self.device)
 
-        t_starts_t = time_start_tensor(t_starts, n_a, fs, device)
+        t_starts_t = time_start_tensor(t_starts, n_a, fs, self.device)
 
         beam_out = torch.zeros(
-            (self.height, self.width), dtype=torch.complex64, device=device
+            (self.height, self.width), dtype=torch.complex64, device=self.device
         )
         ch = self.ch
         row_block = self.height if self.options.row_block <= 0 else max(1, self.options.row_block)
@@ -175,7 +185,7 @@ class FDMASBeamformerIQ:
             block_sum = torch.zeros(
                 (z1 - z0, self.width),
                 dtype=torch.complex64,
-                device=device,
+                device=self.device,
             )
 
             phi_rx = 2.0 * np.pi * self.fc * (drs_b / fs) if self.signal_domain == "iq" else torch.zeros_like(drs_b)
@@ -246,10 +256,10 @@ def fdmas_depth_grid(z_grid, c, fc, fs, signal_domain):
 
 
 # ================= 主程序 =================
-def main():
+def main(argv=None):
     """Run the command-line workflow."""
-    global args
-    args = parser.parse_args()
+    args = build_parser().parse_args(argv)
+    device = resolve_device()
     h5_path = resolve_project_path(args.h5_path, PROJECT_ROOT)
     output_dir = f"{args.output_dir}/{METHOD_NAME}"
 
@@ -320,8 +330,7 @@ def main():
         fc,
         fs,
         t0_sub,
-        angles_all,
-    )
+        angles_all, options=args, device=device)
 
     print("Processing F-DMAS...")
     i_out, q_out, dt = run_beamformer(

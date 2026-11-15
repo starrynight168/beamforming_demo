@@ -177,10 +177,10 @@ class DataPipelineTests(unittest.TestCase):
     def test_configurable_signal_domains_round_trip(self):
         from itertools import combinations
         from scipy.signal import hilbert
-        from algorithms.common import ground_truth_db, load_from_h5
-        from algorithms.shared_core.data import load_input_from_h5
+        from algorithms.shared_core.common import ground_truth_db, load_from_h5
+        from shared_core.data import load_input_from_h5
         from run_one import scene_has_gt
-        from evaluation.evaluate import read_sample_meta
+        from evaluation.context import read_sample_meta
 
         cases = [(domains, False) for size in (1, 2, 3)
                  for domains in combinations(("rf", "analytic_rf", "iq"), size)]
@@ -335,8 +335,8 @@ class DataPipelineTests(unittest.TestCase):
                     generation["ground_truth"],
                 )
 
-            from algorithms.common import load_from_h5
-            from evaluation.evaluate import read_sample_meta
+            from algorithms.shared_core.common import load_from_h5
+            from evaluation.context import read_sample_meta
             from run_one import scene_has_gt
 
             sample = load_from_h5(output, 0)

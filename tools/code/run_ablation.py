@@ -1,7 +1,6 @@
-"""Provide Python utilities for run_ablation_cn."""
+"""Run algorithm and scene ablations."""
 
 import argparse
-import csv
 import json
 import math
 import shutil
@@ -11,37 +10,45 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from algorithms.common import result_cache_signature
-from evaluation.evaluate import load_picmus_context
-
-from tools import run_wizard_cn as wizard
-
-ALGORITHMS = wizard.ALGORITHMS
-ExitCommandError = wizard.ExitCommandError
-append_run_log = wizard.append_run_log
-ask_choice = wizard.ask_choice
-ask_text = wizard.ask_text
-ask_yes_no = wizard.ask_yes_no
-choose_h5 = wizard.choose_h5
-choose_sample = wizard.choose_sample
-inspect_h5 = wizard.inspect_h5
-load_base_config = wizard.load_base_config
-print_title = wizard.print_title
-relative_to_root = wizard.relative_to_root
-run_steps = wizard.run_steps
+from algorithms.shared_core.common import result_cache_signature
+from evaluation.context import load_picmus_context
+from tools.shared.workflow_common import (
+    ALGORITHMS,
+    TOOLS_OUTPUT_ROOT,
+    ExitCommandError,
+    append_run_log,
+    ask_choice,
+    ask_text,
+    ask_yes_no,
+    choose_h5,
+    choose_sample,
+    inspect_h5,
+    load_base_config,
+    print_title,
+    relative_to_root,
+    run_steps,
+    sample_can_be_evaluated,
+)
+from tools.shared.run_output import (
+    emit,
+    prepare_output_tree,
+    save_figure,
+    run_process,
+    set_plot_style,
+    write_csv,
+    write_json,
+)
+import matplotlib.pyplot as plt
 
 GLOBAL_PARAM_DESCRIPTIONS = {
+    "signal_domain": "输入信号域；扫多个域时只比较图像，不计算共用单一参考图的合并指标。",
     "select_angles": "角度选择。center=中心角,all=全部角度,也可以填 1/3/11 等数量。",
     "f_number": "动态孔径参数。越小孔径越大,分辨率可能更好但旁瓣更重;越大更平滑但可能变糊。",
     "dr": "显示动态范围。只影响显示/指标使用的 dB 范围,不改变算法物理过程。",
@@ -174,8 +181,19 @@ def numeric_range_values(integer=False):
     return values
 
 
+def validate_available_signal_domains(values, available_domains):
+    unsupported = sorted(set(values) - set(available_domains))
+    if unsupported:
+        raise ValueError(
+            f"当前 H5 不支持 signal_domain: {', '.join(unsupported)}；"
+            f"可用域为 {', '.join(available_domains)}。"
+        )
+    return values
+
+
 def validate_values(param_name, default_value, values):
     """Validate values."""
+
     def reject_duplicates(values):
         keys = [
             ("number", float(value))
@@ -220,12 +238,15 @@ def validate_values(param_name, default_value, values):
         return reject_duplicates(values)
 
     if param_name == "tx_subarray_ratio" and not all(
-        isinstance(value, (int, float)) and 0 < float(value) <= 1
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 < float(value) <= 1
         for value in values
     ):
         raise ValueError("tx_subarray_ratio 必须位于 (0,1]。")
     if param_name == "gcf_tx_low_bins" and not all(
-        isinstance(value, int) and value >= 0 for value in values
+        isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        for value in values
     ):
         raise ValueError("gcf_tx_low_bins 必须是非负整数。")
 
@@ -274,8 +295,7 @@ def validate_values(param_name, default_value, values):
         ):
             raise ValueError("min_subarray_len 必须是大于等于 2 的整数。")
         if param_name == "depth_smooth_rows" and not all(
-            isinstance(value, int) and value >= 1 and value % 2 == 1
-            for value in values
+            isinstance(value, int) and value >= 1 and value % 2 == 1 for value in values
         ):
             raise ValueError("depth_smooth_rows 必须是正奇数。")
         if param_name == "temporal_win" and not all(
@@ -365,7 +385,8 @@ def choose_values(param_name, default_value):
         try:
             if mode == "range":
                 integer = (
-                    param_name in {
+                    param_name
+                    in {
                         "temporal_win",
                         "num_eig",
                         "gcf_low_bins",
@@ -457,7 +478,7 @@ def find_matching_ablation_run(output_root, expected_configs):
     for run_root in sorted(Path(output_root).glob("ablation_*"), reverse=True):
         config_dir = run_root / "configs"
         config_paths = list(config_dir.glob("*.yaml"))
-        if not config_paths or any(path.stem not in expected_configs for path in config_paths):
+        if {path.stem for path in config_paths} != set(expected_configs):
             continue
         if all(
             yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -478,7 +499,7 @@ def run_one(config_path, scene_id, output_root, keep_existing):
         [""],
     )[0]
     if keep_existing and can_reuse_flat_result(config_path, scene_dir, algorithm):
-        print(f"Reuse {scene_dir / f'{algorithm}.npy'}")
+        emit(scene_dir, "info", f"复用已有结果：{scene_dir / f'{algorithm}.npy'}。")
         return 0, []
 
     cmd = [
@@ -497,22 +518,9 @@ def run_one(config_path, scene_id, output_root, keep_existing):
         cmd.append("--keep_existing")
 
     scene_dir.mkdir(parents=True, exist_ok=True)
-    log_path = scene_dir / "run.log"
-    command_text = " ".join(
-        ('"' + str(part) + '"') if " " in str(part) else str(part) for part in cmd
-    )
-    with open(log_path, "w", encoding="utf-8") as log_file:
-        log_file.write(command_text + "\n\n")
-        log_file.flush()
-        result = subprocess.run(
-            cmd,
-            cwd=ROOT,
-            text=True,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-    return result.returncode, cmd
+    emit(scene_dir, "run", f"运行场景：{scene_id}。")
+    emit(scene_dir, "run", subprocess.list2cmdline(cmd))
+    return run_process(cmd, ROOT, scene_dir), cmd
 
 
 def method_output_path(scene_dir, algorithm, suffix):
@@ -571,26 +579,26 @@ def flatten_ablation_result(scene_dir, algorithm):
 
 def preserve_ground_truth(scene_dir, out_dir):
     """Keep one GT panel before per-value comparison files are flattened away."""
-    target = out_dir / "ground_truth.npy"
+    target = out_dir / "data" / "ground_truth.npy"
     comparison_path = scene_dir / "comparison.npy"
     if not comparison_path.exists():
         return None
     comparison = np.load(comparison_path).astype(np.float32)
     if comparison.ndim != 3 or comparison.shape[0] < 2:
         return None
+    target.parent.mkdir(parents=True, exist_ok=True)
     np.save(target, comparison[0])
     return target
 
 
 def write_summary(rows, out_path):
     """Execute write summary."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     fields = ["index", "parameter", "value", "scene_id", "status", "result_dir"]
-    with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({name: row.get(name, "") for name in fields})
+    return write_csv(
+        out_path,
+        ({name: row.get(name, "") for name in fields} for row in rows),
+        fields,
+    )
 
 
 def save_ablation_overview(rows, out_dir, algorithm, param_name):
@@ -598,8 +606,13 @@ def save_ablation_overview(rows, out_dir, algorithm, param_name):
     images = []
     titles = []
     display_drs = []
-    gt_path = out_dir / "ground_truth.npy"
-    gt_image = np.load(gt_path).astype(np.float32) if gt_path.exists() else None
+    gt_path = out_dir / "data" / "ground_truth.npy"
+    if param_name == "signal_domain":
+        gt_image = None
+    else:
+        if not gt_path.is_file():
+            gt_path = out_dir / "ground_truth.npy"
+        gt_image = np.load(gt_path).astype(np.float32) if gt_path.exists() else None
     gt_dr = 60.0
     for row in rows:
         if row["status"] != "ok":
@@ -634,11 +647,16 @@ def save_ablation_overview(rows, out_dir, algorithm, param_name):
         display_drs = [gt_dr, *display_drs]
 
     stack = np.stack(images, axis=0)
-    np.save(out_dir / "ablation_comparison.npy", stack)
+    data_dir = out_dir / "data"
+    figure_dir = out_dir / "figures"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    np.save(data_dir / "ablation_comparison.npy", stack)
 
     n_images = len(images)
     cols = min(4, n_images)
     rows_count = math.ceil(n_images / cols)
+    set_plot_style()
     fig, axes = plt.subplots(
         rows_count,
         cols,
@@ -656,24 +674,42 @@ def save_ablation_overview(rows, out_dir, algorithm, param_name):
         ax.axis("off")
     for idx in range(n_images, rows_count * cols):
         axes[idx // cols][idx % cols].axis("off")
-    path = out_dir / "ablation_comparison.png"
-    fig.savefig(path, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
+    path = figure_dir / "ablation_comparison.png"
+    save_figure(fig, path)
     return path
 
 
-def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt, dr):
+def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, algorithm, has_gt, dr):
     """Execute run ablation evaluation."""
     if not has_gt:
         return None
-    comparison_path = out_dir / "ablation_comparison.npy"
+    if any(
+        row["status"] == "ok" and row["parameter"] in {"dr", "signal_domain"}
+        for row in rows
+    ):
+        return None
+    comparison_path = out_dir / "data" / "ablation_comparison.npy"
     if not comparison_path.exists():
         return None
-    valid_rows = [row for row in rows if row["status"] == "ok"]
+    valid_rows = [
+        row
+        for row in rows
+        if row["status"] == "ok"
+        and method_output_path(Path(row["result_dir"]), algorithm, "npy").is_file()
+    ]
     if not valid_rows:
         return None
-    if any(row["parameter"] == "dr" for row in valid_rows):
-        return None
+    comparison = np.load(comparison_path, mmap_mode="r")
+    has_ground_truth = (out_dir / "data" / "ground_truth.npy").is_file() or (
+        out_dir / "ground_truth.npy"
+    ).is_file()
+    expected_panels = len(valid_rows) + int(has_ground_truth)
+    if comparison.ndim != 3 or comparison.shape[0] != expected_panels:
+        raise ValueError(
+            "消融图像数量与成功运行及参考图数量不一致: "
+            f"images={comparison.shape[0] if comparison.ndim else 0}, "
+            f"expected={expected_panels}"
+        )
     if load_picmus_context(h5_path, sample_idx) is None:
         return None
     method_ids = [f"ablation_{row['index']:02d}" for row in valid_rows]
@@ -682,7 +718,8 @@ def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt, dr):
     metrics_dir.mkdir(parents=True, exist_ok=True)
     evaluate_cmd = [
         sys.executable,
-        str(ROOT / "evaluation" / "evaluate.py"),
+        "-m",
+        "evaluation.evaluate",
         "--comparison_npy",
         str(comparison_path),
         "--h5_path",
@@ -702,27 +739,29 @@ def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, has_gt, dr):
         "--phantom_source",
         "auto",
     ]
-    result = subprocess.run(evaluate_cmd, cwd=ROOT, text=True, check=False)
-    if result.returncode != 0:
+    if run_process(evaluate_cmd, ROOT, out_dir) != 0:
         raise RuntimeError("消融统一评估失败")
     plot_cmd = [
         sys.executable,
-        str(ROOT / "evaluation" / "plot_metrics.py"),
+        "-m",
+        "evaluation.plot_metrics",
         "--metrics_dir",
         str(metrics_dir),
         "--reference-mode",
         "algorithms",
     ]
-    result = subprocess.run(plot_cmd, cwd=ROOT, text=True, check=False)
-    if result.returncode != 0:
+    if run_process(plot_cmd, ROOT, out_dir) != 0:
         raise RuntimeError("消融统一指标绘图失败")
+    figure_dir = out_dir / "figures" / "metrics"
+    for source in metrics_dir.glob("*.png"):
+        figure_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, figure_dir / source.name)
     return metrics_dir
 
 
 def collect_ablation_individual_images(rows, out_dir, algorithm, param_name):
     """Execute collect ablation individual images."""
-    output_dir = out_dir / "individual_images"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = out_dir / "figures" / "individual_images"
     copied = 0
     copied_gt = False
     for row in rows:
@@ -732,13 +771,31 @@ def collect_ablation_individual_images(rows, out_dir, algorithm, param_name):
         source = method_output_path(scene_dir, algorithm, "png")
         if not source.exists():
             continue
+        output_dir.mkdir(parents=True, exist_ok=True)
         filename = (
             f"{row['index']:02d}_{param_name}_{safe_name(row['value'])}_{algorithm}.png"
         )
         shutil.copy2(source, output_dir / filename)
         copied += 1
 
-        if not copied_gt:
+        if param_name == "signal_domain":
+            gt_source = next(
+                (
+                    path
+                    for path in (
+                        scene_dir / "ground_truth.png",
+                        scene_dir / "individual_images" / "ground_truth.png",
+                    )
+                    if path.exists()
+                ),
+                None,
+            )
+            if gt_source is not None:
+                gt_name = (
+                    f"{row['index']:02d}_{param_name}_{safe_name(row['value'])}_ground_truth.png"
+                )
+                shutil.copy2(gt_source, output_dir / gt_name)
+        elif not copied_gt:
             for gt_source in (
                 scene_dir / "ground_truth.png",
                 scene_dir / "individual_images" / "ground_truth.png",
@@ -748,6 +805,10 @@ def collect_ablation_individual_images(rows, out_dir, algorithm, param_name):
                     copied_gt = True
                     break
     return output_dir if copied else None
+
+
+def should_evaluate_ablation(param_name, sample_has_gt):
+    return sample_has_gt and param_name not in {"dr", "signal_domain"}
 
 
 def main():
@@ -762,6 +823,7 @@ def main():
 
     def step_h5():
         """Execute step h5."""
+        state.pop("h5_info", None)
         state["h5_path"] = choose_h5()
 
     def step_sample():
@@ -785,25 +847,42 @@ def main():
     def step_values():
         """Execute step values."""
         state["values"] = choose_values(state["param_name"], state["default_value"])
+        if state["param_name"] == "signal_domain":
+            state["h5_info"] = inspect_h5(state["h5_path"])
+            validate_available_signal_domains(
+                state["values"], state["h5_info"]["domains"]
+            )
 
     def step_gt():
         """Execute step gt."""
-        info = inspect_h5(state["h5_path"])
-        state["has_gt"] = info["gt"] == "有"
+        info = state.get("h5_info") or inspect_h5(state["h5_path"])
+        if state["param_name"] == "signal_domain":
+            state["has_gt"] = all(
+                info["gt_by_domain"].get(domain, False) for domain in state["values"]
+            )
+        else:
+            domain = (state["config"].get("params", {}) or {}).get(
+                "signal_domain", info["default_domain"]
+            )
+            state["has_gt"] = info["gt_by_domain"].get(domain, info["gt"] == "有")
         state["in_vivo"] = info["in_vivo"][state["sample_idx"]]
-        state["can_evaluate"] = wizard.sample_can_be_evaluated(
+        state["can_evaluate"] = sample_can_be_evaluated(
             state["h5_path"], state["sample_idx"]
         )
 
     def step_evaluate():
         """Execute step evaluate."""
         state["dr"] = float((state["config"].get("params") or {}).get("dr", 60.0))
+        state["evaluate"] = should_evaluate_ablation(
+            state["param_name"], state["can_evaluate"]
+        )
         if state["param_name"] == "dr":
-            state["evaluate"] = False
             print("指标: 跳过。dr 只影响显示动态范围,不对不同 dr 使用统一评估口径。")
-        else:
-            state["evaluate"] = state["can_evaluate"]
-        if state["param_name"] == "dr":
+            return
+        elif state["param_name"] == "signal_domain":
+            print(
+                "指标: 跳过。各信号域使用各自的 H5 参考图，当前汇总指标共用一张 GT，无法公平比较。",
+            )
             return
         if state["in_vivo"]:
             print("指标: 活体样本自动跳过。")
@@ -826,7 +905,11 @@ def main():
         default_output = state.get("output_root")
         if default_output is None:
             h5_tag = Path(state["h5_path"]).stem
-            default_output = Path("results") / f"{h5_tag}_sample{state['sample_idx']}"
+            default_output = (
+                TOOLS_OUTPUT_ROOT
+                / "run_ablation"
+                / f"{h5_tag}_sample{state['sample_idx']}"
+            )
         output_root = Path(
             ask_text("请输入消融结果根目录", default=str(default_output)),
         )
@@ -898,6 +981,22 @@ def main():
         print("已取消。")
         return
 
+    prepare_output_tree(state["run_root"])
+    write_json(
+        state["run_root"] / "run_config.json",
+        {
+            "tool": "run_ablation",
+            "h5_path": str(state["h5_path"]),
+            "sample_idx": state["sample_idx"],
+            "algorithm": state["algorithm"],
+            "scope": state["scope"],
+            "parameter": state["param_name"],
+            "values": state["values"],
+            "has_ground_truth": state["has_gt"],
+            "evaluate": state["evaluate"],
+        },
+    )
+    emit(state["run_root"], "prepare", f"开始 {len(state['values'])} 组消融。")
     rows = []
     for idx, value in enumerate(state["values"], 1):
         scene_id = value_scene_id(state["param_name"], value)
@@ -929,7 +1028,7 @@ def main():
         scene_dir = state["run_root"] / scene_id
         status = "ok" if code == 0 else f"failed({code})"
         if code == 0:
-            if state["has_gt"]:
+            if state["has_gt"] and state["param_name"] != "signal_domain":
                 preserve_ground_truth(scene_dir, state["run_root"])
             flatten_ablation_result(scene_dir, state["algorithm"])
         rows.append(
@@ -945,7 +1044,7 @@ def main():
         if code != 0:
             print("这一组运行失败,继续下一组。")
 
-    summary_path = state["run_root"] / "ablation_summary.csv"
+    summary_path = state["run_root"] / "metrics" / "ablation_summary.csv"
     write_summary(rows, summary_path)
     overview_path = save_ablation_overview(
         rows,
@@ -960,6 +1059,7 @@ def main():
             state["run_root"],
             state["h5_path"],
             state["sample_idx"],
+            state["algorithm"],
             state["has_gt"],
             state["dr"],
         )
@@ -970,14 +1070,13 @@ def main():
         state["param_name"],
     )
 
-    print_title("消融完成")
-    print(f"汇总表: {summary_path}")
+    emit(state["run_root"], "done", f"汇总表：{summary_path}。")
     if metrics_dir:
-        print(f"指标目录: {metrics_dir}")
+        emit(state["run_root"], "info", f"指标目录：{metrics_dir}。")
     if overview_path:
-        print(f"总览图: {overview_path}")
+        emit(state["run_root"], "info", f"总览图：{overview_path}。")
     if individual_dir:
-        print(f"单图目录: {individual_dir}")
+        emit(state["run_root"], "info", f"单图目录：{individual_dir}。")
     append_run_log(
         {
             "type": "ablation",

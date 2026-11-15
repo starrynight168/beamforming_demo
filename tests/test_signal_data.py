@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,9 +9,11 @@ import numpy as np
 import yaml
 from scipy.signal import firwin, hilbert
 
-from algorithms.shared_core.data import load_input, load_target
-from algorithms.shared_core.signals import rf_to_analytic, rf_to_iq
-from data.h5_schema import write_h5_schema
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from shared_core.data import load_input, load_target
+from shared_core.signals import rf_to_analytic, rf_to_iq
+from shared_core.h5_schema import write_h5_schema
 
 
 class SignalDataTests(unittest.TestCase):
@@ -73,7 +76,7 @@ class SignalDataTests(unittest.TestCase):
 
     def test_cached_iq_is_preferred_and_not_normalized_twice(self):
         self.create_file(cached_iq=True)
-        with patch("algorithms.shared_core.data.rf_to_iq", side_effect=AssertionError("Cache should be used")):
+        with patch("shared_core.data.rf_to_iq", side_effect=AssertionError("Cache should be used")):
             result = load_input(self.path, 0)
         self.assertEqual(result["real"].shape, (2, 7, 3))
         np.testing.assert_array_equal(result["real"], 4.0)
@@ -139,7 +142,7 @@ class SignalDataTests(unittest.TestCase):
             hf['ar_fs'], hf['ar_t0'] = 20e6, self.starts[None]
             hf['ar_angles'], hf['ar_length'] = [-.1, .1], [260]
             del hf['rf']
-        with patch("algorithms.shared_core.data.rf_to_analytic", side_effect=AssertionError("Cache must be used")):
+        with patch("shared_core.data.rf_to_analytic", side_effect=AssertionError("Cache must be used")):
             cached = load_input(self.path, 0, "analytic_rf")
         np.testing.assert_allclose(cached["real"], expected["real"], rtol=2e-7)
         np.testing.assert_allclose(cached["imag"], expected["imag"], rtol=2e-7)
@@ -174,7 +177,7 @@ class SignalDataTests(unittest.TestCase):
 
     def test_teacher_analytic_fields_are_not_channel_cache(self):
         self.create_file()
-        with patch("algorithms.shared_core.data.rf_to_analytic", wraps=rf_to_analytic) as transform:
+        with patch("shared_core.data.rf_to_analytic", wraps=rf_to_analytic) as transform:
             value = load_input(self.path, 0, "analytic_rf")
         transform.assert_called_once()
         self.assertEqual(value["real"].shape, self.rf.shape)

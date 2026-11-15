@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from algorithms.shared_core.labels import target_label
-from algorithms.shared_core.normalization import normalization_scale, storage_normalization_mode
+from shared_core.normalization import normalization_scale, storage_normalization_mode
 
 
 class StorageContractTests(unittest.TestCase):

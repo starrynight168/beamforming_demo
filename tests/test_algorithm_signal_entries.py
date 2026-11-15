@@ -12,8 +12,8 @@ import h5py
 import numpy as np
 import yaml
 
-from algorithms.common import beamforming_depth_grid, beamformed_image_db
-from data.h5_schema import write_h5_schema
+from algorithms.shared_core.common import beamforming_depth_grid, beamformed_image_db
+from shared_core.h5_schema import write_h5_schema
 
 
 class AlgorithmSignalEntryTests(unittest.TestCase):
@@ -41,7 +41,7 @@ class AlgorithmSignalEntryTests(unittest.TestCase):
             module = importlib.import_module("algorithms.mv")
             argv = ["mv", "--h5_path", str(path), "--output_dir", str(root),
                     "--signal_domain", "analytic_rf", "--mv_axis", "joint", "--select_angles", "all", "--no_tgc"]
-            with patch.object(sys, "argv", argv), patch("algorithms.shared_core.data.rf_to_analytic", side_effect=AssertionError("cache must be used")), contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(sys, "argv", argv), patch("shared_core.data.rf_to_analytic", side_effect=AssertionError("cache must be used")), contextlib.redirect_stdout(io.StringIO()):
                 module.main()
             image = np.load(root / "mv/mv.npy")
             self.assertEqual(image.shape, (4, 3))
@@ -59,7 +59,7 @@ class AlgorithmSignalEntryTests(unittest.TestCase):
                    module.CMSAWBeamformerIQ if name == "cmsaw" else module.RowDynamicMVBeamformerIQ)
             for axis in ("rx", "tx", "joint"):
                 for domain in ("rf", "analytic_rf"):
-                    settings = module.parser.parse_args(["--signal_domain", domain, "--mv_axis", axis, "--interp", "linear"])
+                    settings = module.build_parser().parse_args(["--signal_domain", domain, "--mv_axis", axis, "--interp", "linear"])
                     bf = cls(z, x, 4, .0003, 1540., 5e6, 20e6, 0., angles,
                              mv_dl=.1, temporal_win=3, subarray_ratio=.5, options=settings)
                     imag = np.zeros_like(source) if domain == "rf" else source * .2

@@ -6,7 +6,9 @@ from pathlib import Path
 
 import h5py
 import yaml
-from data.h5_schema import require_h5_schema
+from shared_core.h5_schema import require_h5_schema
+from .workflow_common import TOOLS_OUTPUT_ROOT
+from .run_output import emit, run_process
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -72,13 +74,15 @@ def sample_input(h5_path):
 
 
 def output_input(default_name):
-    default = ROOT / "results" / f"{default_name}_{datetime.now():%Y%m%d_%H%M%S}"
+    default = TOOLS_OUTPUT_ROOT / default_name / datetime.now().strftime("%Y%m%d_%H%M%S")
     return path_input("输出目录，可拖入文件夹或直接回车", default, "output")
 
 
 def run(script, args):
-    command = [sys.executable, str(ROOT / "tools" / "core" / script), *map(str, args)]
-    print("\n开始运行:", subprocess.list2cmdline(command), flush=True)
-    result = subprocess.run(command, cwd=ROOT, check=False)
-    if result.returncode:
-        raise SystemExit(f"运行失败，退出码 {result.returncode}。")
+    command = [sys.executable, "-m", f"tools.code.{Path(script).stem}", *map(str, args)]
+    emit(None, "run", subprocess.list2cmdline(command))
+    return_code = run_process(command, ROOT, None)
+    if return_code:
+        emit(None, "error", f"进程退出码 {return_code}。")
+        raise SystemExit(return_code)
+    emit(None, "done", "工具运行结束。")

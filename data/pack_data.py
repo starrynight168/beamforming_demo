@@ -26,7 +26,7 @@ F_NUMBER = 1.5
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 from data.h5_schema import write_h5_schema
-from algorithms.shared_core.normalization import normalization_scale, storage_normalization_mode
+from shared_core.normalization import normalization_scale, storage_normalization_mode
 DEFAULT_SOURCE_ROOT = PROJECT_ROOT / "data" / "PICMUS"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

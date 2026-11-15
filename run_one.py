@@ -17,15 +17,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
-from algorithms.common import (
+from algorithms.shared_core.common import (
     add_common_arguments,
     add_scale_bar,
     ground_truth_db,
     merge_common_params,
     result_cache_signature,
 )
-from evaluation.evaluate import load_picmus_context
-from data.h5_schema import require_h5_schema
+from evaluation.context import load_picmus_context
+from shared_core.h5_schema import require_h5_schema
 from algorithms.shared_core.labels import target_label
 
 ROOT = Path(__file__).resolve().parent
@@ -126,7 +126,21 @@ def select_algorithms(config, override):
         raise ValueError("至少需要选择一个算法")
     if len(methods) != len(set(methods)):
         raise ValueError(f"算法列表包含重复项: {methods}")
+    for method in methods:
+        algorithm_module_file(method)
     return methods
+
+
+def algorithm_module_file(algorithm):
+    if algorithm == "template_algorithm":
+        raise ValueError("template_algorithm 是脚手架，不能作为运行算法")
+    parts = algorithm.split(".")
+    if not all(part.isidentifier() for part in parts):
+        raise ValueError(f"算法模块名无效: {algorithm!r}")
+    module_file = ROOT / Path("algorithms", *parts).with_suffix(".py")
+    if not module_file.is_file():
+        raise FileNotFoundError(f"Algorithm module not found: {module_file}")
+    return module_file
 
 
 def resolve_path(path):
@@ -179,10 +193,6 @@ def build_algorithm_cmd(args, config, scene, algorithm, scene_dir):
     params = merge_common_params(config)
     method_params = algorithm_params(config, algorithm)
     module = f"algorithms.{algorithm}"
-    module_file = ROOT / Path(*module.split("."))
-    module_file = module_file.with_suffix(".py")
-    if not module_file.exists():
-        raise FileNotFoundError(f"Algorithm module not found: {module_file}")
 
     cmd = [
         args.python_exe,
@@ -423,7 +433,8 @@ def run_evaluation(args, config, scene, scene_dir, comparison_path):
     params = merge_common_params(config)
     cmd = [
         args.python_exe,
-        str(ROOT / "evaluation" / "evaluate.py"),
+        "-m",
+        "evaluation.evaluate",
         "--comparison_npy",
         str(comparison_path),
         "--h5_path",
@@ -446,7 +457,8 @@ def run_evaluation(args, config, scene, scene_dir, comparison_path):
     if (metrics_dir / "evaluation_meta.json").exists():
         plot_cmd = [
             args.python_exe,
-            str(ROOT / "evaluation" / "plot_metrics.py"),
+            "-m",
+            "evaluation.plot_metrics",
             "--metrics_dir",
             str(metrics_dir),
             "--dr",
@@ -473,11 +485,11 @@ def main():
         args.extra_algorithm_args
     )
     config["params"] = vars(common_params)
+    methods = select_algorithms(config, args.algorithms)
     evaluation_context = (
         load_picmus_context(resolve_path(scene["h5_path"]), scene["sample_idx"])
         if not args.no_evaluate else None
     )
-    methods = select_algorithms(config, args.algorithms)
     has_gt = scene_has_gt(scene, config["params"]["signal_domain"])
     labels = validate_algorithm_labels(config, methods, has_gt)
     scene_dir = resolve_path(args.output_root) / scene["id"]

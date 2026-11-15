@@ -10,22 +10,26 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import h5py
 import numpy as np
 import torch
 
-from data.h5_schema import write_h5_schema
+from shared_core.h5_schema import write_h5_schema
 from algorithms import ccmv, cmsaw, das, esbmv, fdmas, gcfmv, mban, mv, template_algorithm
-from algorithms.common import (
-    WINDOW_CHOICES,
+from algorithms.shared_core.beamforming import (
     aperture_start_indices,
-    algorithm_source_paths,
-    envelope_to_db,
     generalized_coherence_factor,
-    merge_common_params,
     mv_row_output,
     normalized_mv_weights,
     spatial_temporal_covariance,
+)
+from algorithms.shared_core.common import (
+    WINDOW_CHOICES,
+    algorithm_source_paths,
+    envelope_to_db,
+    merge_common_params,
 )
 from algorithms.gcfmv import generalized_coherence_factor_2d
 
@@ -34,7 +38,7 @@ class BeamformerRegressionTests(unittest.TestCase):
     modules = (das, mv, ccmv, esbmv, gcfmv, fdmas, cmsaw)
 
     def options(self, module, **changes):
-        options = module.parser.parse_args([])
+        options = module.build_parser().parse_args([])
         options.dynamic_aperture = False
         options.tgc = False
         options.interp = "linear"
@@ -48,7 +52,7 @@ class BeamformerRegressionTests(unittest.TestCase):
                module.CMSAWBeamformerIQ if module is cmsaw else
                module.RowDynamicCCMVBeamformerIQ if module is ccmv else
                module.RowDynamicMVBeamformerIQ)
-        parameters = dict(options=options)
+        parameters = dict(options=options, device=getattr(self, "device", "cpu"))
         if module in (mv, ccmv, esbmv, gcfmv, cmsaw):
             parameters.update(temporal_win=1, subarray_ratio=0.5, mv_dl=0.0)
         parameters.update(changes)
@@ -57,21 +61,21 @@ class BeamformerRegressionTests(unittest.TestCase):
 
     def test_constructors_work_without_global_cli_args(self):
         for module in self.modules:
-            with self.subTest(module=module.METHOD_NAME), patch.object(module, "args", None):
+            with self.subTest(module=module.METHOD_NAME), patch.object(module, "args", None, create=True):
                 self.beamformer(module, None)
 
     def test_ccmv_reuses_mv_parameters_and_dynamic_geometry(self):
         self.assertIs(ccmv.RowDynamicCCMVBeamformerIQ.__call__, mv.RowDynamicMVBeamformerIQ.__call__)
-        expected = vars(mv.parser.parse_args([])).copy()
-        actual = vars(ccmv.parser.parse_args([])).copy()
+        expected = vars(mv.build_parser().parse_args([])).copy()
+        actual = vars(ccmv.build_parser().parse_args([])).copy()
         self.assertEqual(expected.pop("mv_dl"), 0.0)
         self.assertEqual(actual.pop("mv_dl"), 0.1)
         self.assertEqual(actual, expected)
         geometry = (np.array([0.002, 0.012, 0.03]), np.array([-0.001, 0.0, 0.001]),
                     128, 0.0003, 1540.0, 5e6, 20e6, np.zeros(1), np.zeros(1))
         parameters = {"mv_dl": 0.1, **{name: actual[name] for name in ("fbss", "subarray_ratio", "temporal_win")}}
-        baseline = mv.RowDynamicMVBeamformerIQ(*geometry, options=mv.parser.parse_args([]), **parameters)
-        cross = ccmv.RowDynamicCCMVBeamformerIQ(*geometry, options=ccmv.parser.parse_args([]), **parameters)
+        baseline = mv.RowDynamicMVBeamformerIQ(*geometry, options=mv.build_parser().parse_args([]), **parameters)
+        cross = ccmv.RowDynamicCCMVBeamformerIQ(*geometry, options=ccmv.build_parser().parse_args([]), **parameters)
         sizes = []
         for left, right in zip(baseline.row_cache, cross.row_cache):
             sizes.append(right["aperture_size"])
@@ -105,7 +109,7 @@ class BeamformerRegressionTests(unittest.TestCase):
         for device in devices:
             with contextlib.ExitStack() as stack:
                 for module in self.modules:
-                    stack.enter_context(patch.object(module, "device", device))
+                    stack.enter_context(patch.object(self, "device", device, create=True))
                 for module in self.modules:
                     for window in WINDOW_CHOICES:
                         with self.subTest(device=device, module=module.METHOD_NAME, window=window):
@@ -184,7 +188,7 @@ class BeamformerRegressionTests(unittest.TestCase):
         torch.testing.assert_close(esbmv.project_signal_subspace(covariance, weights, 2, 0.0), weights)
 
     def test_gcf_uses_full_aperture_and_includes_even_length_nyquist_bin(self):
-        self.assertEqual(gcfmv.parser.parse_args([]).gcf_power, 1.0)
+        self.assertEqual(gcfmv.build_parser().parse_args([]).gcf_power, 1.0)
         data = torch.tensor([[1, -1]], dtype=torch.complex64)
         torch.testing.assert_close(generalized_coherence_factor(data, 0), torch.zeros(1))
         torch.testing.assert_close(generalized_coherence_factor(data, 1), torch.ones(1))
@@ -217,8 +221,8 @@ class BeamformerRegressionTests(unittest.TestCase):
         angles = np.array([-0.1, 0.0, 0.1], dtype=np.float32)
         rx = torch.tensor([[[0.2], [0.8]]], dtype=torch.complex64)
         tx = torch.tensor([[[0.3], [0.7]]], dtype=torch.complex64)
-        with patch.object(gcfmv, "device", torch.device("cpu")), patch.object(
-            mv, "device", torch.device("cpu")
+        with patch.object(self, "device", torch.device("cpu"), create=True), patch.object(
+            self, "device", torch.device("cpu"), create=True
         ):
             bf = self.beamformer(gcfmv, self.options(gcfmv, mv_axis="joint", gcf_power=0.0), channels=4)
             with patch.object(mv, "normalized_mv_weights", side_effect=(rx, tx)):
@@ -240,7 +244,7 @@ class BeamformerRegressionTests(unittest.TestCase):
                 continue
             with self.subTest(module=module.METHOD_NAME):
                 options = self.options(module, dynamic_aperture=True, f_number=1.0)
-                with patch.object(module, "device", torch.device("cpu")):
+                with patch.object(self, "device", torch.device("cpu"), create=True):
                     beamformer = self.beamformer(
                         module, options, z=(1.0,), x=x_grid, channels=4
                     )
@@ -297,7 +301,7 @@ class BeamformerRegressionTests(unittest.TestCase):
         signal = np.broadcast_to(values[:, None], (3, 16, 4)).copy()
         angles = np.array([-0.1, 0.0, 0.1], dtype=np.float32)
         tx = torch.tensor([[[0.3], [0.7]]], dtype=torch.complex64)
-        with patch.object(gcfmv, "device", torch.device("cpu")):
+        with patch.object(self, "device", torch.device("cpu"), create=True):
             for window in ("rect", "hann"):
                 for power in (0.0, 1.0):
                     bf = self.beamformer(gcfmv, self.options(gcfmv, mv_axis="tx", window=window,
@@ -345,7 +349,7 @@ class BeamformerRegressionTests(unittest.TestCase):
         rng = np.random.default_rng(37)
         signal = (rng.normal(size=(3, 16, 8)) + 1j * rng.normal(size=(3, 16, 8))).astype(np.complex64)
         angles = np.array([-0.1, 0.0, 0.1], dtype=np.float32)
-        with patch.object(gcfmv, "device", torch.device("cpu")):
+        with patch.object(self, "device", torch.device("cpu"), create=True):
             bf = self.beamformer(gcfmv, self.options(gcfmv, mv_axis="joint"), x=np.linspace(-0.3, 0.3, 40),
                                  temporal_win=3)
             with patch.object(mv, "_JOINT_SNAPSHOT_TARGET_BYTES", 1):
@@ -509,7 +513,7 @@ class BeamformerRegressionTests(unittest.TestCase):
                 mban.parse_args()
 
     def test_ccmv_honors_its_device_independently_of_mv(self):
-        with patch.object(ccmv, "device", torch.device("cpu")), patch.object(mv, "device", torch.device("meta")):
+        with patch("algorithms.shared_core.common.torch.cuda.is_available", side_effect=AssertionError("explicit device must not probe CUDA")):
             bf = self.beamformer(ccmv, self.options(ccmv))
             signal = np.ones((1, 16, 8), dtype=np.float32)
             i, q = bf(signal, np.zeros_like(signal), np.zeros(1), np.zeros(1), 1.0)
@@ -567,7 +571,7 @@ class BeamformerRegressionTests(unittest.TestCase):
             reconstruct = Mock(return_value=(np.array([[0.0, -5.0], [-10.0, -20.0]]), {}, [], 0.5))
             argv = ["mban", "--checkpoint", str(root / "model.pt"), "--kind", "fp32",
                     "--h5_path", str(h5_path), "--output_dir", str(root), "--train_root", str(train_root)]
-            with patch("sys.argv", argv), patch.object(mban, "load_evaluation_dependencies", return_value=(load_scene, reconstruct, load_model)), patch("algorithms.common.load_from_h5", return_value=SimpleNamespace(angles=np.array([0.]), has_gt=False)), patch("algorithms.common.save_figure"), contextlib.redirect_stdout(io.StringIO()):
+            with patch("sys.argv", argv), patch.object(mban, "load_evaluation_dependencies", return_value=(load_scene, reconstruct, load_model)), patch("algorithms.shared_core.common.load_from_h5", return_value=SimpleNamespace(angles=np.array([0.]), has_gt=False)), patch("algorithms.shared_core.common.save_figure"), contextlib.redirect_stdout(io.StringIO()):
                 mban.main()
             params = json.loads((root / "mban" / "params.json").read_text(encoding="utf-8"))
             self.assertEqual(params["runtime_sec"], 0.5)

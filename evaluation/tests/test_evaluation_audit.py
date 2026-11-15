@@ -18,14 +18,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from evaluation.evaluate import (
     build_resolution_group_rows,
     load_method_names,
+)
+from evaluation.context import (
     load_picmus_context,
-    picmus_distortion_pass,
     picmus_distortion_z_offset_mm,
     picmus_reference_path,
     read_phantom,
     read_sample_meta,
-    target_resolution,
 )
+from evaluation.metrics import picmus_distortion_pass, target_resolution
 from evaluation.evaluate import (
     main as evaluate_main,
 )
@@ -36,50 +37,14 @@ from evaluation.plot_metrics import (
 from evaluation.plot_metrics import (
     main as plot_main,
 )
+from evaluation.tests.picmus_fixtures import (
+    update_sample_metadata,
+    write_picmus_sample,
+)
 
 
-def write_picmus_sample(
-    root, mode="contrast_speckle", source="simulation", has_gt=True
-):
-    path = root / "sample.h5"
-    phantom_path = (
-        str(picmus_reference_path(mode, source))
-        if source in {"simulation", "experiments"}
-        else ""
-    )
-    with h5py.File(path, "w") as handle:
-        handle["h5_schema_version"] = 3
-        handle["iq_i"] = np.zeros((1, 1, 1, 1))
-        handle["x_grid"] = np.linspace(-0.025, 0.025, 201)
-        handle["z_grid"] = np.linspace(0.005, 0.055, 201)
-        if has_gt:
-            handle["mv_iq_db"] = np.zeros((1, 1, 201, 201))
-        handle["config_yaml"] = yaml.safe_dump(
-            {
-                "generation": {
-                    "storage": {"inputs": {"iq": {"dtype": "float32", "normalization": "none"}}},
-                    "ground_truth": {"algorithm": "mv", "signal_domain": "iq", "dynamic_range_db": 60.0},
-                    "training_targets": {"domain_targets": {"iq": {"mv": {"db": "/mv_iq_db"}}}},
-                },
-                "source_samples": [
-                    {
-                        "id": "renamed_sample",
-                        "phantom_mode": mode,
-                        "phantom_source": source,
-                        "phantom_path": phantom_path,
-                    }
-                ]
-            }
-        )
-    return path
 
 
-def update_sample_metadata(path, **changes):
-    with h5py.File(path, "r+") as handle:
-        config = yaml.safe_load(handle["config_yaml"][()])
-        config["source_samples"][0].update(changes)
-        del handle["config_yaml"]
-        handle["config_yaml"] = yaml.safe_dump(config)
 
 
 class EvaluationInputTests(unittest.TestCase):
@@ -398,6 +363,7 @@ class EvaluationInputTests(unittest.TestCase):
             config.write_text(
                 yaml.safe_dump(
                     {
+                        "algorithms": ["das"],
                         "scenes": [
                             {"id": "renamed", "h5_path": str(path), "sample_idx": 0}
                         ]
@@ -406,7 +372,9 @@ class EvaluationInputTests(unittest.TestCase):
                 encoding="utf-8",
             )
             args = SimpleNamespace(
-                config=str(config), scene="renamed", no_evaluate=False,
+                config=str(config), scene="renamed", algorithms=None,
+                output_root=str(root / "output"), python_exe=sys.executable,
+                no_evaluate=False, no_individual_images=True, keep_existing=False,
                 extra_algorithm_args=[],
             )
             with (
@@ -606,7 +574,8 @@ class EvaluationInputTests(unittest.TestCase):
             np.save(comparison_path, np.stack((image, image - 1.0)))
             command = [
                 sys.executable,
-                str(Path(__file__).resolve().parents[1] / "evaluate.py"),
+                "-m",
+                "evaluation.evaluate",
                 "--comparison_npy",
                 str(comparison_path),
                 "--h5_path",
@@ -616,7 +585,13 @@ class EvaluationInputTests(unittest.TestCase):
                 "--out_dir",
                 str(metrics_dir),
             ]
-            subprocess.run(command, check=True, capture_output=True, text=True)
+            subprocess.run(
+                command,
+                cwd=Path(__file__).resolve().parents[2],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             plot_args = SimpleNamespace(
                 metrics_dir=str(metrics_dir),
                 dr=None,

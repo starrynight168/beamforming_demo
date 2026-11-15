@@ -1,23 +1,30 @@
 """Provide Python utilities for cmsaw."""
 
-from copy import deepcopy
-import sys
+# ruff: noqa: E402
+
 from pathlib import Path
 
 import numpy as np
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+if __package__:
+    from algorithms.bootstrap import initialize_project_path
+else:
+    from bootstrap import initialize_project_path
+
+PROJECT_ROOT = initialize_project_path(__file__)
 
 from algorithms import mv
-from algorithms.common import (
+from algorithms.shared_core.beamforming import (
     aperture_start_indices,
     aperture_window_1d,
     dynamic_aperture_channel_count,
+    interpolate_multi_angle_channel_samples,
+)
+from algorithms.shared_core.common import (
+    resolve_device,
     beamforming_depth_grid,
     beamformed_image_db,
-    interpolate_multi_angle_channel_samples,
     positive_odd_int,
     prepare_beamforming_input,
     print_physical_summary,
@@ -28,35 +35,36 @@ from algorithms.common import (
 )
 
 # ================= 命令行参数配置 =================
-parser = deepcopy(mv.parser)
-parser.description = "CMSAW Beamforming"
-# ---- CMSAW 核心参数 ----
-parser.add_argument(
-    "--lmax_ratio",
-    type=float,
-    default=0.5,
-    help="最大子阵列长度比例 Lmax = ratio x aperture_size",
-)
-parser.add_argument("--min_subarray_len", type=int, default=2, help="最小子阵列长度")
-parser.add_argument("--delta_max", type=float, default=1.0, help="对角线缩放因子最大值")
-parser.add_argument("--gamma", type=float, default=1.0, help="可选权重幂次;1 保留原始 CMSAW MSR")
-parser.add_argument(
-    "--clip_percentile",
-    type=float,
-    default=100.0,
-    help="可选权重裁剪百分位数;100 禁用裁剪",
-)
-parser.add_argument(
-    "--depth_smooth_rows",
-    type=positive_odd_int,
-    default=1,
-    help="深度平滑行数 (1=禁用)",
-)
+def build_parser(params=None):
+    parser = mv.build_parser(params)
+    parser.description = "CMSAW Beamforming"
+    # ---- CMSAW 核心参数 ----
+    parser.add_argument(
+        "--lmax_ratio",
+        type=float,
+        default=0.5,
+        help="最大子阵列长度比例 Lmax = ratio x aperture_size",
+    )
+    parser.add_argument("--min_subarray_len", type=int, default=2, help="最小子阵列长度")
+    parser.add_argument("--delta_max", type=float, default=1.0, help="对角线缩放因子最大值")
+    parser.add_argument("--gamma", type=float, default=1.0, help="可选权重幂次;1 保留原始 CMSAW MSR")
+    parser.add_argument(
+        "--clip_percentile",
+        type=float,
+        default=100.0,
+        help="可选权重裁剪百分位数;100 禁用裁剪",
+    )
+    parser.add_argument(
+        "--depth_smooth_rows",
+        type=positive_odd_int,
+        default=1,
+        help="深度平滑行数 (1=禁用)",
+    )
+    return parser
 
-args = None
+
 
 METHOD_NAME = "cmsaw"
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def validate_cmsaw_params(
@@ -82,7 +90,8 @@ def validate_cmsaw_params(
         raise ValueError("depth_smooth_rows must be a positive odd integer")
 
 
-def delayed_iq(sample, angle_idx, interp):
+def delayed_iq(sample, angle_idx, interp, device=None):
+    device = resolve_device(device)
     """Execute delayed iq."""
     i_data = torch.from_numpy(sample["I"][angle_idx]).to(device)
     q_data = torch.from_numpy(sample["Q"][angle_idx]).to(device)
@@ -304,9 +313,11 @@ class CMSAWBeamformerIQ:
         clip_percentile=100.0,
         depth_smooth_rows=1,
         options=None,
+        device=None,
     ):
         """Initialize the instance."""
-        self.options = options if options is not None else (args if args is not None else parser.parse_args([]))
+        self.device = resolve_device(device)
+        self.options = options if options is not None else build_parser().parse_args([])
         self.signal_domain = self.options.signal_domain
         validate_cmsaw_params(
             lmax_ratio,
@@ -347,6 +358,7 @@ class CMSAWBeamformerIQ:
             subarray_ratio=subarray_ratio,
             temporal_win=temporal_win,
             options=self.options,
+            device=self.device,
         )
         self.last_weight = None
         self.last_lengths = None
@@ -373,7 +385,7 @@ class CMSAWBeamformerIQ:
         angle_weights = []
         angle_lengths = []
         for angle_idx in range(len(selected_angles)):
-            data = delayed_iq(sample, np.array([angle_idx]), self.options.interp)
+            data = delayed_iq(sample, np.array([angle_idx]), self.options.interp, self.device)
             angle_weight, angle_length = cmsaw_weight_from_delayed_data(
                 data,
                 self.z_grid,
@@ -400,10 +412,10 @@ class CMSAWBeamformerIQ:
 
 
 # ================= 主程序 =================
-def main():
+def main(argv=None):
     """Run the command-line workflow."""
-    global args
-    args = parser.parse_args()
+    args = build_parser().parse_args(argv)
+    device = resolve_device()
     h5_path = resolve_project_path(args.h5_path, PROJECT_ROOT)
     output_dir = Path(args.output_dir) / METHOD_NAME
 
@@ -507,8 +519,7 @@ def main():
         delta_max=args.delta_max,
         gamma=args.gamma,
         clip_percentile=args.clip_percentile,
-        depth_smooth_rows=args.depth_smooth_rows,
-    )
+        depth_smooth_rows=args.depth_smooth_rows, options=args, device=device)
     with torch.no_grad():
         i_out, q_out, dt = run_beamformer(
             mv_bf,

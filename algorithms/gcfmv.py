@@ -1,22 +1,25 @@
 """Provide Python utilities for gcfmv."""
 
-from copy import deepcopy
-import sys
-from pathlib import Path
+# ruff: noqa: E402
 
 import numpy as np
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+if __package__:
+    from algorithms.bootstrap import initialize_project_path
+else:
+    from bootstrap import initialize_project_path
+
+PROJECT_ROOT = initialize_project_path(__file__)
 
 from algorithms import mv
-from algorithms.common import (
+from algorithms.shared_core.beamforming import generalized_coherence_factor
+from algorithms.shared_core.common import (
+    resolve_device,
     beamforming_depth_grid,
     beamformed_image_db,
     nonnegative_float,
     nonnegative_int,
-    generalized_coherence_factor,
     prepare_beamforming_input,
     print_physical_summary,
     resolve_project_path,
@@ -26,43 +29,41 @@ from algorithms.common import (
 )
 
 # ================= 命令行参数配置 =================
-parser = deepcopy(mv.parser)
-parser.description = "GCFMV Beamforming"
-parser.add_argument(
-    "--gcf_low_bins",
-    type=nonnegative_int,
-    default=1,
-    help="GCF低空间频率半宽;1表示保留中心频点及左右各1个频点",
-)
-parser.add_argument(
-    "--gcf_power",
-    type=nonnegative_float,
-    default=1.0,
-    help="GCF后加权指数;1为标准GCF,0表示退化为MV",
-)
-parser.add_argument(
-    "--gcf_tx_low_bins",
-    type=nonnegative_int,
-    default=None,
-    help="多角度 Tx 方向 GCF 低频半宽;默认沿用 gcf_low_bins",
-)
+def build_parser(params=None):
+    parser = mv.build_parser(params)
+    parser.description = "GCFMV Beamforming"
+    parser.add_argument(
+        "--gcf_low_bins",
+        type=nonnegative_int,
+        default=1,
+        help="GCF低空间频率半宽;1表示保留中心频点及左右各1个频点",
+    )
+    parser.add_argument(
+        "--gcf_power",
+        type=nonnegative_float,
+        default=1.0,
+        help="GCF后加权指数;1为标准GCF,0表示退化为MV",
+    )
+    parser.add_argument(
+        "--gcf_tx_low_bins",
+        type=nonnegative_int,
+        default=None,
+        help="多角度 Tx 方向 GCF 低频半宽;默认沿用 gcf_low_bins",
+    )
+    return parser
 
-args = None
+
 
 METHOD_NAME = "gcfmv"
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class RowDynamicMVBeamformerIQ(mv.RowDynamicMVBeamformerIQ):
     normalize_covariance = True
 
     def get_options(self):
-        return args if args is not None else parser.parse_args([])
-
-    def get_device(self):
-        return device
+        return build_parser().parse_args([])
 
     def weight_rx_output(self, output, data):
         if self.options.gcf_power == 0:
@@ -97,10 +98,10 @@ def generalized_coherence_factor_2d(data, tx_low_bins, rx_low_bins):
 
 
 # ================= 主程序 =================
-def main():
+def main(argv=None):
     """Run the command-line workflow."""
-    global args
-    args = parser.parse_args()
+    args = build_parser().parse_args(argv)
+    device = resolve_device()
     h5_path = resolve_project_path(args.h5_path, PROJECT_ROOT)
     output_dir = f"{args.output_dir}/{METHOD_NAME}"
 
@@ -200,8 +201,7 @@ def main():
         mv_dl=args.mv_dl,
         fbss=args.fbss,
         subarray_ratio=args.subarray_ratio,
-        temporal_win=args.temporal_win,
-    )
+        temporal_win=args.temporal_win, options=args, device=device)
 
     print(
         f"Processing GCF-MV {beamforming_mode} (DL={args.mv_dl}, GCF bins={args.gcf_low_bins}, power={args.gcf_power})...",

@@ -1,9 +1,13 @@
 import unittest
+import sys
+from pathlib import Path
 
 import torch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from algorithms import ccmv, cmsaw, mv
-from algorithms.common import normalized_mv_weights
+from algorithms.shared_core.beamforming import normalized_mv_weights
 
 
 class PaperFormulaTests(unittest.TestCase):
@@ -113,7 +117,7 @@ class PaperFormulaTests(unittest.TestCase):
                 torch.testing.assert_close(actual, target)
 
     def test_cmsaw_default_keeps_raw_paper_msr(self):
-        options = cmsaw.parser.parse_args([])
+        options = cmsaw.build_parser().parse_args([])
         self.assertEqual(options.gamma, 1.0)
         self.assertEqual(options.clip_percentile, 100.0)
         data = torch.tensor([[[[1.0, 2.0, 4.0, 8.0]]]], dtype=torch.complex64)

@@ -1,12 +1,16 @@
 import unittest
+import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 import torch
 from scipy.signal import filtfilt, firwin, hilbert, resample_poly
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from algorithms import mv
-from algorithms.shared_core.signals import rf_to_analytic, rf_to_iq
+from shared_core.signals import rf_to_analytic, rf_to_iq
 
 
 class SignalConversionTests(unittest.TestCase):
@@ -55,13 +59,13 @@ class SignalConversionTests(unittest.TestCase):
 
 class MVSignalDomainTests(unittest.TestCase):
     def beamformer(self, domain=None, *, fc=0.25, n_elem=1, angles=(0.0,), **options):
-        settings = mv.parser.parse_args([])
+        settings = mv.build_parser().parse_args([])
         settings.dynamic_aperture = False
         settings.interp = "linear"
         settings.window = "rect"
         vars(settings).update(options)
         arguments = {} if domain is None else {"signal_domain": domain}
-        with patch.object(mv, "device", torch.device("cpu")):
+        with patch.object(mv, "resolve_device", return_value=torch.device("cpu")):
             return mv.RowDynamicMVBeamformerIQ(
                 np.array([0.75], dtype=np.float32),
                 np.array([0.0], dtype=np.float32),

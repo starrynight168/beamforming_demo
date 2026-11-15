@@ -14,17 +14,18 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from evaluation.context import load_grids, read_phantom
+from evaluation.metrics import db_to_display
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 from matplotlib.patches import Patch
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-from evaluation.evaluate import db_to_display, load_grids, read_phantom  # noqa: E402
 
 MAX_METHOD_LABELS_LARGE_FONT = 12
 PAGE_MODEL_PALETTE = [

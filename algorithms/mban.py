@@ -1,5 +1,7 @@
 """Run MBAN inside the root beamforming comparison pipeline."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
@@ -7,15 +9,16 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import h5py
-import numpy as np
 import torch
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-ROOT = SCRIPT_DIR.parent
-sys.path.insert(0, str(ROOT))
+if __package__:
+    from algorithms.bootstrap import initialize_project_path
+else:
+    from bootstrap import initialize_project_path
 
-from algorithms.common import (
+ROOT = initialize_project_path(__file__)
+
+from algorithms.shared_core.common import (
     add_common_arguments,
     add_io_arguments,
     parse_selected_angles,
@@ -121,7 +124,7 @@ def main() -> None:
     if args.signal_domain is not None and args.signal_domain != spec.signal_domain:
         raise ValueError(f"checkpoint 使用 {spec.signal_domain}，不能按 {args.signal_domain} 推理")
     args.signal_domain = spec.signal_domain
-    from algorithms.common import load_from_h5
+    from algorithms.shared_core.common import load_from_h5
 
     sample = load_from_h5(h5_path, args.h5_sample_idx, signal_domain=args.signal_domain)
     angle_indices, _ = parse_selected_angles(sample.angles, args.select_angles)

@@ -5,9 +5,9 @@ import numpy as np
 import yaml
 from scipy.signal import firwin
 
-from algorithms.shared_core.signals import rf_to_analytic, rf_to_iq
-from data.h5_schema import require_h5_schema
-from algorithms.shared_core.normalization import storage_normalization_mode
+from shared_core.signals import rf_to_analytic, rf_to_iq
+from shared_core.h5_schema import require_h5_schema
+from shared_core.normalization import storage_normalization_mode
 
 
 def _require(hf, fields, message):
