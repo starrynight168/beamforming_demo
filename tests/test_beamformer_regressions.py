@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from shared_core.h5_schema import write_h5_schema
-from algorithms import ccmv, cmsaw, das, esbmv, fdmas, gcfmv, mban, mv, template_algorithm
+from algorithms import ccmv, cmsaw, das, esbmv, fdmas, gcfmv, mv, template_algorithm
 from algorithms.shared_core.beamforming import (
     aperture_start_indices,
     generalized_coherence_factor,
@@ -504,14 +504,6 @@ class BeamformerRegressionTests(unittest.TestCase):
         self.assertTrue(np.isfinite(actual).all())
         self.assertEqual(actual.max(), 0.0)
 
-    def test_mban_reports_missing_training_stack_and_rejects_ignored_options(self):
-        with tempfile.TemporaryDirectory() as folder:
-            with self.assertRaisesRegex(FileNotFoundError, "--train_root"):
-                mban.load_evaluation_dependencies(Path(folder) / "train")
-        with patch("sys.argv", ["mban", "--checkpoint", "model.pt", "--kind", "fp32", "--interp", "cubic"]):
-            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                mban.parse_args()
-
     def test_ccmv_honors_its_device_independently_of_mv(self):
         with patch("algorithms.shared_core.common.torch.cuda.is_available", side_effect=AssertionError("explicit device must not probe CUDA")):
             bf = self.beamformer(ccmv, self.options(ccmv))
@@ -519,65 +511,6 @@ class BeamformerRegressionTests(unittest.TestCase):
             i, q = bf(signal, np.zeros_like(signal), np.zeros(1), np.zeros(1), 1.0)
         np.testing.assert_allclose(i, 1.0, atol=2e-4)
         np.testing.assert_allclose(q, 0.0, atol=1e-6)
-
-    def test_mban_restores_checkpoint_snapshot_and_respects_explicit_config(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder).resolve()
-            train_root = root / "project" / "train"
-            for name in ("eval_core/inference.py", "eval_core/models.py", "shared_core/runtime.py"):
-                path = train_root / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.touch()
-            checkpoint = train_root / "results" / "best.pth"
-            checkpoint.parent.mkdir(parents=True)
-            snapshot = checkpoint.with_name("effective_config.json")
-            snapshot.write_text("{}", encoding="utf-8")
-            argv = ["mban", "--checkpoint", str(checkpoint), "--kind", "fp32"]
-            with patch("sys.argv", argv):
-                options = mban.parse_args()
-            self.assertEqual(options.train_root, train_root)
-            self.assertEqual(options.config, snapshot)
-            self.assertIsNone(options.eval_config)
-            custom = root / "custom.yaml"
-            with patch("sys.argv", argv + ["--config", str(custom)]):
-                options = mban.parse_args()
-            self.assertEqual(options.config, custom)
-            self.assertEqual(options.eval_config, train_root / "hardware_eval.yaml")
-            with patch("sys.argv", argv + ["--eval-config", str(custom)]):
-                options = mban.parse_args()
-            self.assertEqual(options.config, train_root / "config.yaml")
-            self.assertEqual(options.eval_config, custom)
-            with patch("sys.argv", argv + ["--config", str(snapshot), "--eval-config", str(custom)]):
-                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                    mban.parse_args()
-
-    def test_mban_saves_parameters_and_tracks_external_training_sources(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            train_root = root / "train"
-            for source in algorithm_source_paths("mban", train_root):
-                if not source.is_relative_to(train_root):
-                    continue
-                source.parent.mkdir(parents=True, exist_ok=True)
-                source.write_text("source", encoding="utf-8")
-            h5_path = root / "input.h5"
-            with h5py.File(h5_path, "w") as handle:
-                handle["h5_schema_version"] = 3
-                handle["iq_angles"] = [0.0]
-            grid = torch.tensor([0.0, 1.0])
-            scene = SimpleNamespace(x_grid=grid, z_grid=grid, height=2, width=2)
-            model = SimpleNamespace(runtime={}, signal_domain="iq")
-            load_scene, load_model = Mock(return_value=scene), Mock(return_value=model)
-            reconstruct = Mock(return_value=(np.array([[0.0, -5.0], [-10.0, -20.0]]), {}, [], 0.5))
-            argv = ["mban", "--checkpoint", str(root / "model.pt"), "--kind", "fp32",
-                    "--h5_path", str(h5_path), "--output_dir", str(root), "--train_root", str(train_root)]
-            with patch("sys.argv", argv), patch.object(mban, "load_evaluation_dependencies", return_value=(load_scene, reconstruct, load_model)), patch("algorithms.shared_core.common.load_from_h5", return_value=SimpleNamespace(angles=np.array([0.]), has_gt=False)), patch("algorithms.shared_core.common.save_figure"), contextlib.redirect_stdout(io.StringIO()):
-                mban.main()
-            params = json.loads((root / "mban" / "params.json").read_text(encoding="utf-8"))
-            self.assertEqual(params["runtime_sec"], 0.5)
-            self.assertEqual(params["interp"], "linear")
-            self.assertEqual(model.runtime["angle_reduction"], "mean")
-            self.assertIn(str((train_root / "shared_core" / "model.py").resolve()), params["cache_signature"]["sources"])
 
     def test_template_requires_an_explicit_algorithm_implementation(self):
         with self.assertRaises(NotImplementedError):

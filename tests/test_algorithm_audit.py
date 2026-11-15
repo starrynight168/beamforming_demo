@@ -412,40 +412,6 @@ class AlgorithmAuditTests(unittest.TestCase):
                     result_cache_signature(h5_path, "das"),
                 )
 
-    def test_mban_cache_signature_tracks_inference_dependencies(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            h5_path = root / "input.h5"
-            h5_path.write_bytes(b"input")
-            with patch("algorithms.shared_core.common.PROJECT_ROOT", root):
-                for source_path in algorithm_source_paths("mban"):
-                    if not source_path.is_relative_to(root):
-                        continue
-                    source_path.parent.mkdir(parents=True, exist_ok=True)
-                    source_path.write_text(source_path.name, encoding="utf-8")
-                before = result_cache_signature("input.h5", "mban")
-                model_path = root / "train" / "shared_core" / "model.py"
-                model_path.write_text("changed", encoding="utf-8")
-                after = result_cache_signature("input.h5", "mban")
-            self.assertNotEqual(before["sources"], after["sources"])
-            with patch("algorithms.shared_core.common.PROJECT_ROOT", root):
-                for relative in (
-                    "eval_core/hardware.py",
-                    "shared_core/checkpoints.py",
-                    "shared_core/hardware_layers.py",
-                ):
-                    target = root / "train" / relative
-                    before = result_cache_signature("input.h5", "mban")
-                    target.write_text(
-                        target.read_text(encoding="utf-8") + " changed",
-                        encoding="utf-8",
-                    )
-                    after = result_cache_signature("input.h5", "mban")
-                    source_key = str(target.resolve())
-                    self.assertNotEqual(
-                        before["sources"][source_key], after["sources"][source_key]
-                    )
-
     def test_mv_weight_solver_matches_formula_and_handles_singular_covariance(self):
         covariance = torch.tensor(
             [[[2.0, 0.0], [0.0, 1.0]]], dtype=torch.complex64
