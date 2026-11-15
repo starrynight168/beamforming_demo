@@ -28,7 +28,6 @@ from algorithms.shared_core.beamforming import (
     spatial_temporal_covariance,
 )
 from algorithms.shared_core.common import (
-    algorithm_source_paths,
     ground_truth_db,
     parse_selected_angles,
     result_cache_signature,

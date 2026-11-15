@@ -26,32 +26,47 @@ beamforming_demo/
   ├── config.yaml               # 统一全局实验与算法默认超参数配置文件
   ├── run_one.py                # 单场景多算法批量重建、对比拼接与指标评估入口
   ├── run_all.py                # 一键运行配置中所有场景的批处理脚本
-  ├── tools/                    # 辅助工具与专项实验脚本
-  │    ├── run_wizard_cn.py     # 面向交互式超声成像配置的中文引导向导
-  │    └── run_ablation_cn.py   # 用于算法超参数调优与指标自动分析的消融实验工具
-  │
   ├── data/                     # 数据管理目录
   │    ├── pack_data.py         # 原始 PICMUS 格式数据打包为工程自描述 H5 的脚本
   │    ├── check_data.py        # 针对 H5 数据集类型、形状、完整性、NaN/Inf 的体检工具
+  │    ├── h5_schema.py         # H5 Schema 版本校验
   │    ├── simulation.h5        # 打包后的仿真数据（暗斑/散斑与分辨率/畸变靶点）
   │    ├── experiments.h5       # 打包后的水槽实验数据（暗斑/散斑与分辨率/畸变靶点）
   │    └── in_vivo.h5           # 打包后的在体颈动脉数据（横切面与纵切面）
   │
   ├── algorithms/               # 核心重建算法及公共工具模块
-  │    ├── common.py            # 公共参数、H5 数据、数值、路径和输出工具
+  │    ├── bootstrap.py         # 算法运行环境初始化
   │    ├── das.py               # DAS 重建脚本
   │    ├── mv.py                # MV 重建脚本
+  │    ├── ccmv.py              # CCMV 重建脚本
   │    ├── esbmv.py             # ESBMV 重建脚本
   │    ├── gcfmv.py             # GCF-MV 重建脚本
   │    ├── cmsaw.py             # CMSAW 重建脚本
-  │    └── fdmas.py             # F-DMAS 重建脚本
+  │    ├── fdmas.py             # F-DMAS 重建脚本
+  │    ├── shared_core/         # 算法共享的波束形成与运行时逻辑
+  │    └── template_algorithm.py
   │
-  ├── algorithms/template_algorithm.py # 添加新算法时的标准脚手架模板
+  ├── shared_core/               # H5、信号、图像与归一化公共模块
+  │    ├── data.py
+  │    ├── h5_schema.py
+  │    ├── images.py
+  │    ├── normalization.py
+  │    └── signals.py
   │
   ├── evaluation/               # 成像指标计算与绘图模块
+  │    ├── context.py           # H5 与 PICMUS 评估上下文
   │    ├── evaluate.py          # controlled phantom 场景的 PICMUS 语义定量指标核心
+  │    ├── metrics.py           # 分辨率与对比度指标
   │    └── plot_metrics.py      # 指标对比柱状图、横向波束剖面图（Profile）自动绘制工具
   │
+  ├── tools/                    # 工具菜单与交互入口
+  │    ├── tools.py             # 统一工具菜单
+  │    ├── cn_core/              # 中文工具入口
+  │    ├── code/                 # 工具实现
+  │    └── shared/               # 工具共享逻辑
+  │
+  ├── tests/                    # 算法与运行时回归测试
+  ├── evaluation/tests/         # 评估测试
   └── results/                  # 重建图像与评估报告输出目录（自动创建）
 ```
 
@@ -170,7 +185,7 @@ python run_all.py --only simulation_contrast_speckle,carotid_cross
 
 运行命令：
 ```bash
-python tools/run_wizard_cn.py
+python tools/cn_core/run_wizard_cn.py
 ```
 
 ### 2. 参数消融实验工具 (`run_ablation_cn.py`)
@@ -181,10 +196,10 @@ python tools/run_wizard_cn.py
 
 运行命令：
 ```bash
-python tools/run_ablation_cn.py
+python tools/cn_core/run_ablation_cn.py
 ```
 
-声速搜索 `tools/ablate_sound_speed.py --sections` 至少为 3，默认 4；两段划分无法保证搜索区间收缩。
+声速搜索 `tools/code/ablate_sound_speed.py --sections` 至少为 3，默认 4；两段划分无法保证搜索区间收缩。
 
 ---
 
@@ -194,7 +209,7 @@ python tools/run_ablation_cn.py
 
 YAML 场景不再配置 `allow_evaluation`；`run_one.py --no_evaluate` 可主动关闭评估，旧开关字段会明确报错。评估入口不读取根目录 YAML。H5 相对模体路径以本项目 `data/PICMUS` 为基准；显式 CLI 参数可补充缺失的类型或模体路径，但类型不得与 H5 元数据冲突，模体文件仍须通过官方定义校验。
 
-单独运行评估时，`--methods auto` 从同目录 `run_params.json` 读取当前算法及标签，或模型及基线记录。自动化回归测试位于 `tests/` 和 `evaluation/tests/`。`tools/evaluate_point_targets.py` 依赖 `data.scripts.simulate_point_targets`，该模块未包含在本项目中，因此此入口不能在 `beamforming_demo` 内完整运行。
+单独运行评估时，`--methods auto` 从同目录 `run_params.json` 读取当前算法及标签，或模型及基线记录。自动化回归测试位于 `tests/` 和 `evaluation/tests/`。点靶评价入口为 `tools/cn_core/evaluate_point_targets_cn.py`，实现位于 `tools/code/evaluate_point_targets.py`；它依赖本项目未包含的 `data.scripts.simulate_point_targets`，因此不能在 `beamforming_demo` 内完整运行。
 
 本工程内置的评估计算核心（`evaluation/evaluate.py`）在四个 controlled phantom 场景中对齐 PICMUS 挑战赛官方 MATLAB 算法语义：
 - **对比度 (Contrast)**: 基于官方同心环形 ROI 划定，并且方差计算使用样本方差（$N-1$ 自由度），保障与 MATLAB 的 `var()` 结果完全一致；

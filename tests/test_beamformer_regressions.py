@@ -27,7 +27,6 @@ from algorithms.shared_core.beamforming import (
 )
 from algorithms.shared_core.common import (
     WINDOW_CHOICES,
-    algorithm_source_paths,
     envelope_to_db,
     merge_common_params,
 )
