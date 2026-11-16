@@ -3,6 +3,18 @@ from .interactive import ROOT
 
 TOOLS = (
     {
+        "name": "四场景复数输入归一化对比",
+        "entry": "tools.code.compare_input_normalization",
+        "script": "compare_input_normalization.py",
+        "mode": "native",
+    },
+    {
+        "name": "点靶重建图与分辨率指标",
+        "entry": "tools.code.generate_point_target_images",
+        "script": "generate_point_target_images.py",
+        "mode": "native",
+    },
+    {
         "name": "RF/解析 RF/IQ/STFT 频带敏感性对比",
         "entry": "tools.cn_core.compare_rf_iq_cn",
         "script": "compare_rf_iq.py",
@@ -32,7 +44,7 @@ TOOLS = (
         "mode": "native",
     },
     {
-        "name": "活体成像网格重建",
+        "name": "重建网格扫描",
         "entry": "tools.code.rebeamform_invivo_grid",
         "script": "rebeamform_invivo_grid.py",
         "mode": "native",
@@ -69,11 +81,6 @@ TOOLS = (
         "entry": "tools.code.run_ablation",
         "script": "run_ablation.py",
         "mode": "native",
-    },
-    {
-        "name": "点靶分辨率评价",
-        "entry": "tools.cn_core.evaluate_point_targets_cn",
-        "script": "evaluate_point_targets.py",
     },
     {
         "name": "归一化示意图",

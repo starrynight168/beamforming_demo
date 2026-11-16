@@ -1,4 +1,4 @@
-"""Run a sound-speed sweep across the standard scenes and an in-vivo sample."""
+"""Run a sound-speed sweep across the four standard scenes and optional in-vivo scenes."""
 
 import argparse
 import csv
@@ -106,9 +106,9 @@ def select_scenes(config):
         )
     picmus = [scene for scene in selected if scene["role"] == "picmus"]
     in_vivo = [scene for scene in selected if scene["role"] == "in_vivo"]
-    if len(picmus) != 4 or not in_vivo:
+    if len(picmus) != 4:
         raise ValueError(
-            "配置需要包含四个 PICMUS 场景和至少一个活体场景；"
+            "配置需要包含四个 PICMUS 场景；活体场景可选；"
             f"当前识别到 {len(picmus)} 个 PICMUS、{len(in_vivo)} 个活体。",
         )
     return selected
@@ -237,7 +237,7 @@ def save_c_sweep_curve(records, scenes, output_dir):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="四场景和活体的 MV 声速消融")
+    parser = argparse.ArgumentParser(description="四场景及可选活体的 MV 声速消融")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--c-values", default=None, help="逗号分隔，例如 1460,1540,1620")
     parser.add_argument("--output-dir", default=None)

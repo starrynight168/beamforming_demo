@@ -199,7 +199,7 @@ python tools/cn_core/run_wizard_cn.py
 python tools/cn_core/run_ablation_cn.py
 ```
 
-声速搜索 `tools/code/ablate_sound_speed.py --sections` 至少为 3，默认 4；两段划分无法保证搜索区间收缩。
+声速消融运行 `python -m tools.code.ablate_sound_speed --c-values 1460,1540,1620`；配置可只包含四个 PICMUS 场景，也可额外包含活体场景。
 
 ---
 
@@ -209,7 +209,18 @@ python tools/cn_core/run_ablation_cn.py
 
 YAML 场景不再配置 `allow_evaluation`；`run_one.py --no_evaluate` 可主动关闭评估，旧开关字段会明确报错。评估入口不读取根目录 YAML。H5 相对模体路径以本项目 `data/PICMUS` 为基准；显式 CLI 参数可补充缺失的类型或模体路径，但类型不得与 H5 元数据冲突，模体文件仍须通过官方定义校验。
 
-单独运行评估时，`--methods auto` 从同目录 `run_params.json` 读取当前算法及标签，或模型及基线记录。自动化回归测试位于 `tests/` 和 `evaluation/tests/`。点靶评价入口为 `tools/cn_core/evaluate_point_targets_cn.py`，实现位于 `tools/code/evaluate_point_targets.py`；它依赖本项目未包含的 `data.scripts.simulate_point_targets`，因此不能在 `beamforming_demo` 内完整运行。
+单独运行评估时，`--methods auto` 从同目录 `run_params.json` 读取当前算法及标签，或模型及基线记录。自动化回归测试位于 `tests/` 和 `evaluation/tests/`。标准四场景的归一化对比和点靶图像工具读取根目录 `config.yaml`；点靶指标只在两个 resolution 场景计算：
+
+```powershell
+python -m tools.code.compare_input_normalization --signal-domain iq
+python -m tools.code.generate_point_target_images --algorithms das mv
+```
+
+网格扫描默认读取 `config.yaml` 的 `simulation_contrast_speckle` 样本，可用 `--scene` 选择其他标准场景，或用 `--data`、`--frame` 指定 H5；扫描算法固定为 DAS。
+
+MV 对角加载点靶消融所需的 `meta` JSON 由同一样本的标准评估输出生成，其中 `h5_sample_idx` 必须与 `--sample-index` 一致。
+
+旧的合成单点信号域消融 `tools/code/evaluate_point_targets.py` 依赖 `data.scripts.simulate_point_targets`，不属于 `beamforming_demo` 的共享工具菜单。
 
 本工程内置的评估计算核心（`evaluation/evaluate.py`）在四个 controlled phantom 场景中对齐 PICMUS 挑战赛官方 MATLAB 算法语义：
 - **对比度 (Contrast)**: 基于官方同心环形 ROI 划定，并且方差计算使用样本方差（$N-1$ 自由度），保障与 MATLAB 的 `var()` 结果完全一致；

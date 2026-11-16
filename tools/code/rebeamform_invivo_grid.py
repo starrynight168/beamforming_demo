@@ -2,10 +2,7 @@ import argparse
 import itertools
 import math
 import sys
-import tempfile
-import time
 from datetime import datetime
-from dataclasses import replace
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -14,12 +11,18 @@ import torch
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-TRAIN = ROOT / "train"
-sys.path.insert(0, str(TRAIN))
 sys.path.insert(0, str(ROOT))
 
-from train.eval_core.inference import load_scene, reconstruct
-from train.eval_core.models import load_evaluation_model
+from algorithms.das import DASBeamformerIQ
+from algorithms.shared_core.common import (
+    add_common_arguments,
+    beamformed_image_db,
+    beamforming_depth_grid,
+    prepare_beamforming_input,
+    run_beamformer,
+    validate_db_output,
+)
+from evaluation.context import read_sample_meta
 from tools.shared.workflow_common import TOOLS_OUTPUT_ROOT, inspect_h5
 from tools.shared.run_output import (
     emit,
@@ -32,38 +35,25 @@ from tools.shared.run_output import (
 )
 
 
-DEFAULT_DATA = ROOT / "data" / "volunteer_005.h5"
-DEFAULT_CONFIGS = {
-    "fp32": TRAIN
-    / "results"
-    / "MAIN"
-    / "configs"
-    / "figure_experiments"
-    / "main_fp32_roi05.yaml",
-    "qat": TRAIN
-    / "results"
-    / "MAIN"
-    / "configs"
-    / "figure_experiments"
-    / "main_qat_roi05.yaml",
-}
-DEFAULT_CHECKPOINTS = {
-    "fp32": TRAIN / "results" / "MAIN" / "model" / "FP32" / "roi05" / "best_val.pth",
-    "qat": TRAIN / "results" / "MAIN" / "model" / "QAT" / "roi05" / "best_val.pth",
-}
 DEFAULT_OUTPUT = TOOLS_OUTPUT_ROOT / "rebeamform_invivo_grid"
+DEFAULT_SCENE = "simulation_contrast_speckle"
+SCENE_IDS = (
+    "simulation_contrast_speckle",
+    "simulation_resolution_distortion",
+    "experiments_contrast_speckle",
+    "experiments_resolution_distortion",
+)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="在多个横向/深度网格上重新重建 H5 样本的 MBAN B-mode 图像。"
+        description="使用 DAS 扫描横向视野、深度范围和像素数。"
     )
-    parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
-    parser.add_argument("--frame", type=int, default=300, help="H5 帧号，从 1 开始。")
-    parser.add_argument("--model-name", default="roi05")
-    parser.add_argument("--model-type", choices=("fp32", "qat"), default="fp32")
-    parser.add_argument("--checkpoint", type=Path)
-    parser.add_argument("--config", type=Path)
+    add_common_arguments(parser)
+    parser.add_argument("--config", type=Path, default=ROOT / "config.yaml")
+    parser.add_argument("--scene", choices=SCENE_IDS, default=DEFAULT_SCENE)
+    parser.add_argument("--data", type=Path, help="显式指定 H5 时覆盖 config 场景。")
+    parser.add_argument("--frame", type=int, help="H5 帧号，从 1 开始；默认使用 config 的 sample_idx。")
     parser.add_argument("--x-range-mm", type=float, nargs=2, metavar=("MIN", "MAX"))
     parser.add_argument("--z-range-mm", type=float, nargs=2, metavar=("MIN", "MAX"))
     parser.add_argument(
@@ -92,10 +82,11 @@ def parse_args() -> argparse.Namespace:
         type=parse_int_list,
         help="逗号分隔的深度像素数；省略时保持原深度采样间距。",
     )
-    parser.add_argument("--micro-batch", type=int, default=8192)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--output-dir", type=Path)
-    return parser.parse_args()
+    parser.add_argument("--row_block", type=int, default=24)
+    parser.add_argument("--aperture_mode", choices=("discrete", "geometry"), default="discrete")
+    return parser.parse_args(argv)
 
 
 def parse_float_list(text: str) -> list[float]:
@@ -123,24 +114,17 @@ def resolve_path(path: Path) -> Path:
     return path.resolve() if path.is_absolute() else (ROOT / path).resolve()
 
 
-def compatible_config(config_path: Path) -> tuple[Path, Path | None]:
-    if config_path.suffix.lower() not in {".yaml", ".yml"}:
-        return config_path, None
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    if not isinstance(config, dict):
-        raise ValueError(f"配置文件不是 YAML 字典：{config_path}")
-    data_config = config.get("data")
-    if (
-        not isinstance(data_config, dict)
-        or data_config.pop("roi_subset_file", None) is None
-    ):
-        return config_path, None
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", suffix=".yaml", dir=config_path.parent, delete=False
-    ) as handle:
-        yaml.safe_dump(config, handle, sort_keys=False)
-        temporary_path = Path(handle.name)
-    return temporary_path, temporary_path
+def configured_scene(config_path: Path, scene_id: str) -> tuple[Path, int]:
+    with resolve_path(config_path).open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream) or {}
+    scenes = config.get("scenes")
+    if not isinstance(scenes, list):
+        raise ValueError("config.yaml 必须包含 scenes 列表")
+    matches = [scene for scene in scenes if isinstance(scene, dict) and scene.get("id") == scene_id]
+    if len(matches) != 1:
+        raise ValueError(f"config.yaml 中必须恰好包含场景 {scene_id!r}")
+    scene = matches[0]
+    return resolve_path(Path(scene["h5_path"])), int(scene.get("sample_idx", 0)) + 1
 
 
 def make_grid(
@@ -162,10 +146,10 @@ def make_grid(
 
 
 def make_ranges(
-    scene, args: argparse.Namespace
+    x_grid: np.ndarray, z_grid: np.ndarray, args: argparse.Namespace
 ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
-    native_x = scene.x_grid.cpu().numpy() * 1000.0
-    native_z = scene.z_grid.cpu().numpy() * 1000.0
+    native_x = numpy_grid(x_grid).astype(np.float64) * 1000.0
+    native_z = numpy_grid(z_grid).astype(np.float64) * 1000.0
     if args.x_range_mm is not None and args.widths_mm is not None:
         raise ValueError("--x-range-mm 与 --widths-mm 只能选一个")
     if args.z_range_mm is not None and args.depth_lengths_mm is not None:
@@ -337,126 +321,144 @@ def save_grid_comparison(
     save_figure(fig, output_dir / "grid_comparison.png", dpi=400)
 
 
+def numpy_grid(grid) -> np.ndarray:
+    if isinstance(grid, torch.Tensor):
+        grid = grid.detach().cpu().numpy()
+    return np.asarray(grid, dtype=np.float32)
+
+
+def run_das(input_data, x_grid, z_grid, args, device):
+    sample = input_data.sample
+    c = sample.c
+    compute_z = beamforming_depth_grid(z_grid, c, sample.fs, args.signal_domain)
+    beamformer = DASBeamformerIQ(
+        compute_z, x_grid, sample.n_elem, sample.pitch, c, sample.fc, sample.fs,
+        input_data.t0, sample.angles, options=args, device=device,
+    )
+    i_out, q_out, elapsed = run_beamformer(
+        beamformer,
+        input_data.i_data,
+        input_data.q_data,
+        input_data.selected_angles,
+        input_data.t0,
+        sample.fs,
+        device,
+    )
+    image_db = beamformed_image_db(
+        i_out,
+        q_out,
+        compute_z,
+        z_grid,
+        sample.fc,
+        args.tgc,
+        args.tgc_alpha,
+        args.signal_domain,
+    )
+    return validate_db_output(image_db, (len(z_grid), len(x_grid)), "das"), elapsed
+
+
+def das_config(args):
+    return {
+        "algorithm": "das",
+        "signal_domain": args.signal_domain,
+        "select_angles": args.select_angles,
+        "f_number": args.f_number,
+        "dynamic_aperture": args.dynamic_aperture,
+        "window": args.window,
+        "interp": args.interp,
+        "tgc": args.tgc,
+        "tgc_alpha": args.tgc_alpha,
+        "row_block": args.row_block,
+        "aperture_mode": args.aperture_mode,
+    }
+
+
 def main() -> None:
     args = parse_args()
-    if args.frame < 1 or args.micro_batch < 1:
-        raise ValueError("frame 和 micro-batch 必须为正整数")
-    data_path = resolve_path(args.data)
-    checkpoint_path = resolve_path(
-        args.checkpoint or DEFAULT_CHECKPOINTS[args.model_type]
-    )
-    config_path = resolve_path(args.config or DEFAULT_CONFIGS[args.model_type])
-    if (
-        not data_path.is_file()
-        or not checkpoint_path.is_file()
-        or not config_path.is_file()
-    ):
-        raise FileNotFoundError("data、checkpoint 或 config 文件不存在")
+    if args.data is None:
+        data_path, default_frame = configured_scene(args.config, args.scene)
+        scene_id = args.scene
+    else:
+        data_path, default_frame = resolve_path(args.data), 1
+        scene_id = None
+    args.frame = args.frame if args.frame is not None else default_frame
+    if args.frame < 1:
+        raise ValueError("frame 必须为正整数")
+    if not data_path.is_file():
+        raise FileNotFoundError(f"H5 文件不存在：{data_path}")
     h5_info = inspect_h5(data_path)
     if args.frame > h5_info["n"]:
         raise IndexError(f"frame {args.frame} 超出 H5 样本数 {h5_info['n']}")
-    source_label = "In-vivo" if h5_info["in_vivo"][args.frame - 1] else "Simulation"
+    sample_meta = read_sample_meta(data_path, args.frame - 1)
+    phantom_source = sample_meta["phantom_source"]
+    if not phantom_source:
+        raise ValueError("所选 H5 样本缺少 phantom_source 元数据")
+    source_label = {
+        "in_vivo": "In-vivo",
+        "simulation": "Simulation",
+        "experiments": "Experiments",
+    }.get(phantom_source, phantom_source.replace("_", " ").title())
+    source_group = phantom_source if phantom_source in {"in_vivo", "simulation", "experiments"} else "other"
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("请求 CUDA，但当前环境没有可用 CUDA 设备")
     device = torch.device(
-        "cuda"
-        if args.device == "auto" and torch.cuda.is_available()
-        else "cpu"
-        if args.device == "auto"
-        else args.device
+        "cuda" if args.device == "auto" and torch.cuda.is_available()
+        else "cpu" if args.device == "auto" else args.device
     )
 
-    runtime_config, temporary_config = compatible_config(config_path)
-    try:
-        spec = load_evaluation_model(
-            args.model_name,
-            checkpoint_path,
-            args.model_type,
-            device,
-            config_path=runtime_config,
-        )
-    finally:
-        if temporary_config is not None:
-            temporary_config.unlink(missing_ok=True)
-
-    scene = load_scene(
-        data_path,
-        args.frame - 1,
-        gt_key=None,
-        signal_domain=spec.signal_domain,
+    input_data = prepare_beamforming_input(
+        data_path, args.frame - 1, args.select_angles, signal_domain=args.signal_domain
     )
-    x_ranges, z_ranges = make_ranges(scene, args)
+    native_x, native_z = input_data.sample.x_grid, input_data.sample.z_grid
+    x_ranges, z_ranges = make_ranges(native_x, native_z, args)
     width_counts = args.width_pixels or [None]
     depth_counts = args.depth_pixels or [None]
-    if len(set(width_counts)) != len(width_counts) or len(set(depth_counts)) != len(
-        depth_counts
-    ):
+    if len(set(width_counts)) != len(width_counts) or len(set(depth_counts)) != len(depth_counts):
         raise ValueError("像素数列表不能包含重复值")
     grids = list(itertools.product(x_ranges, z_ranges, width_counts, depth_counts))
     if len(grids) > 36:
         raise ValueError("一次最多重建 36 个网格组合")
 
+    native_x = numpy_grid(native_x)
+    native_z = numpy_grid(native_z)
     sample_tag = data_path.stem.replace("volunteer_", "v", 1)
     if args.output_dir is None:
-        output_group = (
-            "in_vivo_grid" if source_label == "In-vivo" else "simulation_grid"
-        )
+        output_group = f"{source_group}_grid"
         run_parent = DEFAULT_OUTPUT / output_group / f"{sample_tag}_f{args.frame}"
         output_root = resolve_output_dir(
-            "rebeamform_invivo_grid",
-            run_parent / datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
+            "rebeamform_invivo_grid", run_parent / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         )
     else:
-        output_root = resolve_output_dir(
-            "rebeamform_invivo_grid", resolve_path(args.output_dir)
-        )
+        output_root = resolve_output_dir("rebeamform_invivo_grid", resolve_path(args.output_dir))
     prepare_output_tree(output_root)
-
     set_plot_style()
-    emit(
-        output_root,
-        "prepare",
-        f"重建 {len(grids)} 个网格；样本 {sample_tag}，帧 {args.frame}。",
-    )
+    emit(output_root, "prepare", f"DAS 扫描 {len(grids)} 个网格；样本 {sample_tag}，帧 {args.frame}。")
     write_json(
         output_root / "run_config.json",
         {
+            "algorithm": "das",
             "data": str(data_path),
             "source_type": source_label,
+            "phantom_mode": sample_meta["phantom_mode"],
+            "phantom_source": phantom_source,
+            "config_scene": scene_id,
             "frame": args.frame,
-            "model_name": args.model_name,
-            "model_type": args.model_type,
-            "checkpoint": str(checkpoint_path),
-            "config": str(config_path),
+            "signal_domain": args.signal_domain,
+            "speed_of_sound_m_s": input_data.sample.c,
             "device": str(device),
-            "micro_batch": args.micro_batch,
             "x_ranges_mm": x_ranges,
             "z_ranges_mm": z_ranges,
             "width_pixels": width_counts,
             "depth_pixels": depth_counts,
+            "algorithm_parameters": das_config(args),
         },
     )
+
     results = []
-    for index, (
-        x_range_requested,
-        z_range_requested,
-        width_count,
-        depth_count,
-    ) in enumerate(grids, 1):
-        x_grid = make_grid(
-            scene.x_grid.cpu().numpy(), list(x_range_requested), width_count
-        )
-        z_grid = make_grid(
-            scene.z_grid.cpu().numpy(), list(z_range_requested), depth_count
-        )
-        output_scene = replace(
-            scene, x_grid=torch.from_numpy(x_grid), z_grid=torch.from_numpy(z_grid)
-        )
-        started = time.perf_counter()
-        image_db, _, _, _ = reconstruct(
-            spec, output_scene, device, args.micro_batch, collect_weight_stats=False
-        )
-        elapsed = time.perf_counter() - started
+    for index, (x_range_requested, z_range_requested, width_count, depth_count) in enumerate(grids, 1):
+        x_grid = make_grid(native_x, list(x_range_requested), width_count)
+        z_grid = make_grid(native_z, list(z_range_requested), depth_count)
+        image_db, elapsed = run_das(input_data, x_grid, z_grid, args, device)
         x_mm = x_grid.astype(np.float64) * 1000.0
         z_mm = z_grid.astype(np.float64) * 1000.0
         x_range = (round(float(x_mm[0]), 4), round(float(x_mm[-1]), 4))
@@ -469,8 +471,7 @@ def main() -> None:
             f"_z{number_token(z_range[0])}h{number_token(depth_mm)}_{len(x_grid)}x{len(z_grid)}"
         )
         output_dir = output_root / folder
-        figure_dir = output_dir / "figures"
-        data_dir = output_dir / "data"
+        figure_dir, data_dir = output_dir / "figures", output_dir / "data"
         figure_dir.mkdir(parents=True, exist_ok=True)
         data_dir.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
@@ -479,14 +480,11 @@ def main() -> None:
             x_grid_mm=x_mm.astype(np.float32),
             z_grid_mm=z_mm.astype(np.float32),
         )
-        run_config = {
+        run_config = das_config(args) | {
             "data": str(data_path),
             "source_type": source_label,
             "frame": args.frame,
-            "model_name": args.model_name,
-            "model_type": args.model_type,
-            "checkpoint": str(checkpoint_path),
-            "config": str(config_path),
+            "speed_of_sound_m_s": input_data.sample.c,
             "device": str(device),
             "x_range_mm": list(x_range),
             "z_range_mm": list(z_range),
@@ -494,18 +492,10 @@ def main() -> None:
             "depth_pixels": int(len(z_grid)),
             "dx_mm": round(float(np.diff(x_mm).mean()), 6),
             "dz_mm": round(float(np.diff(z_mm).mean()), 6),
-            "micro_batch": args.micro_batch,
             "beamforming_seconds": elapsed,
         }
         write_json(output_dir / "run_config.json", run_config)
-        save_bmode(
-            image_db,
-            x_range,
-            z_range,
-            source_label,
-            args.frame,
-            figure_dir,
-        )
+        save_bmode(image_db, x_range, z_range, source_label, args.frame, figure_dir)
         results.append(
             {
                 "index": index,
@@ -522,31 +512,14 @@ def main() -> None:
                 "output_dir": str(output_dir),
             }
         )
-        emit(
-            output_root,
-            "progress",
-            f"{index}/{len(grids)}：{folder}（{elapsed:.2f} 秒）。",
-        )
+        emit(output_root, "progress", f"DAS {index}/{len(grids)}：{folder}（{elapsed:.2f} 秒）。")
 
     summary_path = output_root / "metrics" / "grid_sweep_summary.csv"
     fields = (
-        "index",
-        "width_mm",
-        "depth_mm",
-        "x_range_mm",
-        "z_range_mm",
-        "width_pixels",
-        "depth_pixels",
-        "dx_mm",
-        "dz_mm",
-        "beamforming_seconds",
-        "output_dir",
+        "index", "width_mm", "depth_mm", "x_range_mm", "z_range_mm",
+        "width_pixels", "depth_pixels", "dx_mm", "dz_mm", "beamforming_seconds", "output_dir",
     )
-    write_csv(
-        summary_path,
-        ({key: result[key] for key in fields} for result in results),
-        fields,
-    )
+    write_csv(summary_path, ({key: result[key] for key in fields} for result in results), fields)
     if len(results) > 1:
         save_grid_comparison(results, output_root / "figures", source_label, args.frame)
     emit(output_root, "done", f"结果目录：{output_root}；汇总表：{summary_path}。")
