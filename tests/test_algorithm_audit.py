@@ -55,6 +55,7 @@ from tools.code.evaluate_point_targets import (
     main as point_target_main,
     parse_args as parse_point_target_args,
 )
+from tools.code import generate_point_target_images
 from tools.shared.workflow_common import (
     ALGORITHMS,
     ask_multi_choice,
@@ -925,6 +926,54 @@ class AlgorithmAuditTests(unittest.TestCase):
                 hf["config_yaml"][()] = yaml.safe_dump(config)
             with self.assertRaisesRegex(ValueError, "来源标识"):
                 inspect_h5(h5_path)
+
+
+class PointTargetSceneConfigTests(unittest.TestCase):
+    def test_resolution_scenes_resolve_phantoms_under_picmus_root(self):
+        root = Path(__file__).resolve().parents[1]
+        picmus_root = root / "data" / "PICMUS"
+        try:
+            scenes = generate_point_target_images.load_scenes(root / "config.yaml")
+        except FileNotFoundError as exc:
+            self.skipTest(str(exc))
+        if not picmus_root.is_dir():
+            self.skipTest("PICMUS database unavailable")
+
+        self.assertEqual(
+            [scene["id"] for scene in scenes],
+            [
+                "simulation_resolution_distortion",
+                "experiments_resolution_distortion",
+            ],
+        )
+        expected_targets = {
+            "simulation_resolution_distortion": 20,
+            "experiments_resolution_distortion": 7,
+        }
+        expected_phantoms = {}
+        for scene in scenes:
+            meta = generate_point_target_images.read_sample_meta(
+                scene["h5_path"], scene["sample_idx"]
+            )
+            expected = (picmus_root / meta["phantom_path"]).resolve()
+            if not expected.is_file():
+                self.skipTest(f"phantom file unavailable: {expected}")
+            expected_phantoms[scene["id"]] = expected
+
+        for scene in scenes:
+            context = generate_point_target_images.load_picmus_context(
+                scene["h5_path"], scene["sample_idx"]
+            )
+            self.assertEqual(context["mode"], "resolution_distortion")
+            self.assertEqual(context["source"], scene["expected_source"])
+            self.assertEqual(
+                Path(context["phantom_path"]).resolve(),
+                expected_phantoms[scene["id"]],
+            )
+            self.assertEqual(
+                len(context["phantom"]["resolution_targets"]),
+                expected_targets[scene["id"]],
+            )
 
 
 if __name__ == "__main__":
