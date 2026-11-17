@@ -478,7 +478,7 @@ def save_figure(
                 fig.savefig(
                     temporary,
                     dpi=profile.dpi if dpi is None else dpi,
-                    bbox_inches="tight",
+                    bbox_inches=None if profile.name == PAPER.name else "tight",
                     facecolor="white",
                 )
                 temporary.replace(target)

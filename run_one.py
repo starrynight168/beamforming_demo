@@ -6,6 +6,7 @@ import math
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from algorithms.shared_core.common import (
 )
 from evaluation.context import load_picmus_context
 from shared_core.h5_schema import require_h5_schema
+from shared_core.file_sets import replace_file_set
 from algorithms.shared_core.labels import target_label
 
 ROOT = Path(__file__).resolve().parent
@@ -298,7 +300,38 @@ def scene_has_gt(scene, signal_domain="iq"):
 
 
 def save_comparison(images, titles, extent_mm, output_path, dr, _cleanup_pages=True):
-    """Save comparison."""
+    """Render comparison pages before replacing the previous page set."""
+    if not _cleanup_pages:
+        return _render_comparison_pages(
+            images, titles, extent_mm, output_path, dr, _cleanup_pages=False
+        )
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".comparison-stage-", dir=output_path.parent
+    ) as temporary:
+        stage_root = Path(temporary)
+        staged_output = stage_root / output_path.name
+        _render_comparison_pages(
+            images, titles, extent_mm, staged_output, dr, _cleanup_pages=False
+        )
+        generated = tuple(
+            path.relative_to(stage_root)
+            for path in stage_root.glob(f"{output_path.stem}*{output_path.suffix}")
+            if path.is_file()
+        )
+        managed = [Path(output_path.name)]
+        managed.extend(
+            Path(path.name)
+            for path in output_path.parent.glob(
+                f"{output_path.stem}_page*{output_path.suffix}"
+            )
+        )
+        replace_file_set(stage_root, output_path.parent, generated, managed)
+
+
+def _render_comparison_pages(images, titles, extent_mm, output_path, dr, _cleanup_pages=True):
+    """Render comparison pages into a staging directory."""
     n_images = len(images)
     max_images_per_page = MAX_COMPARISON_IMAGES_PER_PAGE
     if _cleanup_pages:
@@ -317,7 +350,7 @@ def save_comparison(images, titles, extent_mm, output_path, dr, _cleanup_pages=T
                     f"{output_path.stem}_page{page_idx}{output_path.suffix}"
                 )
             )
-            save_comparison(
+            _render_comparison_pages(
                 images[start : start + max_images_per_page],
                 titles[start : start + max_images_per_page],
                 extent_mm,
@@ -386,12 +419,22 @@ def save_single_image(image, title, extent_mm, output_path, dr):
 
 
 def save_individual_images(images, titles, image_names, extent_mm, output_dir, dr):
-    """Save individual images."""
+    """Render individual images before replacing the previous image set."""
+    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    for stale in output_dir.glob("*.png"):
-        stale.unlink(missing_ok=True)
-    for image, title, name in zip(images, titles, image_names, strict=True):
-        save_single_image(image, title, extent_mm, output_dir / f"{name}.png", dr)
+    with tempfile.TemporaryDirectory(
+        prefix=".individual-stage-", dir=output_dir.parent
+    ) as temporary:
+        stage_root = Path(temporary)
+        staged_dir = stage_root / output_dir.name
+        staged_dir.mkdir()
+        for image, title, name in zip(images, titles, image_names, strict=True):
+            save_single_image(image, title, extent_mm, staged_dir / f"{name}.png", dr)
+        generated = tuple(
+            path.relative_to(staged_dir) for path in staged_dir.glob("*.png")
+        )
+        managed = tuple(Path(path.name) for path in output_dir.glob("*.png"))
+        replace_file_set(staged_dir, output_dir, generated, managed)
 
 
 def can_reuse_existing(scene_dir, config, scene, method, args):
@@ -449,6 +492,8 @@ def run_evaluation(args, config, scene, scene_dir, comparison_path):
         "auto",
         "--phantom_source",
         "auto",
+        "--signal_domain",
+        str(params["signal_domain"]),
     ]
     result = run_subprocess(cmd)
     if result.returncode != 0:
