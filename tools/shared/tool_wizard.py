@@ -31,8 +31,6 @@ def ask_field(field, state):
         "ratio": (float, lambda v: 0 < v <= 1),
         "positive_int": (int, lambda v: v > 0),
         "odd": (int, lambda v: v > 0 and v % 2 == 1),
-        "sections": (int, lambda v: v >= 3),
-        "sound_max": (float, lambda v: v > state["c_min"]),
     }
     cast, valid = rules[kind]
     return key, number(label, default, cast, valid)

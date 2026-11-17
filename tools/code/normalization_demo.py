@@ -26,7 +26,7 @@ import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
-from shared_core.plot_style import DIAGNOSTIC, apply_style, save_figure
+from shared_core.plot_style import DIAGNOSTIC, FONT_SIZE, apply_style, save_figure
 from tools.shared.run_output import ToolOutput
 
 
@@ -121,7 +121,7 @@ def main(argv=None):
             "axes.edgecolor": "#D0D5DD",
             "xtick.color": MUTED,
             "ytick.color": MUTED,
-            "xtick.labelsize": 8.41,
+            "xtick.labelsize": FONT_SIZE,
             "ytick.labelsize": 8.41,
         },
     )

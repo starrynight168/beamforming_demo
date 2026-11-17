@@ -727,7 +727,7 @@ class AlgorithmAuditTests(unittest.TestCase):
                 rows = [{"status": "ok", "parameter": parameter, "value": 40, "index": 1}]
                 with patch("tools.code.run_ablation.run_process") as run:
                     result = run_ablation_evaluation(
-                        rows, root, root / "input.h5", 0, "das", True, 60
+                        rows, root, root / "input.h5", 0, "das", True, 60, "iq"
                     )
                 self.assertIsNone(result)
                 run.assert_not_called()

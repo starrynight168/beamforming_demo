@@ -678,7 +678,9 @@ def save_ablation_overview(rows, out_dir, algorithm, param_name):
     return path
 
 
-def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, algorithm, has_gt, dr):
+def run_ablation_evaluation(
+    rows, out_dir, h5_path, sample_idx, algorithm, has_gt, dr, signal_domain
+):
     """Execute run ablation evaluation."""
     if not has_gt:
         return None
@@ -737,6 +739,8 @@ def run_ablation_evaluation(rows, out_dir, h5_path, sample_idx, algorithm, has_g
         "auto",
         "--phantom_source",
         "auto",
+        "--signal_domain",
+        str(signal_domain),
     ]
     if run_process(evaluate_cmd, ROOT, out_dir) != 0:
         raise RuntimeError("消融统一评估失败")
@@ -1061,6 +1065,7 @@ def main():
             state["algorithm"],
             state["has_gt"],
             state["dr"],
+            (state["config"].get("params", {}) or {}).get("signal_domain", "iq"),
         )
     individual_dir = collect_ablation_individual_images(
         rows,

@@ -42,12 +42,7 @@ from tools.shared.run_output import (
 
 DEFAULT_OUTPUT = TOOLS_OUTPUT_ROOT / "rebeamform_invivo_grid"
 DEFAULT_SCENE = "simulation_contrast_speckle"
-SCENE_IDS = (
-    "simulation_contrast_speckle",
-    "simulation_resolution_distortion",
-    "experiments_contrast_speckle",
-    "experiments_resolution_distortion",
-)
+from tools.shared.scenes import STANDARD_SCENE_IDS as SCENE_IDS, resolve_project_path as resolve_path
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -112,11 +107,6 @@ def parse_int_list(text: str) -> list[int]:
     if not values or any(value < 2 for value in values):
         raise argparse.ArgumentTypeError("像素数列表不能为空，且每个值至少为 2")
     return values
-
-
-def resolve_path(path: Path) -> Path:
-    path = path.expanduser()
-    return path.resolve() if path.is_absolute() else (ROOT / path).resolve()
 
 
 def configured_scene(config_path: Path, scene_id: str) -> tuple[Path, int]:

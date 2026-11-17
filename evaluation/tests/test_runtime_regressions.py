@@ -224,7 +224,7 @@ class WizardFlowTests(unittest.TestCase):
                 "tools.code.run_ablation.run_process",
                 return_value=0,
             ) as run:
-                run_ablation_evaluation(rows, root, h5_path, 0, "das", True, 60)
+                run_ablation_evaluation(rows, root, h5_path, 0, "das", True, 60, "iq")
             command = run.call_args_list[0].args[0]
             self.assertNotIn("--config", command)
             self.assertEqual(command[command.index("--h5_path") + 1], str(h5_path))

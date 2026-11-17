@@ -58,7 +58,10 @@ def read_sample_meta(h5_path, sample_idx):
         generation = config.get("generation", {})
         storage = generation.get("storage", {}) if isinstance(generation, dict) else {}
         stored_inputs = storage.get("inputs", {}) if isinstance(storage, dict) else {}
-        input_domain = next((domain for domain in ("iq", "rf", "analytic_rf") if domain in stored_inputs), None)
+        input_domains = [
+            domain for domain in ("iq", "rf", "analytic_rf") if domain in stored_inputs
+        ]
+        input_domain = input_domains[0] if input_domains else None
         if input_domain is None:
             raise ValueError("H5 config_yaml.generation.storage.inputs 未声明输入域")
         if "acquisition_id" in hf:
@@ -106,6 +109,8 @@ def read_sample_meta(h5_path, sample_idx):
                 "phantom_mode": str(sample_config.get("phantom_mode") or dataset_meta.get("phantom_mode") or ""),
                 "phantom_source": str(sample_config.get("phantom_source") or dataset_meta.get("phantom_source") or ""),
                 "phantom_path": str(sample_config.get("phantom_path") or ""),
+                "signal_domain": input_domain,
+                "signal_domains": input_domains,
             }
         if (
             isinstance(source_samples, dict)
@@ -126,6 +131,8 @@ def read_sample_meta(h5_path, sample_idx):
                 "phantom_mode": phantom_mode,
                 "phantom_source": phantom_source,
                 "phantom_path": "",
+                "signal_domain": input_domain,
+                "signal_domains": input_domains,
             }
         raise IndexError(f"source_samples has no sample index {sample_idx}")
 
@@ -314,6 +321,8 @@ def load_picmus_context(
         "x_mm": x_mm,
         "z_mm": z_mm,
         "distortion_z_offset_mm": z_offset,
+        "signal_domain": meta["signal_domain"],
+        "signal_domains": meta["signal_domains"],
     }
 
 

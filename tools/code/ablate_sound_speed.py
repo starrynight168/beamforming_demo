@@ -36,17 +36,7 @@ CURVE_METRICS = (
     ("FWHM_lateral_mm", "Lateral FWHM (mm)"),
     ("FWHM_axial_mm", "Axial FWHM (mm)"),
 )
-SCENE_LABELS = {
-    "simulation_contrast_speckle": "Sim. contrast",
-    "simulation_resolution_distortion": "Sim. resolution",
-    "experiments_contrast_speckle": "Exp. contrast",
-    "experiments_resolution_distortion": "Exp. resolution",
-}
-
-
-def resolve(path):
-    path = Path(path).expanduser()
-    return path if path.is_absolute() else (ROOT / path).resolve()
+from tools.shared.scenes import SCENE_LABELS, resolve_project_path as resolve
 
 
 def parse_c_values(raw):
@@ -388,6 +378,7 @@ def main():
                 "mv",
                 True,
                 float((config.get("params", {}) or {}).get("dr", 60.0)),
+                (config.get("params", {}) or {}).get("signal_domain", "iq"),
             )
 
     all_rows_path = run_root / "metrics" / "all_scene_runs.csv"

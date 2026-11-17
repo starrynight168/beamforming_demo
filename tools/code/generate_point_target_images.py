@@ -5,7 +5,6 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -19,40 +18,11 @@ from shared_core.plot_style import DIAGNOSTIC, apply_style
 from tools.shared.run_output import ToolOutput
 
 
-SCENE_SOURCES = {
-    "simulation_resolution_distortion": "simulation",
-    "experiments_resolution_distortion": "experiments",
-}
+from tools.shared.scenes import RESOLUTION_SCENE_SOURCES as SCENE_SOURCES, load_scenes as load_standard_scenes
 
 
 def load_scenes(config_path):
-    path = config_path.expanduser()
-    path = path.resolve() if path.is_absolute() else (ROOT / path).resolve()
-    with path.open(encoding="utf-8") as stream:
-        config = yaml.safe_load(stream) or {}
-    scenes = config.get("scenes")
-    if not isinstance(scenes, list):
-        raise ValueError("config.yaml must contain a scenes list")
-    by_id = {str(scene.get("id")): scene for scene in scenes if isinstance(scene, dict)}
-    missing = [scene_id for scene_id in SCENE_SOURCES if scene_id not in by_id]
-    if missing:
-        raise ValueError(f"config.yaml is missing resolution scenes: {missing}")
-    selected = []
-    for scene_id, expected_source in SCENE_SOURCES.items():
-        scene = by_id[scene_id]
-        data_path = Path(scene["h5_path"]).expanduser()
-        if not data_path.is_absolute():
-            data_path = ROOT / data_path
-        data_path = data_path.resolve()
-        if not data_path.is_file():
-            raise FileNotFoundError(f"{scene_id}: H5 file not found: {data_path}")
-        selected.append({
-            "id": scene_id,
-            "h5_path": data_path,
-            "sample_idx": int(scene.get("sample_idx", 0)),
-            "expected_source": expected_source,
-        })
-    return selected
+    return load_standard_scenes(config_path, SCENE_SOURCES, sources=SCENE_SOURCES)
 
 
 def beamform(sample_input, method, args, device):

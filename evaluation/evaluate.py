@@ -42,6 +42,7 @@ from evaluation.metrics import (
 
 PASS_THRESHOLD = 0.5
 IMAGE_STACK_DIMENSIONS = 3
+SIGNAL_DOMAINS = ("iq", "rf", "analytic_rf")
 
 
 def parse_args():
@@ -84,7 +85,44 @@ def parse_args():
         help="默认读取 H5 的 phantom_source；显式值须与元数据一致。",
     )
     parser.add_argument("--fwhm_window_mm", type=float, default=1.8)
+    parser.add_argument(
+        "--signal_domain",
+        choices=SIGNAL_DOMAINS,
+        default=None,
+        help="输入信号域；默认读取 H5 声明，显式值须与 H5 输入域一致。",
+    )
+    parser.add_argument(
+        "--model_semantics_version",
+        type=int,
+        default=None,
+        help="评估所用 checkpoint 的 model_semantics_version。",
+    )
     return parser.parse_args()
+
+
+def resolve_signal_domain(explicit, stored_domains):
+    """Resolve the evaluated signal domain without silently assuming IQ.
+
+    ``stored_domains`` comes from the H5 ``generation.storage.inputs`` block.
+    An explicit value wins because an H5 may store RF while the evaluation
+    processes a derived IQ/analytic domain.  Without an explicit value a
+    single stored domain is used, while a missing or multi-domain declaration
+    is an error.
+    """
+
+    domains = tuple(dict.fromkeys(str(item) for item in stored_domains if item))
+    if explicit is not None:
+        if explicit not in SIGNAL_DOMAINS:
+            raise ValueError(f"不支持的 signal_domain: {explicit!r}")
+        return explicit
+    if len(domains) == 1:
+        return domains[0]
+    if not domains:
+        raise ValueError("H5 未声明输入信号域，请显式指定 --signal_domain")
+    raise ValueError(
+        "H5 声明了多个输入信号域 "
+        f"({', '.join(domains)})，请显式指定 --signal_domain"
+    )
 
 
 def load_method_names(args, comparison_path, n_panels, has_gt):
@@ -429,6 +467,10 @@ def main():
     meta_from_h5 = context["meta"]
     has_gt = bool(meta_from_h5.get("has_gt", False))
     mode, source = context["mode"], context["source"]
+    signal_domain = resolve_signal_domain(
+        getattr(args, "signal_domain", None),
+        context.get("signal_domains") or [meta_from_h5.get("signal_domain")],
+    )
 
     comparison = np.load(comparison_path).astype(np.float64)
     x_mm, z_mm = context["x_mm"], context["z_mm"]
@@ -698,6 +740,8 @@ def main():
         "sample_name": meta_from_h5.get("sample_name", ""),
         "has_gt": has_gt,
         "methods": methods,
+        "signal_domain": signal_domain,
+        "model_semantics_version": getattr(args, "model_semantics_version", None),
         "contrast_roi_count": len(rois),
         "speckle_roi_count": len(speckle_rois),
         "resolution_target_count": len(targets),
