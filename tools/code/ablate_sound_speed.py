@@ -20,11 +20,10 @@ for path in (ROOT, CODE_DIR):
         sys.path.insert(0, str(path))
 
 import run_ablation as workflow
+from shared_core.plot_style import DIAGNOSTIC, apply_style, save_figure
 from tools.shared.run_output import (
     emit,
     prepare_output_tree,
-    save_figure,
-    set_plot_style,
     write_csv,
     write_json,
 )
@@ -164,7 +163,7 @@ def method_c(method):
 
 
 def save_c_sweep_curve(records, scenes, output_dir):
-    set_plot_style()
+    apply_style(DIAGNOSTIC)
     available = []
     for metric, label in CURVE_METRICS:
         speeds = set()
@@ -228,12 +227,15 @@ def save_c_sweep_curve(records, scenes, output_dir):
         ax.set_title(label)
         ax.set_xlabel("Sound speed used by MV (m/s)")
         ax.set_ylabel(label)
-        ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.45)
         if plotted or nominal_speeds:
-            ax.legend(frameon=False, fontsize=7)
+            ax.legend()
     for ax in list(axes.flat)[len(available):]:
         ax.set_visible(False)
-    return save_figure(fig, output_dir / "c_sweep_metrics.png")
+    return save_figure(
+        fig,
+        output_dir / "c_sweep_metrics.png",
+        profile=DIAGNOSTIC,
+    )[0]
 
 
 def parse_args():

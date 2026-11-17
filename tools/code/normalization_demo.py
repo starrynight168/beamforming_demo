@@ -25,7 +25,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
-from tools.shared.run_output import ToolOutput, save_figure
+
+from shared_core.plot_style import DIAGNOSTIC, apply_style, save_figure
+from tools.shared.run_output import ToolOutput
 
 
 def main(argv=None):
@@ -111,27 +113,18 @@ def main(argv=None):
     ORANGE = "#D9480F"
     POINT = "#1F2937"
 
-    plt.rcParams.update(
-        {
-            "font.sans-serif": ["Microsoft YaHei", "SimHei", "DejaVu Sans"],
-            "font.family": "sans-serif",
-            "axes.unicode_minus": False,
-            "mathtext.fontset": "dejavusans",
+    apply_style(
+        cjk=True,
+        overrides={
             "text.color": INK,
             "axes.labelcolor": MUTED,
             "axes.edgecolor": "#D0D5DD",
-            "axes.linewidth": 0.8,
             "xtick.color": MUTED,
             "ytick.color": MUTED,
-            "xtick.labelsize": 8.5,
-            "ytick.labelsize": 8.5,
-            "xtick.major.size": 3,
-            "ytick.major.size": 3,
-            "xtick.major.width": 0.7,
-            "ytick.major.width": 0.7,
-        }
+            "xtick.labelsize": 8.41,
+            "ytick.labelsize": 8.41,
+        },
     )
-
     fig = plt.figure(figsize=(20, 11), facecolor=BG)
     gs = fig.add_gridspec(
         2,
@@ -198,7 +191,8 @@ def main(argv=None):
         {
             "key": "raw",
             "title": "原始数据",
-            "formula": r"$x,\ y$  （保持原样）",
+            "formula": r"$x,\ y$",
+            "formula_note": "（保持原样）",
             "note": "量纲不同：X 跨度大、Y 跨度小，大尺度特征容易主导距离。",
             "stats": (
                 f"特征 X   μ = {one_decimal(mu[0])}   σ = {one_decimal(sigma[0])}\n"
@@ -236,6 +230,7 @@ def main(argv=None):
         },
     ]
 
+    formula_notes = []
     for col, spec in enumerate(columns):
         key = spec["key"]
         data = transforms[key]
@@ -288,7 +283,7 @@ def main(argv=None):
             color=INK,
             pad=31,
         )
-        ax.text(
+        formula_artist = ax.text(
             0.0,
             1.012,
             spec["formula"],
@@ -298,6 +293,18 @@ def main(argv=None):
             fontsize=11.5,
             color=ORANGE,
         )
+        if spec.get("formula_note"):
+            note_artist = ax.text(
+                0.0,
+                1.012,
+                spec["formula_note"],
+                transform=ax.transAxes,
+                ha="left",
+                va="bottom",
+                fontsize=11.5,
+                color=ORANGE,
+            )
+            formula_notes.append((ax, formula_artist, note_artist))
         ax.text(
             0.03,
             0.965,
@@ -421,8 +428,16 @@ def main(argv=None):
         va="center",
     )
 
+    if formula_notes:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        for ax, formula_artist, note_artist in formula_notes:
+            right = formula_artist.get_window_extent(renderer).x1 + 4
+            note_x = ax.transAxes.inverted().transform((right, 0))[0]
+            note_artist.set_position((note_x, 1.012))
+
     output.config({"tool": "normalization_demo", "seed": 20261104, "samples": N})
-    save_figure(fig, figure_path, dpi=300)
+    save_figure(fig, figure_path, profile=DIAGNOSTIC, dpi=300)
     summary_rows = []
     for name, values in transforms.items():
         for feature_index, feature in enumerate(("X", "Y")):

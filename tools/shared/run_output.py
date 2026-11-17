@@ -93,50 +93,6 @@ def write_csv(path, rows, fieldnames=None):
     return path
 
 
-def set_plot_style(*, font_family="Times New Roman", font_size=8):
-    import matplotlib as mpl
-
-    mpl.rcParams.update(
-        {
-            "font.family": font_family,
-            "font.size": font_size,
-            "axes.titlesize": font_size + 1,
-            "axes.labelsize": font_size,
-            "xtick.labelsize": font_size - 1,
-            "ytick.labelsize": font_size - 1,
-            "legend.fontsize": font_size - 1,
-            "axes.linewidth": 0.7,
-            "lines.linewidth": 1.4,
-            "lines.markersize": 4,
-            "grid.color": "#d9d9d9",
-            "grid.linewidth": 0.55,
-            "figure.facecolor": "white",
-            "savefig.facecolor": "white",
-            "savefig.dpi": 300,
-            "axes.prop_cycle": mpl.cycler(
-                color=("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9")
-            ),
-        }
-    )
-
-
-def save_figure(fig, path, *, dpi=300, formats=None, close=True):
-    import matplotlib.pyplot as plt
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    output_paths = []
-    if formats is None:
-        formats = (path.suffix.lstrip(".") or "png",)
-    for extension in formats:
-        target = path.with_suffix(f".{extension}")
-        fig.savefig(target, dpi=dpi, bbox_inches="tight", facecolor="white")
-        output_paths.append(target)
-    if close:
-        plt.close(fig)
-    return output_paths[0] if len(output_paths) == 1 else output_paths
-
-
 class ToolOutput:
     def __init__(self, tool_name, output_dir=None):
         self.root = prepare_output_tree(resolve_output_dir(tool_name, output_dir))
@@ -160,10 +116,14 @@ class ToolOutput:
     def csv(self, area, name, rows, fieldnames=None):
         return write_csv(self.path(area, name), rows, fieldnames=fieldnames)
 
-    def figure(self, name, fig, *, dpi=300, formats=None):
-        return save_figure(
+    def figure(self, name, fig, *, dpi=None, formats=None):
+        from shared_core.plot_style import DIAGNOSTIC, save_figure
+
+        paths = save_figure(
             fig,
             self.path("figures", name),
+            profile=DIAGNOSTIC,
             dpi=dpi,
             formats=formats,
         )
+        return paths[0] if len(paths) == 1 else paths

@@ -36,12 +36,11 @@ from tools.shared.workflow_common import (
     run_steps,
     sample_can_be_evaluated,
 )
+from shared_core.plot_style import DIAGNOSTIC, apply_style, save_figure
 from tools.shared.run_output import (
     emit,
     prepare_output_tree,
-    save_figure,
     run_process,
-    set_plot_style,
     write_csv,
     write_json,
 )
@@ -656,7 +655,7 @@ def save_ablation_overview(rows, out_dir, algorithm, param_name):
     n_images = len(images)
     cols = min(4, n_images)
     rows_count = math.ceil(n_images / cols)
-    set_plot_style()
+    apply_style(DIAGNOSTIC)
     fig, axes = plt.subplots(
         rows_count,
         cols,
@@ -670,12 +669,12 @@ def save_ablation_overview(rows, out_dir, algorithm, param_name):
     ):
         ax = axes[idx // cols][idx % cols]
         ax.imshow(image, cmap="gray", vmin=-image_dr, vmax=0.0, aspect="equal")
-        ax.set_title(title, fontsize=11)
+        ax.set_title(title)
         ax.axis("off")
     for idx in range(n_images, rows_count * cols):
         axes[idx // cols][idx % cols].axis("off")
     path = figure_dir / "ablation_comparison.png"
-    save_figure(fig, path)
+    save_figure(fig, path, profile=DIAGNOSTIC)
     return path
 
 

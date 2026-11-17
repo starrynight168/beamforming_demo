@@ -21,7 +21,8 @@ from tools.shared.rf_beamforming import (
     rf_mv_signed_and_envelope,
     stft_frequency_mv,
 )
-from tools.shared.run_output import ToolOutput, set_plot_style
+from shared_core.plot_style import DIAGNOSTIC, apply_style
+from tools.shared.run_output import ToolOutput
 
 
 def decode_h5_text(value):
@@ -309,7 +310,7 @@ def main():
     mae_rf_stft_6db = float(np.mean(np.abs(db[0] - db[3])))
     corr_rf_stft_20db = float(np.corrcoef(db[0].ravel(), db[4].ravel())[0, 1])
     mae_rf_stft_20db = float(np.mean(np.abs(db[0] - db[4])))
-    set_plot_style(font_size=9)
+    apply_style(DIAGNOSTIC)
     fig, axes = plt.subplots(1, 5, figsize=(25, 6), constrained_layout=True)
     extent = [1000 * x[0], 1000 * x[-1], 1000 * z[-1], 1000 * z[0]]
     titles = (

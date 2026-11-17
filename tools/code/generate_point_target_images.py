@@ -15,7 +15,8 @@ from algorithms import das, mv
 from algorithms.shared_core import common
 from evaluation.context import load_picmus_context, read_sample_meta
 from evaluation.metrics import build_square_label_map, target_resolution
-from tools.shared.run_output import ToolOutput, set_plot_style
+from shared_core.plot_style import DIAGNOSTIC, apply_style
+from tools.shared.run_output import ToolOutput
 
 
 SCENE_SOURCES = {
@@ -144,7 +145,7 @@ def evaluate_scene(scene, args, device, output):
         outputs[method] = image
         output.log("progress", f"{scene['id']} {method.upper()} reconstruction completed")
 
-    set_plot_style()
+    apply_style(DIAGNOSTIC)
     fig, axes = plt.subplots(1, len(outputs), figsize=(6 * len(outputs), 6), squeeze=False)
     for axis, (method, image) in zip(axes[0], outputs.items(), strict=True):
         display = np.clip(image - np.nanmax(image), -60, 0)
@@ -161,7 +162,7 @@ def evaluate_scene(scene, args, device, output):
         axis.set_xlabel("Lateral position (mm)")
         axis.set_ylabel("Depth (mm)")
     fig.tight_layout()
-    output.figure(f"point_targets_{scene['id']}.png", fig, dpi=180)
+    output.figure(f"point_targets_{scene['id']}.png", fig)
     np.savez_compressed(
         output.path("data", f"point_targets_{scene['id']}.npz"),
         x_mm=x_mm,

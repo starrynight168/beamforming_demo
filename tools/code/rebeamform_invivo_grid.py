@@ -23,13 +23,18 @@ from algorithms.shared_core.common import (
     validate_db_output,
 )
 from evaluation.context import read_sample_meta
+from shared_core.plot_style import (
+    DIAGNOSTIC,
+    PAPER,
+    apply_style,
+    save_figure,
+    style_axes,
+)
 from tools.shared.workflow_common import TOOLS_OUTPUT_ROOT, inspect_h5
 from tools.shared.run_output import (
     emit,
     prepare_output_tree,
     resolve_output_dir,
-    save_figure,
-    set_plot_style,
     write_csv,
     write_json,
 )
@@ -274,12 +279,18 @@ def save_bmode(
     align_boundary_ticklabels(axis, x_range, z_range)
     axis.set_xlabel("Lateral (mm)")
     axis.set_ylabel("Depth (mm)")
-    axis.set_title(plot_title(source_label, frame, x_range, z_range), fontsize=8)
-    axis.tick_params(labelsize=7, length=2)
+    axis.set_title(plot_title(source_label, frame, x_range, z_range))
+    style_axes(axis)
     colorbar = fig.colorbar(handle, ax=axis, ticks=(-60, -40, -20, 0), pad=0.04)
     colorbar.set_label("dB")
     fig.tight_layout()
-    save_figure(fig, output_dir / "bmode.png", dpi=600, formats=("png", "svg", "pdf"))
+    save_figure(
+        fig,
+        output_dir / "bmode.png",
+        profile=PAPER,
+        dpi=600,
+        formats=("png", "svg", "pdf"),
+    )
 
 
 def save_grid_comparison(
@@ -308,17 +319,22 @@ def save_grid_comparison(
         axis.set_xticks(ticks_with_limits(*x_range))
         axis.set_yticks(ticks_with_limits(*z_range))
         align_boundary_ticklabels(axis, x_range, z_range)
-        axis.set_title(plot_title(source_label, frame, x_range, z_range), fontsize=8)
+        axis.set_title(plot_title(source_label, frame, x_range, z_range))
         axis.set_xlabel("Lateral (mm)")
         if axis is axes.flat[0]:
             axis.set_ylabel("Depth (mm)")
-        axis.tick_params(labelsize=7, length=2)
+        style_axes(axis)
     for axis in list(axes.flat)[len(results) :]:
         axis.set_visible(False)
     fig.colorbar(
         handle, ax=list(axes.flat), ticks=(-60, -40, -20, 0), fraction=0.025, pad=0.025
     ).set_label("dB")
-    save_figure(fig, output_dir / "grid_comparison.png", dpi=400)
+    save_figure(
+        fig,
+        output_dir / "grid_comparison.png",
+        profile=DIAGNOSTIC,
+        dpi=400,
+    )
 
 
 def numpy_grid(grid) -> np.ndarray:
@@ -431,7 +447,7 @@ def main() -> None:
     else:
         output_root = resolve_output_dir("rebeamform_invivo_grid", resolve_path(args.output_dir))
     prepare_output_tree(output_root)
-    set_plot_style()
+    apply_style(DIAGNOSTIC)
     emit(output_root, "prepare", f"DAS 扫描 {len(grids)} 个网格；样本 {sample_tag}，帧 {args.frame}。")
     write_json(
         output_root / "run_config.json",

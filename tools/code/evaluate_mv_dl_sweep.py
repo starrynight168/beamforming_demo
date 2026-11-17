@@ -13,10 +13,9 @@ if str(ROOT) not in sys.path:
 
 from algorithms import mv
 from evaluation.evaluate import target_resolution
+from shared_core.plot_style import DIAGNOSTIC, apply_style, save_figure
 from tools.shared.run_output import (
     ToolOutput,
-    save_figure,
-    set_plot_style,
     write_csv as write_output_csv,
     write_json,
 )
@@ -184,7 +183,7 @@ def main(argv=None):
         f"样本 {args.sample_index}；角度 {len(sample.selected_angles)}；点靶 {len(targets)}；"
         f"网格 {args.grid_factor}×；DL {dls}；设备 {device}。",
     )
-    set_plot_style()
+    apply_style(DIAGNOSTIC)
     for dl in dls:
         for target_idx, (target, (x_ids, z_ids)) in enumerate(
             zip(targets, target_windows), start=1
@@ -298,7 +297,11 @@ def main(argv=None):
         f"{args.grid_factor}x grid; sub={args.subarray_ratio}, temporal win={args.temporal_win}"
     )
     fig.tight_layout()
-    save_figure(fig, output_dir / "figures" / "mv_dl_sweep.png")
+    save_figure(
+        fig,
+        output_dir / "figures" / "mv_dl_sweep.png",
+        profile=DIAGNOSTIC,
+    )
     write_json(
         output_dir / "run_config.json",
         {
