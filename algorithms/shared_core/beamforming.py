@@ -3,6 +3,8 @@
 import numpy as np
 import torch
 
+from shared_core.geometry import aperture_channel_count, element_positions, receive_distance
+
 
 def aperture_half_width(depth, f_number, n_channels, pitch, dynamic_aperture):
     if dynamic_aperture:
@@ -19,7 +21,7 @@ def dynamic_aperture_channel_count(
 ):
     if not dynamic_aperture:
         return n_channels
-    count = int(depth / (f_number * pitch)) + 1
+    count = int(aperture_channel_count(depth, f_number, pitch))
     if count < 1:
         raise ValueError("动态孔径必须包含至少一个物理通道")
     return min(count, n_channels)
@@ -32,43 +34,37 @@ def aperture_start_indices(x_positions, n_channels, aperture_size, pitch):
     return starts.long().clamp(0, n_channels - aperture_size)
 
 
+def _aperture_window(x_norm, window_type, tukey_alpha, kaiser_beta):
+    if window_type == "rect":
+        return torch.ones_like(x_norm)
+    if window_type == "tukey":
+        win = torch.ones_like(x_norm)
+        transition = x_norm > (1.0 - tukey_alpha)
+        val = 0.5 * (
+            1.0 + torch.cos(torch.pi * (x_norm - (1.0 - tukey_alpha)) / tukey_alpha)
+        )
+        win[transition] = val[transition]
+        return win
+    if window_type == "hann":
+        return 0.5 * (1.0 + torch.cos(torch.pi * x_norm))
+    if window_type == "hamming":
+        return 0.54 + 0.46 * torch.cos(torch.pi * x_norm)
+    if window_type == "blackman":
+        return (0.42 + 0.5 * torch.cos(torch.pi * x_norm) + 0.08 * torch.cos(2.0 * torch.pi * x_norm)).clamp_min(0)
+    if window_type == "kaiser":
+        beta = torch.as_tensor(kaiser_beta, dtype=x_norm.dtype, device=x_norm.device)
+        arg = beta * torch.sqrt(torch.clamp(1.0 - x_norm.square(), min=0.0))
+        return torch.i0(arg) / torch.i0(beta)
+    raise ValueError(f"Unsupported window type: {window_type}")
+
+
 def aperture_window_from_dx(dx, half_a, window_type, tukey_alpha=0.25, kaiser_beta=8.6):
     x_norm = dx.abs() / (half_a + 1e-9)
     in_aperture = (x_norm <= 1.0).float()
     if window_type == "rect":
         return in_aperture
-
-    if window_type == "tukey":
-        win = torch.ones_like(x_norm)
-        transition = (x_norm > (1.0 - tukey_alpha)) & (x_norm <= 1.0)
-        val = 0.5 * (
-            1.0 + torch.cos(torch.pi * (x_norm - (1.0 - tukey_alpha)) / tukey_alpha)
-        )
-        win[transition] = val[transition]
-        win[x_norm > 1.0] = 0.0
-        return torch.where(
-            in_aperture.sum(-1, keepdim=True) <= 2,
-            in_aperture,
-            win,
-        )
-
-    if window_type == "hann":
-        win = 0.5 * (1.0 + torch.cos(torch.pi * x_norm))
-    elif window_type == "hamming":
-        win = 0.54 + 0.46 * torch.cos(torch.pi * x_norm)
-    elif window_type == "blackman":
-        win = (
-            0.42
-            + 0.5 * torch.cos(torch.pi * x_norm)
-            + 0.08 * torch.cos(2.0 * torch.pi * x_norm)
-        )
-    elif window_type == "kaiser":
-        beta = torch.as_tensor(kaiser_beta, dtype=dx.dtype, device=dx.device)
-        arg = beta * torch.sqrt(torch.clamp(1.0 - x_norm.square(), min=0.0))
-        win = torch.i0(arg) / torch.i0(beta)
-    else:
-        raise ValueError(f"Unsupported window type: {window_type}")
-    weighted = win.clamp_min(0) * in_aperture
+    win = _aperture_window(x_norm, window_type, tukey_alpha, kaiser_beta)
+    weighted = torch.where(in_aperture.bool(), win.clamp_min(0), torch.zeros_like(win))
     return torch.where(
         in_aperture.sum(-1, keepdim=True) <= 2,
         in_aperture,
@@ -89,27 +85,7 @@ def aperture_window_1d(
     if window_type == "rect" or k <= 2:
         return torch.ones(k, dtype=dtype, device=device)
     x = torch.linspace(-1.0, 1.0, k, dtype=dtype, device=device)
-    ax = x.abs()
-    if window_type == "tukey":
-        win = torch.ones_like(x)
-        edge = ax > 1.0 - tukey_alpha
-        win[edge] = 0.5 * (
-            1.0 + torch.cos(torch.pi * (ax[edge] - (1.0 - tukey_alpha)) / tukey_alpha)
-        )
-        return win
-    if window_type == "hann":
-        return 0.5 * (1.0 + torch.cos(torch.pi * x))
-    if window_type == "hamming":
-        return 0.54 + 0.46 * torch.cos(torch.pi * x)
-    if window_type == "blackman":
-        return (
-            0.42 + 0.5 * torch.cos(torch.pi * x) + 0.08 * torch.cos(2.0 * torch.pi * x)
-        ).clamp_min(0)
-    if window_type == "kaiser":
-        beta = torch.as_tensor(kaiser_beta, dtype=dtype, device=device)
-        arg = beta * torch.sqrt(torch.clamp(1.0 - ax.square(), min=0.0))
-        return torch.i0(arg) / torch.i0(beta)
-    raise ValueError(f"Unsupported window type: {window_type}")
+    return _aperture_window(x.abs(), window_type, tukey_alpha, kaiser_beta)
 
 
 def optional_aperture_window_1d(k, window_type, device, dtype=torch.float32):
@@ -141,13 +117,9 @@ def build_row_dynamic_geometry(
     height, width, n_channels = len(z_grid), len(x_grid), n_elem
     x_tensor = torch.from_numpy(x_grid).float().to(device)
     z_tensor = torch.from_numpy(z_grid).float().to(device)
-    lateral_channel = (
-        torch.arange(n_channels, device=device).float() - (n_channels - 1) / 2.0
-    ) * pitch
+    lateral_channel = element_positions(n_channels, pitch, device=device)
     x_mesh, z_mesh = torch.meshgrid(x_tensor, z_tensor, indexing="xy")
-    drs = torch.sqrt(
-        (x_mesh[..., None] - lateral_channel) ** 2 + z_mesh[..., None] ** 2
-    ) * (fs / c)
+    drs = receive_distance(x_mesh[..., None], z_mesh[..., None], lateral_channel) * (fs / c)
     ch = torch.arange(n_channels, device=device).view(1, n_channels, 1)
     row_cache = []
     for hz in range(height):
@@ -222,6 +194,12 @@ def normalized_mv_weights(covariance, steering):
     return torch.where((scale > 0) & nonzero, weights, torch.zeros_like(weights))
 
 
+def forward_backward_covariance(covariance, enabled):
+    if enabled:
+        return 0.5 * (covariance + covariance.conj().flip(-1, -2))
+    return covariance
+
+
 def spatial_temporal_covariance(
     x_active, subarray_size, temporal_win, use_fbss, spatial_weights=None, normalize=False,
 ):
@@ -240,12 +218,7 @@ def spatial_temporal_covariance(
         x_snapshots = x_snapshots * snapshot_weights.sqrt()
         snapshots = snapshot_weights.sum()
     covariance_forward = torch.matmul(x_snapshots, x_snapshots.mH) / snapshots
-    if use_fbss:
-        covariance = 0.5 * (
-            covariance_forward + covariance_forward.conj().flip(-1, -2)
-        )
-    else:
-        covariance = covariance_forward
+    covariance = forward_backward_covariance(covariance_forward, use_fbss)
     return x_subarrays, covariance
 
 
@@ -279,12 +252,20 @@ def mv_row_output(weights, x_subarrays, x_active, valid_mask, row):
 
 
 def generalized_coherence_factor(data, low_bins):
-    scale = data.abs().amax(dim=-1, keepdim=True)
+    return generalized_coherence_factor_nd(data, (low_bins,))
+
+
+def generalized_coherence_factor_nd(data, low_bins):
+    dims = tuple(range(-len(low_bins), 0))
+    scale = data.abs().amax(dim=dims, keepdim=True)
     data = data / scale.clamp_min(torch.finfo(data.real.dtype).tiny)
-    spectrum = torch.fft.fftshift(torch.fft.fft(data, dim=-1), dim=-1).abs().square()
-    center = data.shape[-1] // 2
-    low = spectrum[..., max(0, center - low_bins):min(data.shape[-1], center + low_bins + 1)].sum(dim=-1)
-    total = spectrum.sum(dim=-1)
+    spectrum = torch.fft.fftshift(torch.fft.fftn(data, dim=dims), dim=dims).abs().square()
+    slices = tuple(
+        slice(max(0, data.shape[dim] // 2 - bins), min(data.shape[dim], data.shape[dim] // 2 + bins + 1))
+        for dim, bins in zip(dims, low_bins)
+    )
+    low = spectrum[(..., *slices)].sum(dim=dims)
+    total = spectrum.sum(dim=dims)
     return (low / total.clamp_min(torch.finfo(total.dtype).tiny)).clamp(0, 1)
 
 
@@ -304,6 +285,19 @@ def _sinc_weight(frac, offset, radius):
     return sinc * window
 
 
+def interpolation_coefficients(fraction, mode):
+    if mode == "linear":
+        return (1.0 - fraction, fraction)
+    if mode == "catmull_rom":
+        t2 = fraction.square()
+        t3 = t2 * fraction
+        return (-0.5 * fraction + t2 - 0.5 * t3,
+                1.0 - 2.5 * t2 + 1.5 * t3,
+                0.5 * fraction + 2.0 * t2 - 1.5 * t3,
+                -0.5 * t2 + 0.5 * t3)
+    raise ValueError(f"Unsupported interpolation coefficient mode: {mode}")
+
+
 def _interpolate_samples(sample, n_samples, interp, gather):
     sample = sample.clamp(0.0, float(n_samples - 1))
 
@@ -318,19 +312,15 @@ def _interpolate_samples(sample, n_samples, interp, gather):
         idx0 = torch.clamp(idx0, 0, n_samples - 1)
         i0, q0 = gather(idx0)
         i1, q1 = gather(idx1)
-        i = i0 * (1.0 - frac) + i1 * frac
-        q = q0 * (1.0 - frac) + q1 * frac
+        w0, w1 = interpolation_coefficients(frac, "linear")
+        i = i0 * w0 + i1 * w1
+        q = q0 * w0 + q1 * w1
         return i, q
 
     if interp == "catmull_rom":
         idx0 = sample.floor().long().clamp(0, n_samples - 2)
         frac = sample - idx0.float()
-        weights = (
-            -.5 * frac**3 + frac**2 - .5 * frac,
-            1.5 * frac**3 - 2.5 * frac**2 + 1,
-            -1.5 * frac**3 + 2 * frac**2 + .5 * frac,
-            .5 * frac**3 - .5 * frac**2,
-        )
+        weights = interpolation_coefficients(frac, "catmull_rom")
         pairs = [gather((idx0 + offset).clamp(0, n_samples - 1)) for offset in (-1, 0, 1, 2)]
         return tuple(sum(pair[part] * weight for pair, weight in zip(pairs, weights)) for part in (0, 1))
 

@@ -36,7 +36,7 @@ from tools.shared.workflow_common import (
     run_steps,
     sample_can_be_evaluated,
 )
-from shared_core.plot_style import DIAGNOSTIC, apply_style, save_figure
+from shared_core.plot_style import DIAGNOSTIC, apply_style, draw_bmode, save_figure
 from tools.shared.run_output import (
     emit,
     prepare_output_tree,
@@ -668,7 +668,7 @@ def save_ablation_overview(rows, out_dir, algorithm, param_name):
         zip(images, titles, display_drs, strict=True),
     ):
         ax = axes[idx // cols][idx % cols]
-        ax.imshow(image, cmap="gray", vmin=-image_dr, vmax=0.0, aspect="equal")
+        draw_bmode(ax, image, None, image_dr)
         ax.set_title(title)
         ax.axis("off")
     for idx in range(n_images, rows_count * cols):

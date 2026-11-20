@@ -12,6 +12,7 @@ else:
 initialize_project_path(__file__)
 
 from algorithms import mv
+from algorithms.shared_core.beamforming import forward_backward_covariance
 
 METHOD_NAME = "ccmv"
 def build_parser(params=None):
@@ -43,9 +44,7 @@ def cross_subarray_covariance(
         weights = spatial_weights / spatial_weights.sum()
         mean_subarray = (x_subarrays * weights.view(1, 1, count, 1)).sum(dim=2)
     covariance = (mean_subarray @ mean_subarray.mH) / temporal_win
-    if use_fbss:
-        covariance = 0.5 * (covariance + covariance.conj().flip(-1, -2))
-    return x_subarrays, covariance
+    return x_subarrays, forward_backward_covariance(covariance, use_fbss)
 
 
 class RowDynamicCCMVBeamformerIQ(mv.RowDynamicMVBeamformerIQ):

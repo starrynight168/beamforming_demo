@@ -6,7 +6,6 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-import yaml
 
 from shared_core.h5_schema import require_h5_schema
 from evaluation.metrics import EPSILON
@@ -38,16 +37,9 @@ def resolve(path):
 
 def h5_embedded_config(hf):
     """Execute h5 embedded config."""
-    value = hf["config_yaml"][()]
-    if isinstance(value, bytes):
-        value = value.decode("utf-8")
-    try:
-        config = yaml.safe_load(value) or {}
-    except yaml.YAMLError as exc:
-        raise ValueError(f"Invalid config_yaml: {exc}") from exc
-    if not isinstance(config, dict):
-        raise ValueError("config_yaml top level must be a mapping")
-    return config
+    from shared_core.data import embedded_config, source_sample_details
+
+    return embedded_config(hf)
 
 
 def read_sample_meta(h5_path, sample_idx):
@@ -123,14 +115,13 @@ def read_sample_meta(h5_path, sample_idx):
             sample_name = hf[id_dataset][sample_idx]
             if isinstance(sample_name, bytes):
                 sample_name = sample_name.decode("utf-8")
-            phantom_mode = str(source_samples.get("phantom_mode") or dataset_meta.get("phantom_mode", ""))
-            phantom_source = str(source_samples.get("phantom_source") or dataset_meta.get("phantom_source", ""))
+            sample = source_sample_details(source_samples, n_samples)[sample_idx]
             return {
                 "has_gt": has_gt,
                 "sample_name": str(sample_name),
-                "phantom_mode": phantom_mode,
-                "phantom_source": phantom_source,
-                "phantom_path": "",
+                "phantom_mode": str(sample.get("phantom_mode") or source_samples.get("phantom_mode") or dataset_meta.get("phantom_mode", "")),
+                "phantom_source": str(sample.get("phantom_source") or source_samples.get("phantom_source") or dataset_meta.get("phantom_source", "")),
+                "phantom_path": str(sample.get("phantom_path") or ""),
                 "signal_domain": input_domain,
                 "signal_domains": input_domains,
             }

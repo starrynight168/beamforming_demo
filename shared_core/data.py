@@ -1,13 +1,29 @@
 """Read explicitly described channel representations and linear teachers."""
 
+from pathlib import Path
+
 import h5py
 import numpy as np
 import yaml
-from scipy.signal import firwin
 
-from shared_core.signals import rf_to_analytic, rf_to_iq
+from shared_core.signals import ddc_lowpass_coefficients, ddc_lowpass_name, rf_to_analytic, rf_to_iq
 from shared_core.h5_schema import require_h5_schema
-from shared_core.normalization import storage_normalization_mode
+from shared_core.normalization import normalization_scale, storage_normalization_mode
+
+
+def full_check_certificate_path(h5_path, *, allow_legacy=False):
+    source = Path(h5_path).resolve()
+    data_root = Path(__file__).resolve().parents[1] / "data"
+    sidecar = source.with_name(f"{source.name}.check.json")
+    if source.is_relative_to(data_root):
+        certificate = data_root / "certificates" / source.parent.relative_to(data_root) / sidecar.name
+    elif source.parent.name == "data":
+        certificate = source.parent / "certificates" / sidecar.name
+    else:
+        return sidecar
+    if allow_legacy and not certificate.is_file() and sidecar.is_file():
+        return sidecar
+    return certificate
 
 
 def _require(hf, fields, message):
@@ -16,11 +32,52 @@ def _require(hf, fields, message):
         raise KeyError(f"{message}; missing H5 fields: {missing}")
 
 
+def embedded_config(hf, *, field="config_yaml"):
+    """Decode and parse the YAML mapping embedded in an HDF5 file.
+
+    This is the single reader for the ``config_yaml`` contract; callers keep
+    their own validation of the fields they consume.
+    """
+    if field not in hf:
+        raise KeyError(f"H5 缺少 {field}")
+    value = hf[field][()]
+    if isinstance(value, np.ndarray):
+        if value.shape != ():
+            raise ValueError(f"H5 {field} 必须是标量 YAML 文本")
+        value = value.item()
+    if isinstance(value, (bytes, np.bytes_)):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"H5 {field} 必须是有效 UTF-8 文本") from exc
+    try:
+        config = yaml.safe_load(value)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"H5 {field} 不是有效 YAML: {exc}") from exc
+    if config is None:
+        config = {}
+    if not isinstance(config, dict):
+        raise ValueError(f"H5 {field} 必须是 YAML 映射")
+    return config
+
+
+def source_sample_details(samples, count):
+    if not isinstance(samples, dict) or samples.get("count") != count:
+        raise ValueError("config_yaml.source_samples.count must match the H5 sample axis")
+    if samples.get("encoding") not in ("root_labels", "root_labels_with_path_template"):
+        raise ValueError("Unsupported config_yaml.source_samples.encoding")
+    if "records" not in samples:
+        return ({},) * count
+    records = samples["records"]
+    if not isinstance(records, list) or len(records) != count or not all(isinstance(row, dict) for row in records):
+        raise ValueError("config_yaml.source_samples.records must contain one mapping per sample")
+    return records
+
+
 def _metadata(hf):
     require_h5_schema(hf)
-    _require(hf, ("config_yaml",), "H5 requires config_yaml to describe its processing")
-    config = yaml.safe_load(hf["config_yaml"][()])
-    if not isinstance(config, dict) or not isinstance(config.get("generation"), dict):
+    config = embedded_config(hf)
+    if not isinstance(config.get("generation"), dict):
         raise ValueError("config_yaml must describe generation as a mapping")
     return config
 
@@ -89,12 +146,11 @@ def ddc_settings(hf, source_fs):
     settings = config["generation"].get("input_iq")
     if not isinstance(settings, dict):
         raise ValueError("generation.input_iq is required to derive IQ from RF")
-    ddc = settings.get("ddc")
+    ddc = settings.get("rf_fallback_ddc", settings.get("ddc"))
     if not isinstance(ddc, dict) or (
         not {"phase_sign_q", "mixing_gain", "lowpass", "resampling", "num_taps", "cutoff_hz"} <= set(ddc)
         or ddc.get("phase_sign_q") != -1
         or ddc["mixing_gain"] != 1.0
-        or ddc.get("lowpass") != "firwin_64_then_filtfilt"
         or ddc.get("resampling") != "scipy_resample_poly_kaiser_12"
     ):
         raise ValueError("Unsupported generation.input_iq.ddc definition")
@@ -114,6 +170,8 @@ def ddc_settings(hf, source_fs):
     cutoff = ddc["cutoff_hz"]
     if type(taps) is not int or taps < 2 or not np.isfinite(cutoff) or not 0 < cutoff < fs / 2:
         raise ValueError("DDC FIR length/cutoff must describe a valid lowpass filter")
+    if ddc["lowpass"] != ddc_lowpass_name(taps):
+        raise ValueError("Unsupported generation.input_iq.ddc definition")
     normalization = settings.get("normalization")
     if not isinstance(normalization, dict) or normalization.get("mode") not in ("complex_rms", "env_std", "none"):
         raise ValueError("input_iq.normalization.mode must be complex_rms, env_std or none")
@@ -123,7 +181,34 @@ def ddc_settings(hf, source_fs):
     packed_fs = settings.get("packed_sampling_frequency_hz")
     if packed_fs is None or not np.isclose(packed_fs, fs / factor, rtol=1e-6):
         raise ValueError("input_iq packed sampling frequency does not match decimation_factor")
-    return fs, fc, firwin(taps, cutoff / (fs / 2)), factor, normalization
+    beta = ddc.get("kaiser_beta")
+    if beta is not None and (not isinstance(beta, (int, float)) or not np.isfinite(beta) or beta < 0):
+        raise ValueError("DDC kaiser_beta must be finite and nonnegative")
+    window = "hamming" if beta is None else ("kaiser", beta)
+    coefficients = ddc_lowpass_coefficients(fs, fc, taps=taps, cutoff_hz=cutoff, window=window)
+    return fs, fc, coefficients, factor, normalization
+
+
+def convert_channel_frame(real, imag, domain, source_fs, t0, *, normalized, scale, ddc=None, normalization=None):
+    if imag is not None:
+        if not normalized:
+            real, imag = real.astype(np.float32) / scale, imag.astype(np.float32) / scale
+        return real, imag, scale
+    real = real.astype(np.float32)
+    if normalized:
+        real *= scale
+    if domain == "iq":
+        fc, coefficients, factor = ddc
+        real, imag = rf_to_iq(real, source_fs, fc, t0, coefficients, factor)
+        if scale is None:
+            mode = normalization["mode"]
+            scale = normalization_scale(real, imag, "rms" if mode == "complex_rms" else mode,
+                                        normalization["epsilon"])
+    elif domain == "analytic_rf":
+        real, imag = rf_to_analytic(real)
+    else:
+        imag = np.zeros_like(real)
+    return real / scale, imag / scale, scale
 
 
 def load_input_from_h5(hf, sample_idx, domain="iq"):
@@ -154,33 +239,23 @@ def load_input_from_h5(hf, sample_idx, domain="iq"):
             raise ValueError("Valid complex samples must be finite")
         normalized = input_is_normalized(hf, domain)
         scale = _scale(hf, sample_idx, required=normalized)
-        if not normalized:
-            real, imag = real / scale, imag / scale
+        real, imag, scale = convert_channel_frame(real, imag, domain, fs, t0,
+                                                   normalized=normalized, scale=scale)
     else:
         real, fs, t0, angles = _rf_frame(hf, sample_idx)
         normalized_rf = input_is_normalized(hf, "rf")
         scale = _scale(hf, sample_idx, required=normalized_rf)
-        if normalized_rf:
-            real *= scale
+        ddc, normalization = None, None
         if domain == "iq":
             fs, fc, coefficients, factor, normalization = ddc_settings(hf, fs)
-            real, imag = rf_to_iq(real, fs, fc, t0, coefficients, factor)
+            ddc = (fc, coefficients, factor)
+            if "linear_scale_ref" not in hf:
+                scale = None
+        real, imag, scale = convert_channel_frame(real, None, domain, fs, t0,
+                                                   normalized=normalized_rf, scale=scale,
+                                                   ddc=ddc, normalization=normalization)
+        if ddc:
             fs /= factor
-            if "linear_scale_ref" not in hf and normalization["mode"] == "none":
-                scale = 1.0
-            elif "linear_scale_ref" not in hf:
-                epsilon = normalization["epsilon"]
-                if normalization["mode"] == "complex_rms":
-                    scale = float(np.sqrt(np.mean(real**2 + imag**2) + epsilon))
-                else:
-                    scale = float(np.std(np.hypot(real, imag)) + epsilon)
-                if not np.isfinite(scale) or scale <= 0:
-                    raise ValueError("Derived IQ normalization scale must be finite and positive")
-        elif domain == "analytic_rf":
-            real, imag = rf_to_analytic(real)
-        else:
-            imag = np.zeros_like(real)
-        real, imag = real / scale, imag / scale
     return {"domain": domain, "real": real, "imag": imag, "fs": fs,
             "t0": t0, "angles": angles, "scale": scale}
 

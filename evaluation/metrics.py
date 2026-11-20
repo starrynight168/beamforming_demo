@@ -6,22 +6,17 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 from scipy.stats import kstest
 
+from shared_core.images import (
+    db_to_display as db_to_display,
+    envelope_from_db as db_to_envelope,
+)
+
 EPSILON = 1e-9
 MIN_PROFILE_POINTS = 2
 MIN_SIDE_LOBE_POINTS = 5
 MIN_ROI_SAMPLES = 8
 TARGET_MIN_PROMINENCE_DB = 6.0
 SPECKLE_PASS_ALPHA = 0.05
-
-
-def db_to_display(db, dr):
-    """Execute db to display."""
-    return np.clip((db + dr) / dr, 0.0, 1.0)
-
-
-def db_to_envelope(db):
-    """Execute db to envelope."""
-    return 10.0 ** (db / 20.0)
 
 
 def psnr(image, reference, data_range=1.0):
@@ -388,3 +383,32 @@ def mean_or_nan(values):
     """Execute mean or nan."""
     values = [v for v in values if v is not None and np.isfinite(v)]
     return float(np.mean(values)) if values else np.nan
+
+
+def cyst_lateral_profile(db_image, x_mm, z_mm, cyst):
+    """Peak-normalized lateral profile through the central band of a cyst ROI.
+
+    Returns ``(offsets_mm, profile_db)``. The profile is NaN when the band has
+    no positive envelope peak; callers can skip such a method.
+    """
+    image = np.asarray(db_image)
+    x_mm = np.asarray(x_mm, dtype=np.float64)
+    z_mm = np.asarray(z_mm, dtype=np.float64)
+    if image.shape != (z_mm.size, x_mm.size):
+        raise ValueError("cyst profile image shape must match the coordinate grids")
+    diameter = float(cyst["diameter_mm"])
+    radius = diameter / 2.0
+    half_width = max(5.0, 1.75 * radius)
+    x_mask = np.abs(x_mm - float(cyst["x_mm"])) < half_width
+    offsets = x_mm[x_mask] - float(cyst["x_mm"])
+    center = int(np.argmin(np.abs(z_mm - float(cyst["z_mm"]))))
+    spacing = float(np.median(np.abs(np.diff(z_mm)))) if z_mm.size > 1 else 1.0
+    half_rows = max(1, min(3, int(round(0.35 * diameter / max(spacing, 1.0e-9)))))
+    rows = np.arange(max(0, center - half_rows), min(z_mm.size, center + half_rows + 1))
+    envelope = np.power(10.0, image[np.ix_(rows, x_mask)] / 20.0)
+    profile_env = np.nanmean(envelope, axis=0)
+    peak = float(np.nanmax(profile_env)) if profile_env.size else np.nan
+    if not np.isfinite(peak) or peak <= 0:
+        return offsets, np.full(offsets.shape, np.nan)
+    profile = 20.0 * np.log10(np.maximum(profile_env, 1.0e-12))
+    return offsets, np.minimum(profile, 0.0)

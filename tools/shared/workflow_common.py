@@ -187,16 +187,13 @@ def list_h5_files():
 
 def inspect_h5(path):
     """Execute inspect h5."""
+    from shared_core.data import embedded_config, source_sample_details
+
     with h5py.File(path, "r") as hf:
         require_h5_schema(hf)
         if "config_yaml" not in hf:
             raise ValueError("当前 H5 必须包含 config_yaml")
-        raw_config = hf["config_yaml"][()]
-        if isinstance(raw_config, bytes):
-            raw_config = raw_config.decode("utf-8", errors="replace")
-        config = yaml.safe_load(raw_config)
-        if not isinstance(config, dict):
-            raise ValueError("config_yaml 顶层必须是映射")
+        config = embedded_config(hf)
         generation = config.get("generation", {})
         storage = generation.get("storage", {}) if isinstance(generation, dict) else {}
         declared = storage.get("inputs", {}) if isinstance(storage, dict) else {}
@@ -324,11 +321,12 @@ def inspect_h5(path):
                 str(value.decode("utf-8") if isinstance(value, bytes) else value)
                 for value in hf[id_dataset][:]
             ]
-            is_in_vivo = (
-                samples.get("phantom_mode") == "in_vivo"
-                or samples.get("phantom_source") == "in_vivo"
-            )
-            in_vivo = [is_in_vivo] * n
+            dataset = config["dataset"]
+            in_vivo = [
+                (sample.get("phantom_mode") or samples.get("phantom_mode") or dataset.get("phantom_mode")) == "in_vivo"
+                or (sample.get("phantom_source") or samples.get("phantom_source") or dataset.get("phantom_source")) == "in_vivo"
+                for sample in source_sample_details(samples, n)
+            ]
         else:
             raise ValueError("H5 必须声明每个样本的来源标识")
     return {

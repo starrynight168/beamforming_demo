@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 from algorithms.das import DASBeamformerIQ
 from algorithms.shared_core.common import (
     add_common_arguments,
+    build_beamformer,
     beamformed_image_db,
     beamforming_depth_grid,
     prepare_beamforming_input,
@@ -27,6 +28,7 @@ from shared_core.plot_style import (
     DIAGNOSTIC,
     PAPER,
     apply_style,
+    draw_bmode,
     save_figure,
     style_axes,
 )
@@ -253,15 +255,7 @@ def save_bmode(
 ) -> None:
     fig, axis = plt.subplots(figsize=(5.0, 4.0))
     extent = [x_range[0], x_range[1], z_range[1], z_range[0]]
-    handle = axis.imshow(
-        image,
-        extent=extent,
-        cmap="gray",
-        vmin=-60,
-        vmax=0,
-        aspect="equal",
-        interpolation="nearest",
-    )
+    handle = draw_bmode(axis, image, extent, 60.0, interpolation="nearest")
     axis.set_xlim(x_range)
     axis.set_ylim(z_range[1], z_range[0])
     axis.set_xticks(ticks_with_limits(*x_range))
@@ -295,13 +289,11 @@ def save_grid_comparison(
     for axis, result in zip(axes.flat, results):
         x_range = result["x_range_mm"]
         z_range = result["z_range_mm"]
-        handle = axis.imshow(
+        handle = draw_bmode(
+            axis,
             result["image"],
-            extent=[x_range[0], x_range[1], z_range[1], z_range[0]],
-            cmap="gray",
-            vmin=-60,
-            vmax=0,
-            aspect="equal",
+            [x_range[0], x_range[1], z_range[1], z_range[0]],
+            60.0,
             interpolation="nearest",
         )
         axis.set_xlim(x_range)
@@ -337,9 +329,9 @@ def run_das(input_data, x_grid, z_grid, args, device):
     sample = input_data.sample
     c = sample.c
     compute_z = beamforming_depth_grid(z_grid, c, sample.fs, args.signal_domain)
-    beamformer = DASBeamformerIQ(
-        compute_z, x_grid, sample.n_elem, sample.pitch, c, sample.fc, sample.fs,
-        input_data.t0, sample.angles, options=args, device=device,
+    beamformer = build_beamformer(
+        DASBeamformerIQ, compute_z, x_grid, sample.n_elem, sample.pitch, c,
+        sample.fc, sample.fs, input_data.t0, sample.angles, args, device,
     )
     i_out, q_out, elapsed = run_beamformer(
         beamformer,

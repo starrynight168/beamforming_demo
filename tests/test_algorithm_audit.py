@@ -225,6 +225,24 @@ class AlgorithmAuditTests(unittest.TestCase):
             second = result_cache_signature(h5_path, "das", extra_args=extra)
             self.assertNotEqual(first["dependencies"], second["dependencies"])
 
+    def test_cache_signature_tracks_shared_signal_primitives(self):
+        with tempfile.TemporaryDirectory() as directory:
+            h5_path = Path(directory) / "input.h5"
+            h5_path.write_bytes(b"input")
+            before = result_cache_signature(h5_path, "das")
+            path_open = Path.open
+            for name in ("geometry.py", "selection.py", "phase.py"):
+                def changed(path, *args, **kwargs):
+                    stream = path_open(path, *args, **kwargs)
+                    mode = args[0] if args else kwargs.get("mode", "r")
+                    if path.name == name and path.parent.name == "shared_core" and mode == "rb":
+                        with stream:
+                            return io.BytesIO(stream.read() + b" changed")
+                    return stream
+                with self.subTest(name=name), patch.object(Path, "open", changed):
+                    after = result_cache_signature(h5_path, "das")
+                    self.assertNotEqual(before["sources"], after["sources"])
+
     def test_ablation_refreshes_gt_after_reconstruction(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

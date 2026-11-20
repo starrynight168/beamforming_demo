@@ -207,10 +207,15 @@ def point_profiles(
             window="rect",
             interp=args.interp,
             signal_domain="iq",
+            mv_dl=loading,
+            fbss=fbss,
+            subarray_ratio=args.subarray_ratio,
+            temporal_win=args.temporal_win,
         )
 
         def beam(i_data, q_data, x_grid, z_values):
-            beamformer = mv.RowDynamicMVBeamformerIQ(
+            beamformer = mv.build_beamformer(
+                mv.RowDynamicMVBeamformerIQ,
                 z_values,
                 x_grid,
                 geom["channels"],
@@ -220,11 +225,7 @@ def point_profiles(
                 fs,
                 t0,
                 np.array([angle], dtype=np.float32),
-                mv_dl=loading,
-                fbss=fbss,
-                subarray_ratio=args.subarray_ratio,
-                temporal_win=args.temporal_win,
-                options=options,
+                options,
             )
             with torch.no_grad():
                 out_i, out_q = beamformer(

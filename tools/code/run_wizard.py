@@ -1,7 +1,6 @@
 """Run the interactive algorithm workflow."""
 
 import argparse
-import hashlib
 import json
 import math
 import subprocess
@@ -37,6 +36,7 @@ from tools.shared.workflow_common import (
     run_steps,
     sample_can_be_evaluated,
 )
+from shared_core.hashing import sha256_bytes
 from tools.shared.run_output import emit, prepare_output_tree, run_process, write_json
 
 
@@ -288,7 +288,7 @@ def reusable_scene_id(config):
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return f"wizard_{hashlib.sha256(encoded).hexdigest()[:16]}"
+    return f"wizard_{sha256_bytes(encoded)[:16]}"
 
 
 def make_temp_config_path(output_root, scene_id):

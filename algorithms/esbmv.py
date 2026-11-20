@@ -14,6 +14,7 @@ PROJECT_ROOT = initialize_project_path(__file__)
 
 from algorithms import mv
 from algorithms.shared_core.common import (
+    build_beamformer,
     resolve_device,
     closed_unit_interval_float,
     beamforming_depth_grid,
@@ -165,20 +166,10 @@ def main(argv=None):
     )
 
     # 初始化 ESBMV + FBSS 波束合成器
-    bf = RowDynamicMVBeamformerIQ(
-        compute_z,
-        x_grid,
-        n_elem,
-        pitch,
-        c,
-        fc,
-        fs,
-        t0_sub,
-        angles_all,
-        mv_dl=args.mv_dl,
-        fbss=args.fbss,
-        subarray_ratio=args.subarray_ratio,
-        temporal_win=args.temporal_win, options=args, device=device)
+    bf = build_beamformer(
+        RowDynamicMVBeamformerIQ, compute_z, x_grid, n_elem, pitch, c, fc, fs,
+        t0_sub, angles_all, args, device,
+    )
 
     print(f"Processing ESBMV (DL={args.mv_dl})...")
     i_out, q_out, dt = run_beamformer(

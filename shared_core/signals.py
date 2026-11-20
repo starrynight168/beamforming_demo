@@ -1,7 +1,41 @@
 """Channel RF conversions using the acquisition time axis."""
 
 import numpy as np
-from scipy.signal import filtfilt, hilbert, resample_poly
+from scipy.signal import filtfilt, firwin, hilbert, resample_poly
+
+DDC_LOWPASS_TAPS = 64
+DDC_LOWPASS_CUTOFF_OVER_FC = 0.8
+
+
+def ddc_lowpass_coefficients(
+    fs,
+    fc,
+    taps=DDC_LOWPASS_TAPS,
+    cutoff_over_fc=DDC_LOWPASS_CUTOFF_OVER_FC,
+    *,
+    cutoff_hz=None,
+    window="hamming",
+):
+    """FIR anti-alias low-pass used by the RF→IQ demodulation path.
+
+    Defaults to the project DDC settings. The cutoff and window may be
+    specified explicitly by an acquisition's metadata or simulator.
+    """
+    fs, fc = float(fs), float(fc)
+    if not np.isfinite(fs) or fs <= 0 or not np.isfinite(fc) or fc <= 0:
+        raise ValueError("DDC 低通需要有限正采样率和中心频率")
+    if type(taps) is not int or taps < 2:
+        raise ValueError("DDC 低通阶数必须是至少为 2 的整数")
+    cutoff = cutoff_over_fc * fc if cutoff_hz is None else cutoff_hz
+    if not 0.0 < cutoff < fs / 2.0:
+        raise ValueError("DDC 低通截止频率必须位于 (0, fs/2)")
+    return firwin(taps, cutoff / (fs / 2.0), window=window)
+
+
+def ddc_lowpass_name(taps):
+    if type(taps) is not int or taps < 2:
+        raise ValueError("DDC 低通阶数必须是至少为 2 的整数")
+    return f"firwin_{taps}_then_filtfilt"
 
 
 def _rf_array(rf):

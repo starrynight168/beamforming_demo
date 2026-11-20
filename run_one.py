@@ -24,9 +24,20 @@ from algorithms.shared_core.common import (
     ground_truth_db,
     merge_common_params,
     result_cache_signature,
+    validate_db_output,
 )
 from evaluation.context import load_picmus_context
+from shared_core.plot_style import (
+    DIAGNOSTIC,
+    FONT_SIZE,
+    apply_style,
+    draw_bmode,
+    save_figure,
+    style_axes,
+)
 from shared_core.h5_schema import require_h5_schema
+from shared_core.data import embedded_config
+from shared_core.geometry import image_extent_mm
 from shared_core.file_sets import replace_file_set
 from algorithms.shared_core.labels import target_label
 
@@ -257,12 +268,7 @@ def load_grid_and_gt(h5_path, sample_idx, has_gt, signal_domain="iq"):
         gt.shape != (z_grid.size, x_grid.size) or not np.isfinite(gt).all()
     ):
         raise ValueError(f"GT 形状或数值非法: {gt.shape}")
-    extent_mm = [
-        x_grid[0] * 1000,
-        x_grid[-1] * 1000,
-        z_grid[-1] * 1000,
-        z_grid[0] * 1000,
-    ]
+    extent_mm = image_extent_mm(x_grid, z_grid)
     return extent_mm, gt
 
 
@@ -272,7 +278,7 @@ def scene_has_gt(scene, signal_domain="iq"):
     sample_idx = int(scene["sample_idx"])
     with h5py.File(h5_path, "r") as hf:
         require_h5_schema(hf)
-        config = yaml.safe_load(hf["config_yaml"][()])
+        config = embedded_config(hf)
         generation = config["generation"]
         ground_truth = generation["ground_truth"]
         algorithm = ground_truth["algorithm"]
@@ -299,12 +305,8 @@ def scene_has_gt(scene, signal_domain="iq"):
         return True
 
 
-def save_comparison(images, titles, extent_mm, output_path, dr, _cleanup_pages=True):
+def save_comparison(images, titles, extent_mm, output_path, dr):
     """Render comparison pages before replacing the previous page set."""
-    if not _cleanup_pages:
-        return _render_comparison_pages(
-            images, titles, extent_mm, output_path, dr, _cleanup_pages=False
-        )
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
@@ -313,7 +315,7 @@ def save_comparison(images, titles, extent_mm, output_path, dr, _cleanup_pages=T
         stage_root = Path(temporary)
         staged_output = stage_root / output_path.name
         _render_comparison_pages(
-            images, titles, extent_mm, staged_output, dr, _cleanup_pages=False
+            images, titles, extent_mm, staged_output, dr
         )
         generated = tuple(
             path.relative_to(stage_root)
@@ -330,15 +332,11 @@ def save_comparison(images, titles, extent_mm, output_path, dr, _cleanup_pages=T
         replace_file_set(stage_root, output_path.parent, generated, managed)
 
 
-def _render_comparison_pages(images, titles, extent_mm, output_path, dr, _cleanup_pages=True):
+def _render_comparison_pages(images, titles, extent_mm, output_path, dr):
     """Render comparison pages into a staging directory."""
+    apply_style(DIAGNOSTIC)
     n_images = len(images)
     max_images_per_page = MAX_COMPARISON_IMAGES_PER_PAGE
-    if _cleanup_pages:
-        for stale in output_path.parent.glob(
-            f"{output_path.stem}_page*{output_path.suffix}"
-        ):
-            stale.unlink(missing_ok=True)
     if n_images > max_images_per_page:
         for page_idx, start in enumerate(
             range(0, n_images, max_images_per_page), start=1
@@ -356,7 +354,6 @@ def _render_comparison_pages(images, titles, extent_mm, output_path, dr, _cleanu
                 extent_mm,
                 page_path,
                 dr,
-                _cleanup_pages=False,
             )
         return
     cols = 4 if n_images > 4 else min(2, n_images)
@@ -364,58 +361,44 @@ def _render_comparison_pages(images, titles, extent_mm, output_path, dr, _cleanu
     fig, axes = plt.subplots(
         rows,
         cols,
-        figsize=(3.8 * cols, 4.2 * rows),
-        dpi=300,
+        figsize=(3.4 * cols, 3.8 * rows),
         squeeze=False,
         constrained_layout=True,
     )
     im = None
     for idx, (image, title) in enumerate(zip(images, titles, strict=True)):
         ax = axes[idx // cols][idx % cols]
-        im = ax.imshow(
-            image,
-            cmap="gray",
-            vmin=-dr,
-            vmax=0,
-            extent=extent_mm,
-            aspect="equal",
-        )
-        ax.set_title(title, fontsize=12, pad=8, fontweight="bold")
+        im = draw_bmode(ax, image, extent_mm, dr)
+        ax.set_title(title, pad=6)
         ax.set_xlabel("Lateral (mm)")
         if idx % cols == 0:
             ax.set_ylabel("Depth (mm)")
         else:
             ax.set_yticklabels([])
-        add_scale_bar(ax, extent_mm, fontsize=9)
+        style_axes(ax)
+        add_scale_bar(ax, extent_mm, fontsize=FONT_SIZE)
 
     for idx in range(n_images, rows * cols):
         axes[idx // cols][idx % cols].axis("off")
 
     cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.025, pad=0.02)
     cbar.set_label("Amplitude (dB)")
-    plt.savefig(output_path, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
+    save_figure(fig, output_path, profile=DIAGNOSTIC)
 
 
 def save_single_image(image, title, extent_mm, output_path, dr):
     """Save single image."""
-    fig, ax = plt.subplots(figsize=(4.2, 4.6), dpi=300, constrained_layout=True)
-    im = ax.imshow(
-        image,
-        cmap="gray",
-        vmin=-dr,
-        vmax=0,
-        extent=extent_mm,
-        aspect="equal",
-    )
-    ax.set_title(title, fontsize=12, pad=8, fontweight="bold")
+    apply_style(DIAGNOSTIC)
+    fig, ax = plt.subplots(figsize=(4.0, 4.4), constrained_layout=True)
+    im = draw_bmode(ax, image, extent_mm, dr)
+    ax.set_title(title, pad=6)
     ax.set_xlabel("Lateral (mm)")
     ax.set_ylabel("Depth (mm)")
-    add_scale_bar(ax, extent_mm, fontsize=9)
+    style_axes(ax)
+    add_scale_bar(ax, extent_mm, fontsize=FONT_SIZE)
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label("Amplitude (dB)")
-    fig.savefig(output_path, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
+    save_figure(fig, output_path, profile=DIAGNOSTIC)
 
 
 def save_individual_images(images, titles, image_names, extent_mm, output_dir, dr):
@@ -579,19 +562,13 @@ def main():
     if has_gt and gt is not None:
         images.append(gt)
         with h5py.File(resolve_path(scene["h5_path"]), "r") as hf:
-            metadata = yaml.safe_load(hf["config_yaml"][()])
+            metadata = embedded_config(hf)
         teacher = metadata["generation"]["ground_truth"]["algorithm"]
         titles.append(target_label(metadata, params["signal_domain"], teacher))
         image_names.append("ground_truth")
     for method, label in zip(methods, labels, strict=True):
         path = scene_dir / method / f"{method}.npy"
-        image = np.load(path).astype(np.float32)
-        if image.shape != expected_shape or not np.all(np.isfinite(image)):
-            raise ValueError(f"算法 {method} 输出必须是有限二维数组: {image.shape}")
-        if not np.isclose(float(np.max(image)), 0.0, rtol=0.0, atol=1.0e-3):
-            raise ValueError(f"算法 {method} 输出未归一化到 0 dB")
-        if not np.any(image < -1.0e-3):
-            raise ValueError(f"算法 {method} 输出没有可测动态范围")
+        image = validate_db_output(np.load(path), expected_shape, method)
         images.append(image)
         titles.append(label)
         image_names.append(method)

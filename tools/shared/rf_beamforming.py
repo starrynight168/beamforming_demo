@@ -2,78 +2,70 @@
 
 import numpy as np
 import torch
-from scipy.signal import hilbert, welch
+from scipy.signal import welch
 
+from shared_core.geometry import element_positions, plane_wave_distance, receive_distance
+from algorithms.shared_core.common import (
+    beamformed_envelope,
+    build_beamformer,
+    resample_depth,
+    run_beamformer,
+)
 from .run_output import emit
 
 from algorithms.shared_core.beamforming import (
     dynamic_aperture_channel_count,
     interpolate_channel_samples,
+    normalized_mv_weights,
     spatial_temporal_covariance,
 )
 
 
 def rf_mv(raw, x, z, angle, fs, c, pitch, t0, loading, ratio, temporal_win, device, f_number=1.5, dynamic_aperture=True, interp="cubic", fbss=True, complex_weights=False):
-    real = torch.as_tensor(raw, device=device)
-    imag = torch.as_tensor(hilbert(raw, axis=0).imag.copy(), device=device) if complex_weights else torch.zeros_like(real)
-    xs = torch.as_tensor(x, device=device)
-    positions = (torch.arange(raw.shape[1], device=device) - (raw.shape[1] - 1) / 2) * pitch
-    angle_t = torch.tensor(angle, device=device)
-    channel = torch.arange(raw.shape[1], device=device)[None, :, None]
-    offsets = torch.arange(-(temporal_win // 2), temporal_win // 2 + 1, device=device)
-    center = torch.argmin(torch.abs(xs[:, None] - positions[None, :]), dim=1)
-    result = np.empty((len(z), len(x)), dtype=np.complex64 if complex_weights else np.float32)
-    with torch.no_grad():
-        for row, depth in enumerate(z):
-            aperture = dynamic_aperture_channel_count(float(depth), f_number, pitch, raw.shape[1], dynamic_aperture)
-            length = min(max(int(aperture * ratio), 2), aperture)
-            start = (center - aperture // 2).clamp(0, raw.shape[1] - aperture)
-            active = start[:, None, None] + torch.arange(aperture, device=device)[None, :, None]
-            active = active.expand(-1, -1, temporal_win)
-            matrix_dtype = torch.complex64 if complex_weights else torch.float32
-            eye = torch.eye(length, dtype=matrix_dtype, device=device)
-            ones = torch.ones((len(x), length, 1), dtype=matrix_dtype, device=device)
-            tx = (float(depth) * torch.cos(angle_t) + xs * torch.sin(angle_t)) / c
-            rx = torch.sqrt((xs[:, None] - positions[None, :]).square() + float(depth) ** 2) / c
-            index = ((tx[:, None] + rx - t0) * fs)[:, :, None] + offsets
-            valid = (index >= 0) & (index <= len(raw) - 1)
-            ir, iq = interpolate_channel_samples(real, imag, index, channel, interp)
-            ir, iq = ir * valid, iq * valid
-            ir, iq = ir.gather(1, active), iq.gather(1, active)
-            if complex_weights:
-                snapshots, cov = spatial_temporal_covariance(torch.complex(ir, iq), length, temporal_win, fbss)
-                trace = cov.diagonal(dim1=-2, dim2=-1).real.sum(-1)
-            else:
-                snapshots, cov = spatial_temporal_covariance(ir, length, temporal_win, fbss)
-                trace = cov.diagonal(dim1=-2, dim2=-1).sum(-1)
-            eps = torch.finfo(cov.real.dtype if complex_weights else cov.dtype).eps
-            cov = cov + (loading * (trace / length).clamp_min(eps))[:, None, None] * eye
-            solution = torch.linalg.solve(cov, ones)
-            denominator = (ones.mH @ solution).real.clamp_min(eps)
-            weights = solution / denominator
-            if complex_weights:
-                center_snapshots = snapshots[:, :, :, temporal_win // 2].mean(dim=2)
-                result[row] = (weights.squeeze(-1).conj() * center_snapshots).sum(dim=1).cpu().numpy()
-            else:
-                center_real = snapshots[:, :, :, temporal_win // 2].mean(dim=2)
-                y_real = (weights.squeeze(-1) * center_real).sum(dim=1)
-                result[row] = y_real.cpu().numpy()
-            if (row + 1) % 100 == 0:
-                emit(None, "progress", f"RF MV {row + 1}/{len(z)}")
-    return result
+    from types import SimpleNamespace
+    from algorithms.mv import RowDynamicMVBeamformerIQ
+    from shared_core.signals import rf_to_analytic
+
+    signal = np.asarray(raw, dtype=np.float32)[None]
+    if complex_weights:
+        real, imag = rf_to_analytic(signal)
+        domain = "analytic_rf"
+    else:
+        real, imag = signal, np.zeros_like(signal)
+        domain = "rf"
+    options = SimpleNamespace(f_number=f_number, dynamic_aperture=dynamic_aperture,
+                              window="rect", interp=interp, signal_domain=domain,
+                              mv_dl=loading, fbss=fbss, subarray_ratio=ratio,
+                              temporal_win=temporal_win)
+    angles = np.array([angle])
+    starts = np.array([t0])
+    beamformer = build_beamformer(
+        RowDynamicMVBeamformerIQ, z, x, raw.shape[1], pitch, c, fs / 4, fs,
+        starts, angles, options, device,
+    )
+    out_real, out_imag, _ = run_beamformer(
+        beamformer, real, imag, angles, starts, fs, device,
+    )
+    return out_real + 1j * out_imag if complex_weights else out_real
+
 
 
 def rf_mv_signed_and_envelope(raw, x, z, angle, fs, c, pitch, t0, loading, ratio, temporal_win, device, f_number=1.5, dynamic_aperture=True, interp="cubic", fbss=True):
     dz = c / (2.0 * fs)
     z_dense = np.arange(float(z[0]), float(z[-1]) + 0.5 * dz, dz, dtype=np.float32)
     signed_dense = rf_mv(raw, x, z_dense, angle, fs, c, pitch, t0, loading, ratio, temporal_win, device, f_number, dynamic_aperture, interp, fbss)
-    envelope_dense = np.abs(hilbert(signed_dense, N=2 * len(signed_dense), axis=0)[:len(signed_dense)])
-    right = np.searchsorted(z_dense, z, side="right").clip(1, len(z_dense) - 1)
-    left = right - 1
-    fraction = ((z - z_dense[left]) / (z_dense[right] - z_dense[left])).astype(np.float32)
-    signed = signed_dense[left] * (1.0 - fraction[:, None]) + signed_dense[right] * fraction[:, None]
-    envelope = envelope_dense[left] * (1.0 - fraction[:, None]) + envelope_dense[right] * fraction[:, None]
-    return signed.astype(np.float32), envelope.astype(np.float32)
+    signed = resample_depth(signed_dense, z_dense, z)
+    envelope = beamformed_envelope(
+        signed_dense,
+        np.zeros_like(signed_dense),
+        z_dense,
+        z,
+        0.0,
+        False,
+        0.0,
+        "rf",
+    )
+    return signed, envelope
 
 
 def estimate_stft_frequency_bands(raw, fs, fc, window_len):
@@ -107,11 +99,14 @@ def estimate_stft_frequency_bands(raw, fs, fc, window_len):
 
 
 def stft_frequency_mv(raw, x, z, angle, fs, fc, c, pitch, t0, loading, ratio, temporal_win, device, window_len=16, selected_bins=None, f_number=1.5, dynamic_aperture=True, interp="cubic", fbss=True):
-    analytic = hilbert(raw, axis=0)
+    from algorithms.mv import _load_joint_covariance
+    from shared_core.signals import rf_to_analytic
+    real, imag = rf_to_analytic(np.asarray(raw, dtype=np.float32)[None])
+    analytic = real[0] + 1j * imag[0]
     real = torch.as_tensor(raw, device=device)
     imag = torch.as_tensor(analytic.imag.copy(), device=device)
     xs = torch.as_tensor(x, device=device)
-    positions = (torch.arange(raw.shape[1], device=device) - (raw.shape[1] - 1) / 2) * pitch
+    positions = element_positions(raw.shape[1], pitch, device=device)
     angle_t = torch.tensor(angle, device=device)
     channel = torch.arange(raw.shape[1], device=device)[None, :, None, None]
     center_channel = torch.argmin(torch.abs(xs[:, None] - positions[None, :]), dim=1)
@@ -139,8 +134,8 @@ def stft_frequency_mv(raw, x, z, angle, fs, fc, c, pitch, t0, loading, ratio, te
             active = active[:, :, None, None].expand(-1, -1, temporal_win, window_len)
             eye = torch.eye(length, dtype=torch.complex64, device=device)
             ones = torch.ones((len(x), length, 1), dtype=torch.complex64, device=device)
-            tx = (float(depth) * torch.cos(angle_t) + xs * torch.sin(angle_t)) / c
-            rx = torch.sqrt((xs[:, None] - positions[None, :]).square() + float(depth) ** 2) / c
+            tx = plane_wave_distance(xs, float(depth), torch.cos(angle_t), torch.sin(angle_t)) / c
+            rx = receive_distance(xs[:, None], float(depth), positions[None, :]) / c
             center_sample = ((tx[:, None] + rx - t0) * fs)[:, :, None, None]
             offsets = frame_offsets[:, None] + sample_offsets[None, :]
             sample_index = center_sample + offsets[None, None, :, :]
@@ -150,14 +145,10 @@ def stft_frequency_mv(raw, x, z, angle, fs, fc, c, pitch, t0, loading, ratio, te
             signal = signal.gather(1, active)
             spectrum = torch.fft.fft(signal, dim=-1)
             row_output = torch.zeros(len(x), dtype=torch.complex64, device=device)
-            eps = torch.finfo(torch.float32).eps
             for freq_idx, phase_factor in zip(selected_bin_values, reconstruction_phase):
                 snapshots, cov = spatial_temporal_covariance(spectrum[..., freq_idx], length, temporal_win, fbss)
-                trace = cov.diagonal(dim1=-2, dim2=-1).real.sum(-1)
-                cov = cov + (loading * (trace / length).clamp_min(eps))[:, None, None] * eye
-                solution = torch.linalg.solve(cov, ones)
-                denominator = (ones.mH @ solution).real.clamp_min(eps)
-                weights = solution / denominator
+                cov = _load_joint_covariance(cov, loading, eye)
+                weights = normalized_mv_weights(cov, ones)
                 center = snapshots[:, :, :, temporal_win // 2].mean(dim=2)
                 row_output += (weights.squeeze(-1).conj() * center).sum(dim=1) * phase_factor
             result[row] = (row_output / window_sum).cpu().numpy()

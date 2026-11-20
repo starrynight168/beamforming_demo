@@ -14,8 +14,11 @@ else:
 
 PROJECT_ROOT = initialize_project_path(__file__)
 
+from shared_core.geometry import plane_wave_distance
+from shared_core.phase import carrier_phase, phase_factors, rotate_components
 from algorithms.shared_core.beamforming import (
     build_row_dynamic_geometry,
+    forward_backward_covariance,
     interpolate_channel_samples,
     interpolate_multi_angle_channel_samples,
     optional_aperture_window_1d,
@@ -24,6 +27,7 @@ from algorithms.shared_core.beamforming import (
     spatial_temporal_covariance,
 )
 from algorithms.shared_core.common import (
+    build_beamformer,
     resolve_device,
     add_common_arguments,
     add_io_arguments,
@@ -182,18 +186,16 @@ class RowDynamicMVBeamformerIQ:
 
         # 1. 预计算接收端相位旋转因子 (全网格 3D)
         if self.signal_domain == "iq":
-            phi_rx_global = 2.0 * np.pi * self.fc * (self.drs / fs)
-            cos_rx_global = torch.cos(phi_rx_global)
-            sin_rx_global = torch.sin(phi_rx_global)
+            phi_rx_global = carrier_phase(self.fc, self.drs / fs)
+            cos_rx_global, sin_rx_global = phase_factors(phi_rx_global)
 
         for i in range(n_a):
             i_angle = i_tensor[i]
             q_angle = q_tensor[i]
 
             for hz in range(self.height):
-                tx_row = (
-                    self.z_mesh[hz] * self.sc * cos_a[i]
-                    + self.x_mesh[hz] * self.sc * sin_a[i]
+                tx_row = plane_wave_distance(
+                    self.x_mesh[hz] * self.sc, self.z_mesh[hz] * self.sc, cos_a[i], sin_a[i],
                 )
                 sample_no_t0 = tx_row.unsqueeze(-1) + self.drs[hz]
                 sample_center = sample_no_t0 - t_starts_t[i]
@@ -213,8 +215,7 @@ class RowDynamicMVBeamformerIQ:
                 if self.signal_domain == "iq":
                     cos_rx = cos_rx_global[hz].unsqueeze(-1)
                     sin_rx = sin_rx_global[hz].unsqueeze(-1)
-                    i_rx = i_samples * cos_rx - q_samples * sin_rx
-                    q_rx = i_samples * sin_rx + q_samples * cos_rx
+                    i_rx, q_rx = rotate_components(i_samples, q_samples, cos_rx, sin_rx)
                 else:
                     i_rx, q_rx = i_samples, q_samples
 
@@ -233,13 +234,7 @@ class RowDynamicMVBeamformerIQ:
                 )
 
                 # ========== 对角加载 ==========
-                trace = covariance.diagonal(dim1=-2, dim2=-1).real.sum(-1)  # [width]
-                covariance_loaded = (
-                    covariance
-                    + (self.dl_factor / subarray_size)
-                    * trace.view(self.width, 1, 1)
-                    * row["eye"]
-                )
+                covariance_loaded = _load_joint_covariance(covariance, self.dl_factor, row["eye"])
 
                 # ========== 标准 MVDR 求解 ==========
                 ones_subarray = row["ones"]
@@ -252,13 +247,12 @@ class RowDynamicMVBeamformerIQ:
 
                 # 3. 发射端相位旋转 (2D)
                 if self.signal_domain == "iq":
-                    phi_tx = 2.0 * np.pi * self.fc * (tx_row / fs)
-                    cos_tx = torch.cos(phi_tx).view(self.width, 1, 1)
-                    sin_tx = torch.sin(phi_tx).view(self.width, 1, 1)
-                    y_row = torch.complex(
-                        y_row_rx.real * cos_tx - y_row_rx.imag * sin_tx,
-                        y_row_rx.real * sin_tx + y_row_rx.imag * cos_tx,
-                    )
+                    phi_tx = carrier_phase(self.fc, tx_row / fs)
+                    cos_tx, sin_tx = phase_factors(phi_tx)
+                    i_rot, q_rot = rotate_components(y_row_rx.real, y_row_rx.imag,
+                                                     cos_tx.view(self.width, 1, 1),
+                                                     sin_tx.view(self.width, 1, 1))
+                    y_row = torch.complex(i_rot, q_rot)
                 else:
                     y_row = y_row_rx
 
@@ -321,9 +315,10 @@ class RowDynamicMVBeamformerIQ:
                 x_stop = min(x_start + column_block, self.width)
                 x_slice = slice(x_start, x_stop)
                 block_width = x_stop - x_start
-                tx_row = (
-                    self.z_mesh[hz, x_slice].unsqueeze(0) * self.sc * cos_a.unsqueeze(1)
-                    + self.x_mesh[hz, x_slice].unsqueeze(0) * self.sc * sin_a.unsqueeze(1)
+                tx_row = plane_wave_distance(
+                    self.x_mesh[hz, x_slice].unsqueeze(0) * self.sc,
+                    self.z_mesh[hz, x_slice].unsqueeze(0) * self.sc,
+                    cos_a.unsqueeze(1), sin_a.unsqueeze(1),
                 )
                 drs = self.drs[hz, x_slice]
                 sample = (
@@ -342,12 +337,11 @@ class RowDynamicMVBeamformerIQ:
                     self.options.interp,
                 )
                 if self.signal_domain == "iq":
-                    phi_tx = 2.0 * np.pi * self.fc * tx_row / fs
-                    phi_rx = 2.0 * np.pi * self.fc * drs / fs
+                    phi_tx = carrier_phase(self.fc, tx_row) / fs
+                    phi_rx = carrier_phase(self.fc, drs) / fs
                     phi = phi_tx[:, :, None, None] + phi_rx.unsqueeze(0).unsqueeze(-1)
-                    cos_phi, sin_phi = torch.cos(phi), torch.sin(phi)
-                    i_aligned = i_samples * cos_phi - q_samples * sin_phi
-                    q_aligned = i_samples * sin_phi + q_samples * cos_phi
+                    cos_phi, sin_phi = phase_factors(phi)
+                    i_aligned, q_aligned = rotate_components(i_samples, q_samples, cos_phi, sin_phi)
                 else:
                     i_aligned, q_aligned = i_samples, q_samples
                 data = torch.complex(i_aligned, q_aligned) * valid
@@ -486,9 +480,7 @@ def joint_spatial_covariance(data, valid, axis, subarray_size, use_fbss, weights
     covariance = covariance / denominator.clamp_min(
         torch.finfo(data.real.dtype).tiny,
     ).view(-1, 1, 1)
-    if use_fbss:
-        covariance = 0.5 * (covariance + covariance.conj().flip(-1, -2))
-    return covariance
+    return forward_backward_covariance(covariance, use_fbss)
 
 
 def _load_joint_covariance(covariance, dl_factor, eye):
@@ -578,21 +570,10 @@ def main(
     )
 
     # 初始化标准 MV + FBSS 波束合成器
-    bf = beamformer_class(
-        compute_z,
-        x_grid,
-        n_elem,
-        pitch,
-        c,
-        fc,
-        fs,
-        t0_sub,
-        angles_all,
-        mv_dl=args.mv_dl,
-        fbss=args.fbss,
-        subarray_ratio=args.subarray_ratio,
-        temporal_win=args.temporal_win,
-        options=args, device=device)
+    bf = build_beamformer(
+        beamformer_class, compute_z, x_grid, n_elem, pitch, c, fc, fs,
+        t0_sub, angles_all, args, device,
+    )
 
     print(f"Processing {method_label} (DL={args.mv_dl})...")
     i_out, q_out, dt = run_beamformer(

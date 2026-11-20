@@ -7,12 +7,16 @@ from pathlib import Path
 import numpy as np
 import torch
 
+
 if __package__:
     from algorithms.bootstrap import initialize_project_path
 else:
     from bootstrap import initialize_project_path
 
 PROJECT_ROOT = initialize_project_path(__file__)
+
+from shared_core.geometry import element_positions, plane_wave_distance, receive_distance
+from shared_core.phase import carrier_phase, phase_factors, rotate_components
 
 from algorithms import mv
 from algorithms.shared_core.beamforming import (
@@ -22,13 +26,16 @@ from algorithms.shared_core.beamforming import (
     interpolate_multi_angle_channel_samples,
 )
 from algorithms.shared_core.common import (
+    build_beamformer,
     resolve_device,
     beamforming_depth_grid,
     beamformed_image_db,
+    nearest_row_indices,
     positive_odd_int,
     prepare_beamforming_input,
     print_physical_summary,
     resolve_project_path,
+    resample_depth,
     run_beamformer,
     save_algorithm_result,
     validate_db_output,
@@ -102,12 +109,10 @@ def delayed_iq(sample, angle_idx, interp, device=None):
     n_angles, n_samples, n_channels = i_data.shape
 
     z_mesh, x_mesh = torch.meshgrid(z, x, indexing="ij")
-    elements = (
-        torch.arange(n_channels, device=device) - (n_channels - 1) / 2.0
-    ) * sample["pitch"]
-    receive = torch.sqrt((x_mesh[..., None] - elements) ** 2 + z_mesh[..., None] ** 2)
-    transmit = z_mesh[None, ..., None] * torch.cos(angles)[:, None, None, None]
-    transmit += x_mesh[None, ..., None] * torch.sin(angles)[:, None, None, None]
+    elements = element_positions(n_channels, sample["pitch"], device=device)
+    receive = receive_distance(x_mesh[..., None], z_mesh[..., None], elements)
+    transmit = plane_wave_distance(x_mesh[None, ..., None], z_mesh[None, ..., None],
+                                   torch.cos(angles)[:, None, None, None], torch.sin(angles)[:, None, None, None])
     tof = (transmit + receive[None]) / sample["c"]
     exact = (tof - t0[:, None, None, None]) * sample["fs"]
     valid = (exact >= 0) & (exact <= n_samples - 1)
@@ -124,12 +129,10 @@ def delayed_iq(sample, angle_idx, interp, device=None):
         interp,
     )
 
-    phase_rx = (2.0 * torch.pi * sample["fc"] * (receive / sample["c"])
+    phase_rx = (carrier_phase(sample["fc"], receive / sample["c"])
                 if sample["signal_domain"] == "iq" else torch.zeros_like(receive))
-    cos_rx = torch.cos(phase_rx)[None]
-    sin_rx = torch.sin(phase_rx)[None]
-    aligned_i = i * cos_rx - q * sin_rx
-    aligned_q = i * sin_rx + q * cos_rx
+    cos_rx, sin_rx = phase_factors(phase_rx)
+    aligned_i, aligned_q = rotate_components(i, q, cos_rx[None], sin_rx[None])
     return torch.complex(aligned_i, aligned_q) * valid
 
 
@@ -343,7 +346,8 @@ class CMSAWBeamformerIQ:
         self.clip_percentile = float(clip_percentile)
         self.depth_smooth_rows = int(depth_smooth_rows)
 
-        self.mv_bf = mv.RowDynamicMVBeamformerIQ(
+        self.mv_bf = build_beamformer(
+            mv.RowDynamicMVBeamformerIQ,
             self.z_grid,
             self.x_grid,
             self.n_elem,
@@ -353,12 +357,15 @@ class CMSAWBeamformerIQ:
             self.fs,
             t0_all,
             angles_rad,
-            mv_dl=mv_dl,
-            fbss=fbss,
-            subarray_ratio=subarray_ratio,
-            temporal_win=temporal_win,
-            options=self.options,
-            device=self.device,
+            self.options,
+            self.device,
+            {
+                "mv_dl": mv_dl,
+                "fbss": fbss,
+                "subarray_ratio": subarray_ratio,
+                "temporal_win": temporal_win,
+                "signal_domain": self.signal_domain,
+            },
         )
         self.last_weight = None
         self.last_lengths = None
@@ -500,26 +507,10 @@ def main(argv=None):
     print(
         f"Processing CMSAW (Lmax={args.lmax_ratio}aperture_size, gamma={args.gamma})..."
     )
-    mv_bf = CMSAWBeamformerIQ(
-        compute_z,
-        x_grid,
-        n_elem,
-        pitch,
-        c,
-        fc,
-        fs,
-        t0_sub,
-        selected_angles,
-        mv_dl=args.mv_dl,
-        fbss=args.fbss,
-        subarray_ratio=args.subarray_ratio,
-        temporal_win=args.temporal_win,
-        lmax_ratio=args.lmax_ratio,
-        min_subarray_len=args.min_subarray_len,
-        delta_max=args.delta_max,
-        gamma=args.gamma,
-        clip_percentile=args.clip_percentile,
-        depth_smooth_rows=args.depth_smooth_rows, options=args, device=device)
+    mv_bf = build_beamformer(
+        CMSAWBeamformerIQ, compute_z, x_grid, n_elem, pitch, c, fc, fs,
+        t0_sub, selected_angles, args, device,
+    )
     with torch.no_grad():
         i_out, q_out, dt = run_beamformer(
             mv_bf,
@@ -535,8 +526,8 @@ def main(argv=None):
     weight_np = mv_bf.last_weight.cpu().numpy().astype(np.float32)
     dynamic_l_np = mv_bf.last_lengths.cpu().numpy()
     if args.signal_domain == "rf":
-        weight_np = np.column_stack([np.interp(z_grid, compute_z, column) for column in weight_np.T]).astype(np.float32)
-        rows = np.abs(compute_z[None, :] - z_grid[:, None]).argmin(axis=1)
+        weight_np = resample_depth(weight_np, compute_z, z_grid).astype(np.float32)
+        rows = nearest_row_indices(compute_z, z_grid)
         dynamic_l_np = dynamic_l_np[:, rows]
 
     # ========== 生成图标题(所有参数简写) ==========

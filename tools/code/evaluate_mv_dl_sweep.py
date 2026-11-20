@@ -14,17 +14,13 @@ if str(ROOT) not in sys.path:
 from algorithms import mv
 from evaluation.evaluate import target_resolution
 from shared_core.plot_style import DIAGNOSTIC, apply_style, save_figure
+from tools.shared.scenes import resolve_project_path as resolve_path
 from tools.shared.run_output import (
     ToolOutput,
     write_csv as write_output_csv,
     write_json,
 )
 import matplotlib.pyplot as plt
-
-
-def resolve_path(path):
-    path = Path(path).expanduser()
-    return path.resolve() if path.is_absolute() else (ROOT / path).resolve()
 
 
 def write_csv(path, rows):
@@ -185,12 +181,17 @@ def main(argv=None):
     )
     apply_style(DIAGNOSTIC)
     for dl in dls:
+        options.mv_dl = dl
+        options.fbss = True
+        options.subarray_ratio = args.subarray_ratio
+        options.temporal_win = args.temporal_win
         for target_idx, (target, (x_ids, z_ids)) in enumerate(
             zip(targets, target_windows), start=1
         ):
             local_x = x_grid[x_ids]
             local_z = sample.sample.z_grid[z_ids]
-            beamformer = mv.RowDynamicMVBeamformerIQ(
+            beamformer = mv.build_beamformer(
+                mv.RowDynamicMVBeamformerIQ,
                 local_z,
                 local_x,
                 sample.sample.n_elem,
@@ -200,12 +201,8 @@ def main(argv=None):
                 sample.sample.fs,
                 sample.t0,
                 sample.selected_angles,
-                mv_dl=dl,
-                fbss=True,
-                subarray_ratio=args.subarray_ratio,
-                temporal_win=args.temporal_win,
-                options=options,
-                device=device,
+                options,
+                device,
             )
             out_i, out_q, elapsed = mv.run_beamformer(
                 beamformer,

@@ -6,6 +6,7 @@ import argparse
 
 import numpy as np
 import torch
+
 from scipy.signal import filtfilt, firwin
 
 if __package__:
@@ -15,6 +16,9 @@ else:
 
 PROJECT_ROOT = initialize_project_path(__file__)
 
+from shared_core.geometry import plane_wave_distance, receive_distance
+from shared_core.phase import carrier_phase, phase_factors, rotate_components
+
 from algorithms.shared_core.beamforming import (
     aperture_start_indices,
     aperture_window_1d,
@@ -22,11 +26,12 @@ from algorithms.shared_core.beamforming import (
     interpolate_channel_samples,
 )
 from algorithms.shared_core.common import (
+    build_beamformer,
     resolve_device,
     add_common_arguments,
     add_io_arguments,
-    beamforming_depth_grid,
     beamformed_image_db,
+    rf_imaging_depth_grid,
     prepare_beamforming_input,
     print_physical_summary,
     resolve_project_path,
@@ -100,7 +105,7 @@ class FDMASBeamformerIQ:
         x_mesh, z_mesh = torch.meshgrid(self.x_grid, self.z_grid, indexing="xy")
         self.x_mesh, self.z_mesh = x_mesh, z_mesh
         self.drs = (
-            torch.sqrt((x_mesh[..., None] - self.ep) ** 2 + z_mesh[..., None] ** 2)
+            receive_distance(x_mesh[..., None], z_mesh[..., None], self.ep)
             * self.sc
         )
 
@@ -188,12 +193,11 @@ class FDMASBeamformerIQ:
                 device=self.device,
             )
 
-            phi_rx = 2.0 * np.pi * self.fc * (drs_b / fs) if self.signal_domain == "iq" else torch.zeros_like(drs_b)
-            cos_rx = torch.cos(phi_rx)
-            sin_rx = torch.sin(phi_rx)
+            phi_rx = carrier_phase(self.fc, drs_b / fs) if self.signal_domain == "iq" else torch.zeros_like(drs_b)
+            cos_rx, sin_rx = phase_factors(phi_rx)
 
             for i in range(n_a):
-                tx_samples = tx_z * cos_a[i] + tx_x * sin_a[i]
+                tx_samples = plane_wave_distance(tx_x, tx_z, cos_a[i], sin_a[i])
                 sample = tx_samples.unsqueeze(-1) + drs_b - t_starts_t[i]
                 valid = (sample >= 0) & (sample <= max_sample)
                 sample.clamp_(0.0, max_sample)
@@ -210,19 +214,13 @@ class FDMASBeamformerIQ:
 
                 valid_w = valid.float() * weights_b
                 valid_w = valid_w / (valid_w.sum(dim=-1, keepdim=True) + 1e-9)
-                i_rx = i_center * cos_rx - q_center * sin_rx
-                q_rx = i_center * sin_rx + q_center * cos_rx
+                i_rx, q_rx = rotate_components(i_center, q_center, cos_rx, sin_rx)
                 pair_sum = self._complex_fdmas(i_rx, q_rx, valid_w)
 
-                phi_tx = 2.0 * np.pi * self.fc * (tx_samples / fs) if self.signal_domain == "iq" else torch.zeros_like(tx_samples)
-                cos_tx = torch.cos(2.0 * phi_tx)
-                sin_tx = torch.sin(2.0 * phi_tx)
-                block_sum.add_(
-                    torch.complex(
-                        pair_sum.real * cos_tx - pair_sum.imag * sin_tx,
-                        pair_sum.real * sin_tx + pair_sum.imag * cos_tx,
-                    ),
-                )
+                phi_tx = carrier_phase(self.fc, tx_samples / fs) if self.signal_domain == "iq" else torch.zeros_like(tx_samples)
+                cos_tx, sin_tx = phase_factors(2.0 * phi_tx)
+                i_rot, q_rot = rotate_components(pair_sum.real, pair_sum.imag, cos_tx, sin_tx)
+                block_sum.add_(torch.complex(i_rot, q_rot))
 
             beam_out[z0:z1] = block_sum / n_a
 
@@ -252,7 +250,7 @@ def fdmas_depth_grid(z_grid, c, fc, fs, signal_domain):
     pad_rows = 2 * 3 * (RF_FILTER_TAPS - 1)
     end_margin = pad_rows * c / (2.0 * dense_sample_rate)
     bounds = np.array([z_grid[0], z_grid[-1] + end_margin], dtype=np.float64)
-    return beamforming_depth_grid(bounds, c, dense_sample_rate, signal_domain)
+    return rf_imaging_depth_grid(bounds, c, dense_sample_rate)
 
 
 # ================= 主程序 =================
@@ -321,16 +319,10 @@ def main(argv=None):
         ],
     )
 
-    beamformer = FDMASBeamformerIQ(
-        compute_z,
-        x_grid,
-        n_elem,
-        pitch,
-        c,
-        fc,
-        fs,
-        t0_sub,
-        angles_all, options=args, device=device)
+    beamformer = build_beamformer(
+        FDMASBeamformerIQ, compute_z, x_grid, n_elem, pitch, c, fc, fs,
+        t0_sub, angles_all, args, device,
+    )
 
     print("Processing F-DMAS...")
     i_out, q_out, dt = run_beamformer(

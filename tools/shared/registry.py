@@ -50,6 +50,12 @@ TOOLS = (
         "mode": "native",
     },
     {
+        "name": "合成单点信号域消融",
+        "entry": "tools.cn_core.evaluate_point_targets_cn",
+        "script": "evaluate_point_targets.py",
+        "mode": "native",
+    },
+    {
         "name": "MV 对角加载点靶消融",
         "entry": "tools.cn_core.evaluate_mv_dl_sweep_cn",
         "script": "evaluate_mv_dl_sweep.py",
@@ -86,6 +92,12 @@ TOOLS = (
         "name": "归一化示意图",
         "entry": "tools.cn_core.normalization_demo_cn",
         "script": "normalization_demo.py",
+    },
+    {
+        "name": "信号域与插值组合消融",
+        "entry": "tools.code.compare_interpolation",
+        "script": "compare_interpolation.py",
+        "mode": "native",
     },
 )
 

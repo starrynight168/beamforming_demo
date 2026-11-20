@@ -202,6 +202,7 @@ class WizardFlowTests(unittest.TestCase):
             self.assertNotIn("--methods", command)
             self.assertNotIn("--method_labels", command)
             self.assertEqual(command[command.index("--h5_path") + 1], str(h5_path))
+            self.assertEqual(command[command.index("--signal_domain") + 1], "iq")
             self.assertEqual(
                 load_method_names(
                     SimpleNamespace(methods=None, method_labels=None),
@@ -224,10 +225,13 @@ class WizardFlowTests(unittest.TestCase):
                 "tools.code.run_ablation.run_process",
                 return_value=0,
             ) as run:
-                run_ablation_evaluation(rows, root, h5_path, 0, "das", True, 60, "iq")
+                run_ablation_evaluation(
+                    rows, root, h5_path, 0, "das", True, 60, "iq"
+                )
             command = run.call_args_list[0].args[0]
             self.assertNotIn("--config", command)
             self.assertEqual(command[command.index("--h5_path") + 1], str(h5_path))
+            self.assertEqual(command[command.index("--signal_domain") + 1], "iq")
 
     def test_wizard_requires_valid_picmus_metadata_and_gt(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -5,8 +5,6 @@ Default input:
 """
 
 import argparse
-import csv
-import hashlib
 import json
 import math
 import os
@@ -17,7 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from evaluation.context import load_grids, read_phantom
-from evaluation.metrics import db_to_display
+from evaluation.metrics import cyst_lateral_profile, db_to_display
+from shared_core.csv_io import read_dict_csv
 import matplotlib
 
 matplotlib.use("Agg")
@@ -25,9 +24,19 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 from matplotlib.patches import Patch
 
+from shared_core.plot_style import (
+    DIAGNOSTIC,
+    FONT_SIZE,
+    METHOD_COLORS,
+    apply_style,
+    draw_gray_image,
+    save_figure,
+    style_axes,
+)
+from shared_core.hashing import sha256_bytes
+
 ROOT = Path(__file__).resolve().parent.parent
 
-MAX_METHOD_LABELS_LARGE_FONT = 12
 PAGE_MODEL_PALETTE = [
     "#2CA02C",
     "#D62728",
@@ -45,8 +54,8 @@ MAX_PROFILE_MODELS_PER_PAGE = 3
 MAX_PROFILE_ALGORITHMS_PER_PAGE = 4
 MAX_CURVE_METHODS_PER_PAGE = 6
 MAX_METRICS_PER_PAGE = 4
-METRIC_PANEL_WIDTH = 10.5
-METRIC_PANEL_HEIGHT = 7.5
+METRIC_PANEL_WIDTH = 5.0
+METRIC_PANEL_HEIGHT = 3.8
 METRIC_COLUMNS = 2
 REFERENCE_METHODS = {"GT", "DAS", "MV", "ESBMV", "GCFMV", "CMSAW", "FDMAS"}
 GROUP_HATCHES = ["", "//", "..", "\\\\", "xx"]
@@ -135,9 +144,9 @@ def paginate_profile_methods(methods, repeat_references=True):
 def get_color(method_name):
     name = method_name.upper().replace("-", "").replace(" ", "")
     mapping = {
-        "GT": "#333333",  # 深灰
-        "DAS": "#4C72B0",  # 蓝色
-        "MV": "#D55E00",
+        "GT": METHOD_COLORS["GT"],
+        "DAS": METHOD_COLORS["DAS"],
+        "MV": METHOD_COLORS["MV"],
         "ESBMV": "#8172B3",  # 紫色
         "GCFMV": "#64B5CD",  # 青色
         "CMSAW": "#FF7F0E",  # 橙色
@@ -145,8 +154,22 @@ def get_color(method_name):
     }
     if name in mapping:
         return mapping[name]
-    index = int(hashlib.sha256(name.encode("utf-8")).hexdigest()[:8], 16) % len(METHOD_PALETTE)
+    index = int(sha256_bytes(name.encode("utf-8"))[:8], 16) % len(METHOD_PALETTE)
     return METHOD_PALETTE[index]
+
+
+def display_method(method):
+    return "MBAN" if str(method) == "roi05" else str(method)
+
+
+def _model_color(method):
+    text = str(method)
+    if text in METHOD_COLORS:
+        return METHOD_COLORS[text]
+    for name, color in METHOD_COLORS.items():
+        if text.upper() == name.upper():
+            return color
+    return None
 
 
 def build_page_method_colors(methods):
@@ -158,14 +181,21 @@ def build_page_method_colors(methods):
             result[method] = get_color(method)
         else:
             model_methods.append(method)
-    if len(model_methods) > len(PAGE_MODEL_PALETTE):
+    unknown = []
+    for method in model_methods:
+        color = _model_color(method)
+        if color is None:
+            unknown.append(method)
+        else:
+            result[method] = color
+    if len(unknown) > len(PAGE_MODEL_PALETTE):
         raise ValueError(
-            f"单页模型数 {len(model_methods)} 超过高对比颜色数 {len(PAGE_MODEL_PALETTE)}，请先分页"
+            f"单页模型数 {len(unknown)} 超过高对比颜色数 {len(PAGE_MODEL_PALETTE)}，请先分页"
         )
     result.update(
         {
             method: PAGE_MODEL_PALETTE[index]
-            for index, method in enumerate(model_methods)
+            for index, method in enumerate(unknown)
         }
     )
     return result
@@ -179,9 +209,9 @@ def build_profile_styles(methods, page_methods=None):
     methods = list(dict.fromkeys(methods))
     styles = {}
     fixed = {
-        "GT": {"color": "#222222", "linestyle": "--", "marker": None, "linewidth": 2.1},
-        "DAS": {"color": "#0072B2", "linestyle": ":", "marker": "s", "linewidth": 1.8},
-        "MV": {"color": "#D55E00", "linestyle": "-.", "marker": "D", "linewidth": 1.9},
+        "GT": {"color": METHOD_COLORS["GT"], "linestyle": "--", "marker": None, "linewidth": 1.1},
+        "DAS": {"color": METHOD_COLORS["DAS"], "linestyle": ":", "marker": "s", "linewidth": 1.1},
+        "MV": {"color": METHOD_COLORS["MV"], "linestyle": "-.", "marker": "D", "linewidth": 1.1},
     }
     model_methods = []
     for method in methods:
@@ -201,7 +231,7 @@ def build_profile_styles(methods, page_methods=None):
             "color": page_colors[method],
             "linestyle": PROFILE_LINESTYLES[member_index % len(PROFILE_LINESTYLES)],
             "marker": PROFILE_MARKERS[(member_index // len(PROFILE_LINESTYLES)) % len(PROFILE_MARKERS)],
-            "linewidth": 1.55,
+            "linewidth": 1.1,
         }
     return styles
 
@@ -234,10 +264,7 @@ def resolve(path):
 
 def read_rows(path):
     """Read rows."""
-    if not os.path.exists(path):
-        return []
-    with open(path, encoding="utf-8-sig", newline="") as file:
-        rows = list(csv.DictReader(file))
+    rows = read_dict_csv(path, missing_ok=True)
     if rows and rows[0].get("status") == "not_applicable":
         return []
     out = []
@@ -366,6 +393,7 @@ def save_bar_plot(
     _repeat_references=True,
 ):
     """Save bar plot."""
+    apply_style(DIAGNOSTIC)
     path = Path(path)
     if _cleanup_pages:
         remove_paged_plot_files(path)
@@ -416,7 +444,6 @@ def save_bar_plot(
         rows_grid,
         cols,
         figsize=(panel_width * cols, panel_height * rows_grid),
-        dpi=240,
     )
     axes = np.asarray(axes).reshape(-1)
     color_map = build_page_method_colors(methods)
@@ -433,18 +460,14 @@ def save_bar_plot(
             color=colors,
             height=0.62,
             edgecolor="black",
-            linewidth=0.8,
+            linewidth=0.6,
         )
         ax.set_yticks(positions)
-        ax.set_yticklabels(
-            methods,
-            fontsize=8 if len(methods) <= MAX_METHOD_LABELS_LARGE_FONT else 7,
-        )
+        ax.set_yticklabels([display_method(method) for method in methods])
         ax.invert_yaxis()
-        ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
-        ax.grid(axis="x", linestyle="--", alpha=0.5)
-        ax.set_axisbelow(True)
+        ax.set_title(title, pad=8)
         apply_value_padding(ax, vals, horizontal=True)
+        style_axes(ax)
 
         for bar in bars:
             value = finite_value(bar.get_width())
@@ -458,14 +481,14 @@ def save_bar_plot(
                     textcoords="offset points",
                     ha="left" if positive else "right",
                     va="center",
-                    fontsize=8,
-                    fontweight="bold",
+                    fontsize=FONT_SIZE,
+                    fontweight="normal",
                 )
 
     for j in range(len(metrics_to_plot), len(axes)):
         fig.delaxes(axes[j])
     if _page_title:
-        fig.suptitle(_page_title, fontsize=10, y=0.995)
+        fig.suptitle(_page_title, fontsize=FONT_SIZE, y=0.995)
     has_domain_labels = any(
         "[log]" in item[0] or "[env]" in item[0] for item in metrics_to_plot
     )
@@ -474,13 +497,12 @@ def save_bar_plot(
             0.01,
             0.008,
             "[log] dB-compressed display; [env] linear envelope; units in parentheses.",
-            fontsize=6.5,
+            fontsize=7.0,
         )
         fig.tight_layout(rect=(0.0, 0.035, 1.0, 1.0), pad=1.4, h_pad=2.0, w_pad=1.6)
     else:
         fig.tight_layout(pad=1.4, h_pad=2.0, w_pad=1.6)
-    fig.savefig(path, facecolor="white")
-    plt.close(fig)
+    save_figure(fig, path, profile=DIAGNOSTIC)
 
 
 def save_group_metric_plot(
@@ -493,6 +515,7 @@ def save_group_metric_plot(
     _repeat_references=True,
 ):
     """Save group metric plot."""
+    apply_style(DIAGNOSTIC)
     path = Path(path)
     if _cleanup_pages:
         remove_paged_plot_files(path)
@@ -552,7 +575,6 @@ def save_group_metric_plot(
         rows_grid,
         cols,
         figsize=(panel_width * cols, panel_height * rows_grid),
-        dpi=240,
     )
     axes = np.asarray(axes).reshape(-1)
     positions = np.arange(len(methods), dtype=float)
@@ -584,7 +606,7 @@ def save_group_metric_plot(
                 color=[method_colors[method] for method in methods],
                 hatch=GROUP_HATCHES[group_idx % len(GROUP_HATCHES)],
                 edgecolor="black",
-                linewidth=0.7,
+                linewidth=0.6,
                 label=group_labels.get(group, str(group).replace("_", " ").title()),
             )
             for bar, value in zip(bars, values, strict=True):
@@ -596,27 +618,26 @@ def save_group_metric_plot(
                         textcoords="offset points",
                         ha="left" if value >= 0 else "right",
                         va="center",
-                        fontsize=5.7,
-                        color="#333333",
+                        fontsize=7.0,
+                        color="black",
                         zorder=4,
                     )
         limits = padded_axis_limits(all_values, include_zero=True, pad_fraction=0.20)
         if limits is not None:
             ax.set_xlim(*limits)
-        ax.set_title(f"{title_prefix}: {title}", fontsize=10, fontweight="bold")
+        ax.set_title(f"{title_prefix}: {title}", pad=8)
         ax.set_yticks(positions)
-        ax.set_yticklabels(methods, fontsize=8)
+        ax.set_yticklabels([display_method(method) for method in methods])
         ax.invert_yaxis()
-        ax.grid(axis="x", linestyle="--", alpha=0.45)
-        ax.set_axisbelow(True)
         ax.set_xlabel(title)
         if ax_idx % cols == 0:
             ax.set_ylabel("Method")
+        style_axes(ax)
 
     for j in range(n_plots, len(axes)):
         fig.delaxes(axes[j])
     if _page_title:
-        fig.suptitle(_page_title, fontsize=10, y=0.995)
+        fig.suptitle(_page_title, fontsize=FONT_SIZE, y=0.995)
     handles = [
         Patch(
             facecolor="#BDBDBD",
@@ -631,8 +652,6 @@ def save_group_metric_plot(
         [handle.get_label() for handle in handles],
         loc="lower center",
         ncol=min(len(groups), 4),
-        fontsize=8,
-        frameon=False,
         bbox_to_anchor=(0.5, 0.012),
     )
     if any("[log]" in title or "[env]" in title for _, title in available_metrics):
@@ -641,7 +660,7 @@ def save_group_metric_plot(
             0.05,
             "[log] dB-compressed display; [env] linear envelope; units in parentheses.",
             ha="center",
-            fontsize=6.5,
+            fontsize=7.0,
         )
     fig.tight_layout(
         rect=(0.0, 0.08, 1.0, 1.0),
@@ -649,8 +668,7 @@ def save_group_metric_plot(
         h_pad=2.2,
         w_pad=1.8,
     )
-    fig.savefig(path, facecolor="white")
-    plt.close(fig)
+    save_figure(fig, path, profile=DIAGNOSTIC)
 
 
 def build_metric_plots(rows):
@@ -707,13 +725,14 @@ def save_roi_plot(
     peak_method=None,
 ):
     """Save roi plot."""
-    fig, ax = plt.subplots(figsize=(6, 8), dpi=220)
-    ax.imshow(
+    apply_style(DIAGNOSTIC)
+    fig, ax = plt.subplots(figsize=(5.2, 6.9))
+    draw_gray_image(
+        ax,
         display,
-        cmap="gray",
+        [x_mm[0], x_mm[-1], z_mm[-1], z_mm[0]],
         vmin=0,
         vmax=1,
-        extent=[x_mm[0], x_mm[-1], z_mm[-1], z_mm[0]],
         aspect="equal",
     )
     for idx, roi in enumerate(rois, start=1):
@@ -765,7 +784,7 @@ def save_roi_plot(
                 c="yellow",
                 s=14,
                 linewidths=0.8,
-                label=f"{peak_method} peak",
+                label=f"{display_method(peak_method)} peak",
             )
             for row in peaks:
                 ax.plot(
@@ -776,12 +795,12 @@ def save_roi_plot(
                     alpha=0.65,
                 )
     if ax.get_legend_handles_labels()[0]:
-        ax.legend(loc="lower right", fontsize=6, framealpha=0.7)
+        ax.legend(loc="lower right", fontsize=FONT_SIZE)
     ax.set_xlabel("Lateral (mm)")
     ax.set_ylabel("Depth (mm)")
+    style_axes(ax)
     fig.tight_layout()
-    fig.savefig(path, bbox_inches="tight")
-    plt.close(fig)
+    save_figure(fig, path, profile=DIAGNOSTIC)
 
 
 def save_lateral_profile_plot(
@@ -801,6 +820,7 @@ def save_lateral_profile_plot(
     profile_target_index=None,
 ):
     """Save lateral profile plot."""
+    apply_style(DIAGNOSTIC)
     method_pages = paginate_profile_methods(methods, repeat_references=repeat_references)
     page_count = len(method_pages)
     center_x_mm = float((x_mm[0] + x_mm[-1]) / 2.0)
@@ -831,40 +851,24 @@ def save_lateral_profile_plot(
         if rois:
             target_cyst = rois[selected_roi_position]
             cyst_radius = target_cyst["diameter_mm"] / 2.0
-            display_half_width = max(5.0, 1.75 * cyst_radius)
-            display_x_mask = np.abs(x_mm - target_cyst["x_mm"]) < display_half_width
-            cyst_center_z_index = int(np.argmin(np.abs(z_mm - target_cyst["z_mm"])))
-            z_spacing = float(np.median(np.abs(np.diff(z_mm)))) if len(z_mm) > 1 else 1.0
-            z_half_rows = max(
-                1,
-                min(3, int(round(0.35 * target_cyst["diameter_mm"] / max(z_spacing, 1.0e-9)))),
-            )
-            cyst_z_indices = np.arange(
-                max(0, cyst_center_z_index - z_half_rows),
-                min(len(z_mm), cyst_center_z_index + z_half_rows + 1),
-            )
-            fig, ax = plt.subplots(figsize=(12.5, 5.8), dpi=150)
+            fig, ax = plt.subplots(figsize=(9.5, 3.6))
             for i, method in zip(method_indices, page_methods, strict=True):
                 style = profile_styles[method]
-                env = 10.0 ** (
-                    comparison[i][np.ix_(cyst_z_indices, display_x_mask)] / 20.0
+                offsets_mm, profile = cyst_lateral_profile(
+                    comparison[i], x_mm, z_mm, target_cyst
                 )
-                profile_env = np.nanmean(env, axis=0)
-                peak = float(np.nanmax(profile_env))
-                if not np.isfinite(peak) or peak <= 0:
+                if not np.isfinite(profile).any():
                     continue
-                profile = 20.0 * np.log10(np.maximum(profile_env, 1.0e-12))
-                profile = np.minimum(profile, 0.0)
                 ax.plot(
-                    x_mm[display_x_mask] - target_cyst["x_mm"],
+                    offsets_mm,
                     profile,
-                    label=method,
+                    label=display_method(method),
                     color=style["color"],
                     linestyle=style["linestyle"],
                     linewidth=style["linewidth"],
                     marker=style["marker"],
                     markersize=3.8 if style["marker"] else 0.0,
-                    markevery=max(1, int(display_x_mask.sum() / 12)),
+                    markevery=max(1, int(offsets_mm.size / 12)),
                     markerfacecolor="white" if style["marker"] else None,
                     markeredgewidth=0.7 if style["marker"] else 0.0,
                 )
@@ -882,14 +886,12 @@ def save_lateral_profile_plot(
             ax.set_title(
                 f"Lateral Cyst Profile (ROI {selected_roi_position + 1}; "
                 f"central axial-band envelope mean){page_title_suffix}",
-                fontsize=12,
-                fontweight="bold",
-                pad=12,
+                pad=10,
             )
             ax.set_xlabel("Lateral offset from cyst center (mm)")
             ax.set_ylabel("Amplitude relative to image peak (dB)")
             ax.set_ylim(-dr, 0.0)
-            ax.grid(True, linestyle="--", alpha=0.5)
+            style_axes(ax)
             handles, labels = ax.get_legend_handles_labels()
             fig.legend(
                 handles,
@@ -897,21 +899,19 @@ def save_lateral_profile_plot(
                 loc="center left",
                 bbox_to_anchor=(0.76, 0.5),
                 ncol=2 if len(handles) > 4 else 1,
-                fontsize=8,
             )
             fig.tight_layout(rect=(0.0, 0.0, 0.74, 1.0))
-            fig.savefig(
+            save_figure(
+                fig,
                 os.path.join(out_dir, f"cyst_profile{page_suffix}.png"),
-                bbox_inches="tight",
-                facecolor="white",
+                profile=DIAGNOSTIC,
             )
-            plt.close(fig)
         if targets:
             target_point = targets[selected_target_position]
             target_x_indices = np.flatnonzero(np.abs(x_mm - target_point["x_mm"]) < fwhm_window_mm)
             target_z_indices = np.flatnonzero(np.abs(z_mm - target_point["z_mm"]) < fwhm_window_mm)
             display_x_mask = np.abs(x_mm - target_point["x_mm"]) < display_window_mm
-            fig, ax = plt.subplots(figsize=(12.5, 5.8), dpi=150)
+            fig, ax = plt.subplots(figsize=(9.5, 3.6))
             y_upper = 0.0
             for i, method in zip(method_indices, page_methods, strict=True):
                 style = profile_styles[method]
@@ -928,7 +928,7 @@ def save_lateral_profile_plot(
                     continue
                 profile -= target_peak
                 y_upper = max(y_upper, float(np.nanmax(profile)))
-                plot_label = method
+                plot_label = display_method(method)
                 for row in target_rows or []:
                     try:
                         row_target_index = int(float(row.get("target_idx", -1)))
@@ -938,7 +938,7 @@ def save_lateral_profile_plot(
                         continue
                     fwhm = finite_value(row.get("FWHM_lateral_mm", np.nan))
                     if np.isfinite(fwhm):
-                        plot_label = f"{method} (FWHM={fwhm:.3f} mm)"
+                        plot_label = f"{display_method(method)} (FWHM={fwhm:.3f} mm)"
                     break
                 ax.plot(
                     x_mm[display_x_mask] - target_point["x_mm"],
@@ -959,14 +959,12 @@ def save_lateral_profile_plot(
             ax.axhline(-6.0, color="grey", linestyle=":", linewidth=0.8, alpha=0.7)
             ax.set_title(
                 f"Lateral Point-Target Profile (peak row within target window){page_title_suffix}",
-                fontsize=12,
-                fontweight="bold",
-                pad=12,
+                pad=10,
             )
             ax.set_xlabel("Lateral offset from target (mm)")
             ax.set_ylabel("Amplitude relative to target-window peak (dB)")
             ax.set_ylim(-dr, y_upper)
-            ax.grid(True, linestyle="--", alpha=0.5)
+            style_axes(ax)
             handles, labels = ax.get_legend_handles_labels()
             if handles:
                 fig.legend(
@@ -975,17 +973,15 @@ def save_lateral_profile_plot(
                     loc="center left",
                     bbox_to_anchor=(0.76, 0.5),
                     ncol=2 if len(handles) > 4 else 1,
-                    fontsize=8,
                 )
                 fig.tight_layout(rect=(0.0, 0.0, 0.74, 1.0))
             else:
                 fig.tight_layout()
-            fig.savefig(
+            save_figure(
+                fig,
                 os.path.join(out_dir, f"point_profile{page_suffix}.png"),
-                bbox_inches="tight",
-                facecolor="white",
+                profile=DIAGNOSTIC,
             )
-            plt.close(fig)
 
 
 def main():

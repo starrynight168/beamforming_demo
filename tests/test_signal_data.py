@@ -12,7 +12,7 @@ from scipy.signal import firwin, hilbert
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shared_core.data import load_input, load_target
-from shared_core.signals import rf_to_analytic, rf_to_iq
+from shared_core.signals import ddc_lowpass_coefficients, rf_to_analytic, rf_to_iq
 from shared_core.h5_schema import write_h5_schema
 
 
@@ -192,13 +192,32 @@ class SignalDataTests(unittest.TestCase):
 
     def test_explicit_filter_numbers_are_used(self):
         self.config["generation"]["input_iq"]["ddc"].update(
-            mixing_gain=1.0, cutoff_hz=3e6, num_taps=32,
+            mixing_gain=1.0, cutoff_hz=3e6, num_taps=32, lowpass="firwin_32_then_filtfilt",
         )
         self.create_file()
-        result = load_input(self.path, 0, "iq")
+        with patch("shared_core.data.ddc_lowpass_coefficients", wraps=ddc_lowpass_coefficients) as design:
+            result = load_input(self.path, 0, "iq")
+        design.assert_called_once_with(20e6, 5e6, taps=32, cutoff_hz=3e6)
         expected = rf_to_iq(self.rf, 20e6, 5e6, self.starts, firwin(32, 0.3), 2)
         np.testing.assert_array_equal(result["real"], expected[0] / 3.0)
         np.testing.assert_array_equal(result["imag"], expected[1] / 3.0)
+
+    def test_filter_name_must_match_the_recorded_taps(self):
+        self.config["generation"]["input_iq"]["ddc"]["num_taps"] = 32
+        self.create_file()
+        with self.assertRaisesRegex(ValueError, "Unsupported.*ddc"):
+            load_input(self.path, 0, "iq")
+
+    def test_picmus_oversampled_ddc_cannot_be_reconstructed_from_stored_rf(self):
+        self.config["generation"]["input_iq"]["ddc"] = {
+            "phase_sign_q": -1, "lowpass": "firwin_kaiser", "lowpass_taps": 129,
+            "lowpass_cutoff_over_fc": 0.8, "kaiser_beta": 8.0,
+            "resampling": "linear_zero_outside", "filtering": "scipy_filtfilt",
+            "decimation": "scipy_resample_poly_kaiser_12",
+        }
+        self.create_file()
+        with self.assertRaisesRegex(ValueError, "Unsupported.*ddc"):
+            load_input(self.path, 0, "iq")
 
     def test_missing_scale_is_computed_from_recorded_normalization(self):
         iq = rf_to_iq(self.rf, 20e6, 5e6, self.starts, firwin(64, 0.4), 2)

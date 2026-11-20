@@ -14,7 +14,7 @@ from algorithms import das, mv
 from algorithms.shared_core import common
 from evaluation.context import load_picmus_context, read_sample_meta
 from evaluation.metrics import build_square_label_map, target_resolution
-from shared_core.plot_style import DIAGNOSTIC, apply_style
+from shared_core.plot_style import DIAGNOSTIC, apply_style, draw_bmode
 from tools.shared.run_output import ToolOutput
 
 
@@ -42,10 +42,10 @@ def beamform(sample_input, method, args, device):
         options.f_number = args.f_number
         options.tgc = True
         options.tgc_alpha = 0.5
-        beamformer = das.DASBeamformerIQ(
-            sample.z_grid, sample.x_grid, sample.n_elem, sample.pitch,
-            sample.c, sample.fc, sample.fs, sample_input.t0,
-            sample.angles, options=options, device=device,
+        beamformer = common.build_beamformer(
+            das.DASBeamformerIQ, sample.z_grid, sample.x_grid, sample.n_elem,
+            sample.pitch, sample.c, sample.fc, sample.fs, sample_input.t0,
+            sample.angles, options, device,
         )
     else:
         options = mv.build_parser(params=params).parse_args([])
@@ -55,12 +55,10 @@ def beamform(sample_input, method, args, device):
         options.subarray_ratio = args.subarray_ratio
         options.temporal_win = args.temporal_win
         options.fbss = True
-        beamformer = mv.RowDynamicMVBeamformerIQ(
-            sample.z_grid, sample.x_grid, sample.n_elem, sample.pitch,
-            sample.c, sample.fc, sample.fs, sample_input.t0,
-            sample.angles, mv_dl=args.mv_dl, fbss=True,
-            subarray_ratio=args.subarray_ratio, temporal_win=args.temporal_win,
-            options=options, device=device, signal_domain="iq",
+        beamformer = common.build_beamformer(
+            mv.RowDynamicMVBeamformerIQ, sample.z_grid, sample.x_grid,
+            sample.n_elem, sample.pitch, sample.c, sample.fc, sample.fs,
+            sample_input.t0, sample.angles, options, device,
         )
     i_out, q_out, _ = common.run_beamformer(
         beamformer, sample_input.i_data, sample_input.q_data,
@@ -119,9 +117,12 @@ def evaluate_scene(scene, args, device, output):
     fig, axes = plt.subplots(1, len(outputs), figsize=(6 * len(outputs), 6), squeeze=False)
     for axis, (method, image) in zip(axes[0], outputs.items(), strict=True):
         display = np.clip(image - np.nanmax(image), -60, 0)
-        axis.imshow(
-            display, cmap="gray", vmin=-60, vmax=0, aspect="auto",
-            extent=(x_mm[0], x_mm[-1], z_mm[-1], z_mm[0]),
+        draw_bmode(
+            axis,
+            display,
+            (x_mm[0], x_mm[-1], z_mm[-1], z_mm[0]),
+            60.0,
+            aspect="auto",
         )
         axis.scatter(
             [target["x_mm"] for target in targets],

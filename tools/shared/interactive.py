@@ -4,20 +4,26 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import h5py
-import yaml
-from shared_core.h5_schema import require_h5_schema
-from .workflow_common import TOOLS_OUTPUT_ROOT
-from .run_output import emit, run_process
+from .run_output import TOOLS_OUTPUT_ROOT, emit, run_process
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def ask(prompt, default=None):
+class PromptCancelled(SystemExit):
+    pass
+
+
+class PromptBack(Exception):
+    pass
+
+
+def ask(prompt, default=None, *, allow_back=False):
     hint = f" [默认: {default}]" if default is not None else ""
     raw = input(f"{prompt}{hint}: ").strip()
     if raw.lower() in {"q", "quit", "exit", "退出"}:
-        raise SystemExit("已退出。")
+        raise PromptCancelled("已退出。")
+    if allow_back and raw.lower() == "b":
+        raise PromptBack
     return str(default) if not raw and default is not None else raw
 
 
@@ -35,9 +41,9 @@ def path_input(prompt, default=None, kind="file"):
         print("路径不存在或类型不正确，请重新输入。")
 
 
-def number(prompt, default, cast=float, valid=lambda value: True):
+def number(prompt, default, cast=float, valid=lambda value: True, *, allow_back=False):
     while True:
-        raw = ask(prompt, default)
+        raw = ask(prompt, default, allow_back=allow_back)
         try:
             value = cast(raw)
             if math.isfinite(value) and valid(value):
@@ -47,18 +53,24 @@ def number(prompt, default, cast=float, valid=lambda value: True):
         print("输入不合法，请重新输入。")
 
 
-def choice(prompt, choices, default=0):
+def choice(prompt, choices, default=0, *, allow_back=False):
     print(prompt)
     for index, (_, label) in enumerate(choices, 1):
         print(f"  {index}. {label}" + ("（默认）" if index - 1 == default else ""))
-    selected = number("请输入序号", default + 1, int, lambda value: 1 <= value <= len(choices))
+    default_number = None if default is None else default + 1
+    selected = number("请输入序号", default_number, int, lambda value: 1 <= value <= len(choices), allow_back=allow_back)
     return choices[selected - 1][0]
 
 
 def sample_input(h5_path):
+    import h5py
+    from shared_core.h5_schema import require_h5_schema
+
+    from shared_core.data import embedded_config
+
     with h5py.File(h5_path, "r") as f:
         require_h5_schema(f)
-        config = yaml.safe_load(f["config_yaml"][()])
+        config = embedded_config(f)
         inputs = config["generation"]["storage"]["inputs"]
         domain = next((name for name in ("iq", "analytic_rf", "rf") if name in inputs), None)
         if domain is None:

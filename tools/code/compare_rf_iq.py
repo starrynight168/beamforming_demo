@@ -13,15 +13,17 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from algorithms.mv import RowDynamicMVBeamformerIQ
+from algorithms import mv
+from algorithms.shared_core.common import build_beamformer, run_beamformer
 from shared_core.h5_schema import require_h5_schema
+from shared_core.geometry import image_extent_mm
 from tools.shared.rf_beamforming import (
     estimate_stft_frequency_bands,
     rf_mv,
     rf_mv_signed_and_envelope,
     stft_frequency_mv,
 )
-from shared_core.plot_style import DIAGNOSTIC, apply_style
+from shared_core.plot_style import DIAGNOSTIC, apply_style, draw_bmode
 from tools.shared.run_output import ToolOutput
 
 
@@ -239,25 +241,21 @@ def main():
         dynamic_aperture=dynamic,
         window="rect",
         interp=args.interp,
-    )
-    beamformer = RowDynamicMVBeamformerIQ(
-        z,
-        x,
-        rf.shape[1],
-        pitch,
-        c,
-        fc,
-        fs,
-        t0,
-        np.array([angle], dtype=np.float32),
+        signal_domain="iq",
         mv_dl=loading,
         fbss=fbss,
         subarray_ratio=ratio,
         temporal_win=temporal_win,
-        options=options,
+    )
+    angles_rad = np.array([angle], dtype=np.float32)
+    beamformer = build_beamformer(
+        mv.RowDynamicMVBeamformerIQ, z, x, rf.shape[1], pitch, c, fc, fs,
+        t0, angles_rad, options, device,
     )
     with torch.no_grad():
-        i_out, q_out = beamformer(i, q, np.array([angle], dtype=np.float32), t0, fs)
+        i_out, q_out, _ = run_beamformer(
+            beamformer, i, q, angles_rad, t0, fs, device
+        )
     iq_result = i_out + 1j * q_out
     stft_results = {}
     for threshold, band in spectral_bands.items():
@@ -312,7 +310,7 @@ def main():
     mae_rf_stft_20db = float(np.mean(np.abs(db[0] - db[4])))
     apply_style(DIAGNOSTIC)
     fig, axes = plt.subplots(1, 5, figsize=(25, 6), constrained_layout=True)
-    extent = [1000 * x[0], 1000 * x[-1], 1000 * z[-1], 1000 * z[0]]
+    extent = image_extent_mm(x, z)
     titles = (
         "RF MV (real weights)",
         "Analytic RF MV (complex weights)",
@@ -321,9 +319,7 @@ def main():
         f"STFT-FD MV (-20 dB, {len(spectral_bands[20]['bins'])} bins)",
     )
     for ax, image, title in zip(axes, db, titles):
-        panel = ax.imshow(
-            image, cmap="gray", vmin=-args.dr, vmax=0, extent=extent, aspect="equal"
-        )
+        panel = draw_bmode(ax, image, extent, args.dr)
         ax.set(title=title, xlabel="Lateral (mm)", ylabel="Depth (mm)")
     aperture_label = (
         f"dynamic aperture F/{args.f_number:g}" if dynamic else "full aperture"

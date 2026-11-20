@@ -9,7 +9,14 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from shared_core.geometry import (
+    aperture_channel_count,
+    plane_wave_distance,
+    receive_distance,
+)
 from algorithms.shared_core import common
+from algorithms.shared_core.beamforming import interpolate_channel_samples
+from train.shared_core.beamforming import align_channel_signal
 from tools.shared.run_output import ToolOutput
 
 
@@ -35,9 +42,9 @@ def _sample_vectors(sample, pixels, seed, f_number, device):
     xp, depth = x[x_idx], z[z_idx]
     channels = sample.n_elem
     channel_pos = (torch.arange(channels, device=device, dtype=torch.float32) - (channels - 1) / 2) * sample.pitch
-    receive = torch.sqrt(depth[:, None].square() + (xp[:, None] - channel_pos[None, :]).square())
+    receive = receive_distance(xp[:, None], depth[:, None], channel_pos[None, :])
     center = torch.round(xp / sample.pitch + (channels - 1) / 2).long().clamp(0, channels - 1)
-    aperture = torch.floor(depth / (f_number * sample.pitch)).long() + 1
+    aperture = aperture_channel_count(depth, f_number, sample.pitch).long()
     if bool(((aperture < 1) | (aperture > channels)).any()):
         raise ValueError("Dynamic aperture exceeds the physical channel count; adjust f-number")
     start = (center - aperture // 2).clamp(min=0)
@@ -48,22 +55,18 @@ def _sample_vectors(sample, pixels, seed, f_number, device):
     result_q = torch.zeros_like(result_i)
     with torch.no_grad():
         for angle_idx, angle in enumerate(sample.angles):
-            tx_dist = depth * float(np.cos(angle)) + xp * float(np.sin(angle))
+            tx_dist = plane_wave_distance(xp, depth, float(np.cos(angle)), float(np.sin(angle)))
             tof = (tx_dist[:, None] + receive) / sample.c
             positions = (tof - float(sample.t0_vec[angle_idx])) * sample.fs
             valid = (positions >= 0) & (positions <= sample.i_data.shape[1] - 1)
-            positions = positions.clamp(0, sample.i_data.shape[1] - 1)
-            idx0 = positions.floor().long().clamp(0, sample.i_data.shape[1] - 2)
-            frac = (positions - idx0.float()).clamp(0, 1)
-            idx1 = idx0 + 1
             i_frame = torch.as_tensor(sample.i_data[angle_idx], dtype=torch.float32, device=device)
             q_frame = torch.as_tensor(sample.q_data[angle_idx], dtype=torch.float32, device=device)
-            i_val = i_frame[idx0, channel_idx] * (1 - frac) + i_frame[idx1, channel_idx] * frac
-            q_val = q_frame[idx0, channel_idx] * (1 - frac) + q_frame[idx1, channel_idx] * frac
-            if sample.signal_domain == "iq":
-                phase = 2 * torch.pi * sample.fc * (tof - tx_dist[:, None] / sample.c)
-                cos_p, sin_p = torch.cos(phase), torch.sin(phase)
-                i_val, q_val = i_val * cos_p - q_val * sin_p, i_val * sin_p + q_val * cos_p
+            i_val, q_val = interpolate_channel_samples(i_frame, q_frame, positions, channel_idx, "linear")
+            i_val, q_val = align_channel_signal(
+                i_val[:, None, :], q_val[:, None, :], tof[:, None, :],
+                (tx_dist / sample.c)[:, None], sample.fc, sample.signal_domain,
+            )
+            i_val, q_val = i_val[:, 0], q_val[:, 0]
             result_i[angle_idx] = i_val * valid
             result_q[angle_idx] = q_val * valid
     return result_i, result_q, active
@@ -77,7 +80,10 @@ def _normalize(i_data, q_data, mask, method, epsilon):
     if method == "max":
         scale = torch.hypot(i_data, q_data).amax(-1, keepdim=True).clamp_min(1e-8)
         ni, nq = i_data / scale, q_data / scale
-        restore = lambda a, b: (a * scale * weights, b * scale * weights)
+
+        def restore(a, b):
+            return a * scale * weights, b * scale * weights
+
     elif method in ("rms", "std"):
         if method == "rms":
             mean = torch.zeros_like(count)
@@ -88,7 +94,10 @@ def _normalize(i_data, q_data, mask, method, epsilon):
             variance = (((i_data - mean).square() + (q_data - mean).square()) * weights).sum(-1, keepdim=True) / (2 * count)
             scale = variance.sqrt().clamp_min(1e-8)
             ni, nq = (i_data - mean) * weights / scale, (q_data - mean) * weights / scale
-        restore = lambda a, b: ((a * scale + mean) * weights, (b * scale + mean) * weights)
+
+        def restore(a, b):
+            return (a * scale + mean) * weights, (b * scale + mean) * weights
+
     elif method == "complex_whitening":
         mean_i = i_data.sum(-1, keepdim=True) / count
         mean_q = q_data.sum(-1, keepdim=True) / count
@@ -105,10 +114,12 @@ def _normalize(i_data, q_data, mask, method, epsilon):
         forward = (vectors * eigenvalues.sqrt().unsqueeze(-2)) @ vectors.transpose(-1, -2)
         ni = (inverse[..., 0, 0, None] * di + inverse[..., 0, 1, None] * dq) * weights
         nq = (inverse[..., 1, 0, None] * di + inverse[..., 1, 1, None] * dq) * weights
-        restore = lambda a, b: (
-            (forward[..., 0, 0, None] * a + forward[..., 0, 1, None] * b + mean_i) * weights,
-            (forward[..., 1, 0, None] * a + forward[..., 1, 1, None] * b + mean_q) * weights,
-        )
+        def restore(a, b):
+            return (
+                (forward[..., 0, 0, None] * a + forward[..., 0, 1, None] * b + mean_i) * weights,
+                (forward[..., 1, 0, None] * a + forward[..., 1, 1, None] * b + mean_q) * weights,
+            )
+
     else:
         raise ValueError(f"Unknown normalization: {method}")
     active = mask.unsqueeze(0).expand_as(i_data)
@@ -160,7 +171,8 @@ def summarize(records):
             components = sum(row["components"] for row in rows)
             if not rows or energy <= 0 or components <= 0:
                 raise ValueError(f"Selected scene group {scene_id} contains no signal energy")
-            weighted = lambda key: sum(row[key] * row["components"] for row in rows) / components
+            def weighted(key):
+                return sum(row[key] * row["components"] for row in rows) / components
             correlations = [row["mean_abs_iq_correlation"] for row in rows if row["mean_abs_iq_correlation"] is not None]
             finite = all(row["f16_finite"] for row in rows)
             summary.append({

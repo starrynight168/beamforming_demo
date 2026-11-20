@@ -1,11 +1,12 @@
 """Linear envelope and B-mode conversion shared by algorithm and data tools."""
 
 import numpy as np
-import yaml
+
 from shared_core.h5_schema import require_h5_schema
+from shared_core.numerics import component_magnitude
 
 
-RF_ENVELOPE_OPERATION = "real RF-MV on dense depth grid, append N deep-end zeros before depth Hilbert, magnitude, linear resampling to z_grid"
+RF_ENVELOPE_OPERATION = "beamformed RF envelope with symmetric depth-Hilbert zero-padding and linear resampling to z_grid"
 
 
 def require_current_rf_envelope_method(training_targets):
@@ -29,7 +30,7 @@ def to_envelope(real, imag=None, *, domain="iq"):
         raise ValueError("复数成像输出必须为形状一致的二维实部和虚部")
     if not np.isfinite(real).all() or not np.isfinite(imag).all():
         raise ValueError("复数成像输出包含 NaN/Inf")
-    return np.hypot(real, imag)
+    return component_magnitude(real, imag)
 
 
 def to_db(envelope, *, reference=None, dr=None, gain_db=None):
@@ -38,7 +39,9 @@ def to_db(envelope, *, reference=None, dr=None, gain_db=None):
         raise ValueError("包络必须为有限非负二维数组")
     if not np.any(envelope > 0):
         raise ValueError("包络峰值必须为正数")
-    db = 20.0 * np.log10(np.maximum(envelope, np.finfo(np.float64).tiny))
+    db = np.full_like(envelope, -np.inf)
+    np.log10(envelope, out=db, where=envelope > 0)
+    db *= 20.0
     if gain_db is not None:
         gain_db = np.asarray(gain_db, dtype=np.float64)
         if gain_db.shape != (envelope.shape[0],) or not np.isfinite(gain_db).all():
@@ -52,10 +55,58 @@ def to_db(envelope, *, reference=None, dr=None, gain_db=None):
         db -= 20.0 * np.log10(reference)
     db = np.maximum(db, -240.0)
     if dr is not None:
-        if not np.isfinite(dr) or dr <= 0:
-            raise ValueError("动态范围必须为有限正数")
-        db = np.clip(db, -dr, 0.0)
+        dynamic_range = _dynamic_range_value(dr)
+        db = np.clip(db, -dynamic_range, 0.0)
     return db.astype(np.float32)
+
+
+def _dynamic_range_value(dynamic_range):
+    value = float(dynamic_range)
+    if not np.isfinite(value) or value <= 0:
+        raise ValueError("动态范围必须为有限正数")
+    return value
+
+
+def _unit_interval(values):
+    clamp = getattr(values, "clamp", None)
+    if callable(clamp):
+        return clamp(0.0, 1.0)
+    return np.clip(np.asarray(values), 0.0, 1.0)
+
+
+def db_to_display(db, dynamic_range):
+    """Map dB values into the normalized [0, 1] display interval.
+
+    NumPy arrays and torch tensors are both accepted so that one definition of
+    the display mapping serves generation, algorithms, training, and evaluation.
+    """
+    dynamic_range = _dynamic_range_value(dynamic_range)
+    values = db if hasattr(db, "clamp") else np.asarray(db)
+    return _unit_interval((values + dynamic_range) / dynamic_range)
+
+
+def envelope_to_display(envelope, dynamic_range):
+    try:
+        import torch
+
+        if torch.is_tensor(envelope):
+            db = 20.0 * torch.log10(envelope + 1e-12)
+            return db_to_display(db, dynamic_range)
+    except ImportError:
+        pass
+    db = 20.0 * np.log10(np.asarray(envelope) + 1e-12)
+    return db_to_display(db, dynamic_range)
+
+
+def display_to_db(display, dynamic_range):
+    """Map normalized [0, 1] display values back to dB (inverse of ``db_to_display``)."""
+    dynamic_range = _dynamic_range_value(dynamic_range)
+    return np.clip(np.asarray(display), 0.0, 1.0) * dynamic_range - dynamic_range
+
+
+def envelope_from_db(db):
+    """Convert dB amplitudes back to linear envelope values."""
+    return np.power(10.0, np.asarray(db) / 20.0)
 
 
 def _image(hf, path, sample_idx):
@@ -71,20 +122,67 @@ def _image(hf, path, sample_idx):
 
 def _dynamic_range(ground_truth):
     dr = ground_truth.get("dynamic_range_db")
-    if dr is None or not np.isfinite(dr) or dr <= 0:
+    if dr is None:
         raise ValueError("H5 ground_truth.dynamic_range_db 必须为有限正数")
-    return float(dr)
+    return _dynamic_range_value(dr)
 
 
-def tgc_gain_db_from_depth(depth, fc, alpha):
-    depth = np.asarray(depth)
-    if depth.ndim != 1 or not np.isfinite(depth).all():
-        raise ValueError("TGC 深度必须为有限一维数组")
+def tgc_attenuation_db(depth, fc, alpha):
+    """Depth-dependent TGC attenuation in dB.
+
+    This is the single definition of the TGC law; NumPy and torch callers apply
+    it through :func:`tgc_gain_db_from_depth` / :func:`tgc_gain_from_depth_tensor`.
+    """
+    return alpha * (fc / 1e6) * (depth * 100.0) * 2.0
+
+
+def _validate_tgc_parameters(fc, alpha):
     if not np.isfinite(fc) or fc <= 0:
         raise ValueError("TGC 中心频率必须为有限正数")
     if not np.isfinite(alpha) or alpha < 0:
         raise ValueError("TGC 衰减系数必须为有限非负数")
-    return alpha * (fc / 1e6) * (depth * 100) * 2.0
+
+
+def tgc_gain_db_from_depth(depth, fc, alpha):
+    depth = np.asarray(depth, dtype=np.float64)
+    if depth.ndim != 1 or not np.isfinite(depth).all():
+        raise ValueError("TGC 深度必须为有限一维数组")
+    fc, alpha = float(fc), float(alpha)
+    _validate_tgc_parameters(fc, alpha)
+    return tgc_attenuation_db(depth, fc, alpha)
+
+
+def tgc_gain_from_depth(depth, fc, alpha, enabled=True):
+    if not enabled:
+        return np.ones_like(np.asarray(depth), dtype=np.float32)
+    return np.power(10.0, tgc_gain_db_from_depth(depth, fc, alpha) / 20.0)
+
+
+def tgc_gain_from_depth_tensor(depth, fc, alpha, enabled=True):
+    """Torch counterpart of :func:`tgc_gain_from_depth` for tensor depth grids."""
+    import torch
+
+    fc, alpha = float(fc), float(alpha)
+    _validate_tgc_parameters(fc, alpha)
+    if not enabled:
+        return torch.ones_like(depth)
+    return torch.pow(10.0, tgc_attenuation_db(depth, fc, alpha) / 20.0)
+
+
+def apply_tgc(envelope, depth, fc, alpha, enabled=True):
+    try:
+        import torch
+
+        if torch.is_tensor(envelope):
+            gain = tgc_gain_from_depth_tensor(depth, fc, alpha, enabled)
+        else:
+            gain = tgc_gain_from_depth(depth, fc, alpha, enabled)
+    except ImportError:
+        gain = tgc_gain_from_depth(depth, fc, alpha, enabled)
+    if getattr(gain, "ndim", 0) == 1 and getattr(envelope, "ndim", 0) > 1:
+        if envelope.shape[0] == gain.shape[0]:
+            gain = gain.reshape((gain.shape[0],) + (1,) * (envelope.ndim - 1))
+    return envelope * gain
 
 
 def tgc_gain_db(hf, ground_truth, height):
@@ -106,11 +204,11 @@ def tgc_gain_db(hf, ground_truth, height):
 
 
 def ground_truth_db(hf, sample_idx, algorithm=None, normalized=False, *, signal_domain=None):
+    from shared_core.data import embedded_config
+
     require_h5_schema(hf)
-    if "config_yaml" not in hf:
-        raise KeyError("H5 缺少 config_yaml，无法确定显示目标的处理参数")
-    config = yaml.safe_load(hf["config_yaml"][()])
-    if not isinstance(config, dict) or not isinstance(config.get("generation"), dict):
+    config = embedded_config(hf)
+    if not isinstance(config.get("generation"), dict):
         raise ValueError("H5 config_yaml.generation 必须是映射")
     generation = config["generation"]
     ground_truth = generation.get("ground_truth", {})
@@ -138,7 +236,7 @@ def ground_truth_db(hf, sample_idx, algorithm=None, normalized=False, *, signal_
         if normalized:
             return image
         dr = _dynamic_range(ground_truth)
-        return image * dr - dr
+        return display_to_db(image, dr)
 
     if envelope_path is not None:
         envelope = _image(hf, envelope_path, sample_idx).astype(np.float64)
@@ -154,11 +252,9 @@ def ground_truth_db(hf, sample_idx, algorithm=None, normalized=False, *, signal_
         imag = _image(hf, pair["imag"], sample_idx)
         if real.shape != imag.shape:
             raise ValueError("显示目标实部/虚部必须具有相同形状")
-        envelope = np.hypot(real, imag).astype(np.float64)
+        envelope = to_envelope(real, imag, domain=domain).astype(np.float64)
     dr = _dynamic_range(ground_truth)
     if not np.any(envelope > 0):
         raise ValueError("显示目标包络峰值必须为正数")
-    db = 20.0 * np.log10(np.maximum(envelope, np.finfo(np.float64).tiny))
-    db += tgc_gain_db(hf, ground_truth, envelope.shape[0])[:, None]
-    db = np.clip(db - db.max(), max(-dr, -240.0), 0.0).astype(np.float32)
-    return ((db + dr) / dr).astype(np.float32) if normalized else db
+    db = to_db(envelope, dr=dr, gain_db=tgc_gain_db(hf, ground_truth, envelope.shape[0]))
+    return db_to_display(db, dr).astype(np.float32) if normalized else db

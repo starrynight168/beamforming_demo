@@ -1,5 +1,7 @@
 import numpy as np
 
+from shared_core.numerics import component_magnitude
+
 
 def storage_normalization_mode(inputs):
     if not isinstance(inputs, dict) or set(inputs) - {"rf", "analytic_rf", "iq"}:
@@ -17,18 +19,21 @@ def storage_normalization_mode(inputs):
     return next(iter(modes), "none")
 
 
+def normalization_statistic(real, imag, mode, epsilon=1e-12):
+    if mode == "rms":
+        return float(np.sqrt(np.mean(real * real + imag * imag) + epsilon))
+    if mode == "env_std":
+        return float(np.std(component_magnitude(real, imag)) + epsilon)
+    raise ValueError(f"Unsupported normalization: {mode}")
+
+
 def normalization_scale(real, imag, mode, epsilon=1e-12):
     real, imag = np.asarray(real, dtype=np.float32), np.asarray(imag, dtype=np.float32)
     if real.shape != imag.shape or real.size == 0 or not np.isfinite(real).all() or not np.isfinite(imag).all():
         raise ValueError("Normalization requires matching finite nonempty real/imaginary arrays")
     if mode == "none":
         return 1.0
-    if mode == "rms":
-        scale = np.sqrt(np.mean(real**2 + imag**2) + epsilon)
-    elif mode == "env_std":
-        scale = np.std(np.hypot(real, imag)) + epsilon
-    else:
-        raise ValueError(f"Unsupported normalization: {mode}")
+    scale = normalization_statistic(real, imag, mode, epsilon)
     if not np.isfinite(scale) or scale <= 0:
         raise ValueError("Normalization scale must be finite and positive")
-    return float(scale)
+    return scale

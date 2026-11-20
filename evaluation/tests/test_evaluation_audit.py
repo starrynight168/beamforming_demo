@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from evaluation.evaluate import (
     build_resolution_group_rows,
     load_method_names,
+    resolve_signal_domain,
 )
 from evaluation.context import (
     load_picmus_context,
@@ -31,6 +32,7 @@ from evaluation.evaluate import (
     main as evaluate_main,
 )
 from evaluation.plot_metrics import (
+    build_page_method_colors,
     infer_repeat_references,
     save_lateral_profile_plot,
 )
@@ -192,6 +194,33 @@ class EvaluationInputTests(unittest.TestCase):
         args = SimpleNamespace(methods=None, method_labels="DAS")
         with self.assertRaisesRegex(ValueError, "method_labels.*必须与 --methods"):
             load_method_names(args, "comparison.npy", n_panels=2, has_gt=True)
+
+    def test_signal_domain_resolution_never_defaults_to_iq(self):
+        self.assertEqual(resolve_signal_domain(None, ["iq"]), "iq")
+        self.assertEqual(resolve_signal_domain(None, ["rf"]), "rf")
+        self.assertEqual(resolve_signal_domain("rf", ["iq", "rf"]), "rf")
+        # 处理域可以是存储 RF 的派生域；显式值优先，不强行要求等于存储域。
+        self.assertEqual(resolve_signal_domain("iq", ["rf"]), "iq")
+        with self.assertRaisesRegex(ValueError, "多个.*signal_domain"):
+            resolve_signal_domain(None, ["iq", "rf"])
+        with self.assertRaisesRegex(ValueError, "未声明.*signal_domain"):
+            resolve_signal_domain(None, [])
+
+    def test_rf_sample_metadata_reports_rf_domain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_picmus_sample(Path(directory), domain="rf")
+
+            meta = read_sample_meta(path, sample_idx=0)
+
+            self.assertEqual(meta["signal_domain"], "rf")
+            self.assertEqual(meta["signal_domains"], ["rf"])
+            self.assertEqual(resolve_signal_domain(None, meta["signal_domains"]), "rf")
+
+    def test_page_model_colors_distinguish_same_prefix_models(self):
+        colors = build_page_method_colors(["PTQ W4", "PTQ W8", "QAT", "QAT8"])
+
+        self.assertNotEqual(colors["PTQ W4"], colors["PTQ W8"])
+        self.assertNotEqual(colors["QAT"], colors["QAT8"])
 
     def test_non_picmus_sample_skips_without_reading_comparison(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -675,6 +704,7 @@ class EvaluationInputTests(unittest.TestCase):
                 self.assertTrue((metrics_dir / name).is_file(), name)
             metadata = json.loads((metrics_dir / "evaluation_meta.json").read_text())
             self.assertEqual(len(metadata["resolution_targets"]), 20)
+            self.assertEqual(metadata["signal_domain"], "iq")
             with (metrics_dir / "resolution_target_metrics.csv").open(
                 encoding="utf-8-sig"
             ) as file:

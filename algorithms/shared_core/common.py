@@ -1,7 +1,7 @@
 """Shared runtime, numerical, data, and output helpers for algorithms."""
 
 import argparse
-import hashlib
+import inspect
 import json
 import math
 import time
@@ -18,14 +18,22 @@ import torch
 import yaml
 from matplotlib import patches
 from matplotlib.gridspec import GridSpec
+
 from shared_core.images import (
+    apply_tgc,
     ground_truth_db as _ground_truth_db,
-    tgc_gain_db_from_depth,
     to_db,
     to_envelope,
 )
+from shared_core.geometry import image_extent_mm
+from shared_core.hashing import sha256_file
 from shared_core.signals import rf_to_analytic as rf_to_analytic, rf_to_iq as rf_to_iq
-from shared_core.data import load_input as load_input, load_input_from_h5, load_target as load_target
+from shared_core.data import (
+    embedded_config,
+    load_input as load_input,
+    load_input_from_h5,
+    load_target as load_target,
+)
 from shared_core.h5_schema import require_h5_schema as require_h5_schema
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -283,7 +291,7 @@ def load_from_h5(h5_path, sample_idx=0, signal_domain="iq"):
 
         gt_data = None
         has_gt = False
-        generation = yaml.safe_load(hf["config_yaml"][()])["generation"]
+        generation = embedded_config(hf)["generation"]
         definition = generation["ground_truth"]
         targets = generation["training_targets"]
         algorithm = definition.get("algorithm")
@@ -294,8 +302,9 @@ def load_from_h5(h5_path, sample_idx=0, signal_domain="iq"):
         has_gt = bool(image_path or entry.get("envelope") or
                       (signal_domain != "rf" and entry.get("signal")))
         if has_gt:
-            dynamic_range = float(definition["dynamic_range_db"])
-            gt_data = (ground_truth_db(hf, sample_idx, signal_domain=signal_domain) + dynamic_range) / dynamic_range
+            gt_data = _ground_truth_db(
+                hf, sample_idx, signal_domain=signal_domain, normalized=True
+            )[None]
         if has_gt:
             expected_gt_shape = (1, z_grid.size, x_grid.size)
             if gt_data.shape not in (expected_gt_shape, expected_gt_shape[1:]):
@@ -334,12 +343,7 @@ def prepare_beamforming_input(h5_path, sample_idx, select_str, signal_domain="iq
         i_data=sample.i_data[selected_indices],
         q_data=sample.q_data[selected_indices],
         t0=sample.t0_vec[selected_indices],
-        extent_mm=(
-            float(sample.x_grid[0] * 1000),
-            float(sample.x_grid[-1] * 1000),
-            float(sample.z_grid[-1] * 1000),
-            float(sample.z_grid[0] * 1000),
-        ),
+        extent_mm=tuple(image_extent_mm(sample.x_grid, sample.z_grid)),
     )
 
 
@@ -371,47 +375,171 @@ def validate_beamformer_input(i_data, q_data, angles, fs, expected_fs, n_channel
 
 
 def envelope_to_db(i_output, q_output, z_grid, fc, tgc_enabled, tgc_alpha):
-    i_output = np.asarray(i_output, dtype=np.float32)
-    q_output = np.asarray(q_output, dtype=np.float32)
-    if i_output.ndim != 2 or i_output.shape != q_output.shape:
-        raise ValueError(
-            f"beamformer I/Q output must have matching 2D shapes, got {i_output.shape} and {q_output.shape}",
-        )
-    if not np.isfinite(i_output).all() or not np.isfinite(q_output).all():
-        raise FloatingPointError("beamformer I/Q output contains NaN/Inf")
-    z_grid = np.asarray(z_grid, dtype=np.float64)
-    if z_grid.ndim != 1 or z_grid.size != i_output.shape[0] or not np.isfinite(z_grid).all():
-        raise ValueError("z_grid must match the output depth dimension and be finite")
-    envelope = to_envelope(i_output, q_output)
-    gain_db = None
-    if tgc_enabled:
-        gain_db = tgc_gain_db_from_depth(z_grid, fc, tgc_alpha)
-    return to_db(envelope, gain_db=gain_db)
+    return beamformed_image_db(i_output, q_output, z_grid, z_grid, fc, tgc_enabled, tgc_alpha, "iq")
+
+
+def rf_imaging_depth_grid(z_grid, c, fs):
+    count = int(np.ceil((z_grid[-1] - z_grid[0]) * 2 * fs / c)) + 1
+    return np.linspace(z_grid[0], z_grid[-1], max(2, count), dtype=np.float32)
 
 
 def beamforming_depth_grid(z_grid, c, fs, signal_domain):
     if signal_domain != "rf":
         return z_grid
-    count = int(np.ceil((z_grid[-1] - z_grid[0]) * 2 * fs / c)) + 1
-    return np.linspace(z_grid[0], z_grid[-1], max(2, count), dtype=np.float32)
+    return rf_imaging_depth_grid(z_grid, c, fs)
 
 
-def beamformed_image_db(real, imag, computed_z, image_z, fc, tgc_enabled, tgc_alpha, signal_domain):
+def resample_depth(values, computed_z, image_z):
+    values = np.asarray(values, dtype=np.float32)
+    computed_z = np.asarray(computed_z, dtype=np.float32)
+    image_z = np.asarray(image_z, dtype=np.float32)
+    if values.ndim != 2 or computed_z.shape != (values.shape[0],) or image_z.ndim != 1:
+        raise ValueError("depth grids must match a 2D beamformer output")
+    if values.shape[0] < 2 or image_z.size < 1:
+        raise ValueError("depth resampling requires at least two source rows and one target row")
+    if not np.isfinite(values).all() or not np.isfinite(computed_z).all() or not np.isfinite(image_z).all():
+        raise ValueError("depth resampling inputs must be finite")
+    if np.any(np.diff(computed_z) <= 0):
+        raise ValueError("computed_z must be strictly increasing")
+    if computed_z.shape == image_z.shape and np.allclose(computed_z, image_z, rtol=0, atol=1e-9):
+        return values
+    return np.column_stack([np.interp(image_z, computed_z, column) for column in values.T])
+
+
+def nearest_row_indices(source_z, target_z):
+    """Index of the nearest source depth for each target depth."""
+    source_z = np.asarray(source_z, dtype=np.float64)
+    target_z = np.asarray(target_z, dtype=np.float64)
+    if source_z.ndim != 1 or target_z.ndim != 1 or source_z.size < 1 or target_z.size < 1:
+        raise ValueError("nearest-row lookup requires nonempty one-dimensional depth grids")
+    if not np.isfinite(source_z).all() or not np.isfinite(target_z).all():
+        raise ValueError("nearest-row lookup requires finite depth grids")
+    if source_z.size > 1 and np.any(np.diff(source_z) <= 0):
+        raise ValueError("source_z must be strictly increasing")
+    positions = np.searchsorted(source_z, target_z)
+    left = np.clip(positions - 1, 0, source_z.size - 1)
+    right = np.clip(positions, 0, source_z.size - 1)
+    return np.where(
+        np.abs(source_z[left] - target_z) <= np.abs(source_z[right] - target_z),
+        left,
+        right,
+    )
+
+
+def beamformed_envelope(real, imag, computed_z, image_z, fc, tgc_enabled, tgc_alpha, signal_domain):
+    real = np.asarray(real, dtype=np.float32)
+    imag = np.asarray(imag, dtype=np.float32)
+    computed_z = np.asarray(computed_z, dtype=np.float32)
+    image_z = np.asarray(image_z, dtype=np.float32)
+    if real.ndim != 2 or real.shape != imag.shape:
+        raise ValueError("beamformer outputs must have matching 2D shapes")
+    if not np.isfinite(real).all() or not np.isfinite(imag).all():
+        raise FloatingPointError("beamformer output contains NaN/Inf")
+    if computed_z.shape != (real.shape[0],) or image_z.ndim != 1:
+        raise ValueError("depth grids must match the beamformer output")
+    if not np.isfinite(computed_z).all() or not np.isfinite(image_z).all():
+        raise ValueError("depth grids must be finite")
+
     if signal_domain == "rf":
         from scipy.signal import hilbert
 
         if np.any(imag != 0):
             raise ValueError("RF 成像输出必须为实数，不能丢弃非零虚部")
-        pad_before = len(real) // 2
-        pad_after = len(real) - pad_before
+        pad_before = real.shape[0] // 2
+        pad_after = real.shape[0] - pad_before
         padded = np.pad(real, ((pad_before, pad_after), (0, 0)))
-        envelope = np.abs(hilbert(padded, axis=0)[pad_before:pad_before + len(real)])
-        envelope = np.column_stack([np.interp(image_z, computed_z, column) for column in envelope.T])
-        return envelope_to_db(envelope, np.zeros_like(envelope), image_z, fc, tgc_enabled, tgc_alpha)
-    return envelope_to_db(real, imag, image_z, fc, tgc_enabled, tgc_alpha)
+        envelope = np.abs(hilbert(padded, axis=0)[pad_before:pad_before + real.shape[0]])
+    else:
+        envelope = to_envelope(real, imag)
+
+    envelope = resample_depth(envelope, computed_z, image_z)
+    if tgc_enabled:
+        envelope = apply_tgc(envelope, image_z, fc, tgc_alpha)
+    return np.asarray(envelope, dtype=np.float32)
 
 
-def run_beamformer(beamformer, i_data, q_data, selected_angles, t0, fs, device):
+def beamformed_image_db(real, imag, computed_z, image_z, fc, tgc_enabled, tgc_alpha, signal_domain):
+    return beamformed_image(
+        real, imag, computed_z, image_z, fc, tgc_enabled, tgc_alpha, signal_domain
+    )[1]
+
+
+def beamformed_image(real, imag, computed_z, image_z, fc, tgc_enabled, tgc_alpha, signal_domain):
+    from shared_core.images import tgc_gain_db_from_depth
+
+    envelope = beamformed_envelope(
+        real, imag, computed_z, image_z, fc, False, tgc_alpha, signal_domain
+    )
+    gain_db = tgc_gain_db_from_depth(image_z, fc, tgc_alpha) if tgc_enabled else None
+    return envelope, to_db(envelope, gain_db=gain_db)
+
+
+def find_beamformer_class(module, algorithm):
+    candidates = [
+        getattr(module, name)
+        for name in dir(module)
+        if name.endswith("BeamformerIQ") and isinstance(getattr(module, name), type)
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise ValueError(f"算法 {algorithm} 没有定义 *BeamformerIQ 类")
+    raise ValueError(f"算法 {algorithm} 定义了多个 BeamformerIQ 类: {[cls.__name__ for cls in candidates]}")
+
+
+def build_beamformer(
+    beamformer_class,
+    z_grid,
+    x_grid,
+    n_elem,
+    pitch,
+    c,
+    fc,
+    fs,
+    t0,
+    angles_rad,
+    options,
+    device=None,
+    constructor_overrides=None,
+):
+    signature = inspect.signature(beamformer_class.__init__)
+    accepted = set(signature.parameters) - {"self"}
+    geometry = {
+        "z_grid": z_grid,
+        "x_grid": x_grid,
+        "n_elem": n_elem,
+        "pitch": pitch,
+        "c": c,
+        "fc": fc,
+        "fs": fs,
+        "_t0_all": t0,
+        "t0_all": t0,
+        "angles_rad": angles_rad,
+    }
+    kwargs = {key: value for key, value in geometry.items() if key in accepted}
+    kwargs.update(
+        {
+            key: value
+            for key, value in vars(options).items()
+            if key in accepted and (value is not None or key not in kwargs)
+        }
+    )
+    if "options" in accepted:
+        kwargs["options"] = options
+    if "device" in accepted:
+        kwargs["device"] = device
+    kwargs.update(
+        {
+            key: value
+            for key, value in (constructor_overrides or {}).items()
+            if key in accepted
+        }
+    )
+    return beamformer_class(**kwargs)
+
+
+def run_beamformer(beamformer, i_data, q_data, selected_angles, t0, fs, device=None):
+    device = resolve_device(device)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     start = time.perf_counter()
@@ -574,23 +702,10 @@ def parse_selected_angles(angles, select_str):
     if angles.ndim != 1 or len(angles) == 0:
         raise ValueError("angles must be a non-empty 1D array")
     select_str = str(select_str).strip().lower()
-    if select_str == "all":
-        return np.arange(len(angles)), angles
-    if select_str == "center":
-        center_idx = int(np.argmin(np.abs(angles)))
-        return np.array([center_idx]), np.array([angles[center_idx]])
-    if select_str.isdigit():
-        count = int(select_str)
-        if not 1 <= count <= len(angles):
-            raise ValueError(
-                f"Angle count {count} is outside the valid range [1,{len(angles)}]",
-            )
-        if count == 1:
-            center_idx = int(np.argmin(np.abs(angles)))
-            return np.array([center_idx]), np.array([angles[center_idx]])
-        sorted_indices = np.argsort(angles)
-        selected = np.linspace(0, len(angles) - 1, count, dtype=int)
-        indices = sorted_indices[selected]
+    if select_str in ("all", "center") or select_str.isdigit():
+        from shared_core.selection import select_angle_indices
+
+        indices = select_angle_indices(angles, select_str)
         return indices, angles[indices]
     try:
         indices = [int(item.strip()) for item in select_str.split(",") if item.strip()]
@@ -611,10 +726,6 @@ def parse_selected_angles(angles, select_str):
     return indices, angles[indices]
 
 
-def db_display_range(dynamic_range):
-    return -float(dynamic_range), 0.0
-
-
 def _to_2d(array):
     array = np.asarray(array)
     if array.ndim == 3:
@@ -624,7 +735,11 @@ def _to_2d(array):
     return array
 
 
-def add_scale_bar(axis, extent_mm, fontsize=10):
+def add_scale_bar(axis, extent_mm, fontsize=None):
+    if fontsize is None:
+        from shared_core.plot_style import FONT_SIZE
+
+        fontsize = FONT_SIZE
     bar_length = 5.0
     bar_x = extent_mm[1] - bar_length - 2.0
     bar_y = extent_mm[2] - 2.0
@@ -652,69 +767,66 @@ def save_comparison_figure(
     dr=60.0,
     method_name="Beamforming",
 ):
-    vmin, vmax = db_display_range(dr)
     image_db = _to_2d(image_db)
     gt_db = _to_2d(gt_db)
 
-    fig = plt.figure(figsize=(12, 8), dpi=300)
+    from shared_core.plot_style import (
+        DIAGNOSTIC,
+        apply_style,
+        draw_bmode,
+        save_figure as save_styled,
+        style_axes,
+    )
+
+    apply_style(DIAGNOSTIC)
+    fig = plt.figure(figsize=(10.0, 6.5))
     grid = GridSpec(1, 3, width_ratios=[1, 1, 0.05], figure=fig)
 
     gt_axis = fig.add_subplot(grid[0, 0])
-    gt_axis.imshow(
-        gt_db, cmap="gray", vmin=vmin, vmax=vmax, extent=extent_mm, aspect="equal"
-    )
-    gt_axis.set_title("Ground Truth", fontsize=12, pad=10)
+    draw_bmode(gt_axis, gt_db, extent_mm, dr)
+    gt_axis.set_title("Ground Truth", pad=6)
     gt_axis.set_xlabel("Lateral (mm)")
     gt_axis.set_ylabel("Depth (mm)")
+    style_axes(gt_axis)
 
     image_axis = fig.add_subplot(grid[0, 1])
-    image_handle = image_axis.imshow(
-        image_db,
-        cmap="gray",
-        vmin=vmin,
-        vmax=vmax,
-        extent=extent_mm,
-        aspect="equal",
-    )
-    image_axis.set_title(
-        f"{format_method_name(method_name)}\n{title_str}", fontsize=9, pad=10
-    )
+    image_handle = draw_bmode(image_axis, image_db, extent_mm, dr)
+    image_axis.set_title(f"{format_method_name(method_name)}\n{title_str}", pad=6)
     image_axis.set_xlabel("Lateral (mm)")
     image_axis.set_ylabel("Depth (mm)")
+    style_axes(image_axis)
     add_scale_bar(image_axis, extent_mm)
 
     color_axis = fig.add_subplot(grid[0, 2])
     colorbar = fig.colorbar(image_handle, cax=color_axis, fraction=0.8)
     colorbar.set_label("Amplitude (dB)")
     fig.tight_layout()
-    fig.savefig(out_path, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
+    save_styled(fig, out_path, profile=DIAGNOSTIC)
 
 
 def save_figure(
     image_db, extent_mm, out_path, title_str, dr=60.0, method_name="Beamforming"
 ):
-    vmin, vmax = db_display_range(dr)
-    fig, axis = plt.subplots(figsize=(6, 8), dpi=300)
-    image_handle = axis.imshow(
-        image_db,
-        cmap="gray",
-        vmin=vmin,
-        vmax=vmax,
-        extent=extent_mm,
-        aspect="equal",
+    from shared_core.plot_style import (
+        DIAGNOSTIC,
+        apply_style,
+        draw_bmode,
+        save_figure as save_styled,
+        style_axes,
     )
+
+    apply_style(DIAGNOSTIC)
+    fig, axis = plt.subplots(figsize=(5.0, 6.5))
+    image_handle = draw_bmode(axis, image_db, extent_mm, dr)
     axis.set_xlabel("Lateral (mm)")
     axis.set_ylabel("Depth (mm)")
-    axis.set_title(
-        f"{format_method_name(method_name)}\n{title_str}", fontsize=9, pad=15
-    )
+    axis.set_title(f"{format_method_name(method_name)}\n{title_str}", pad=10)
+    style_axes(axis)
     colorbar = fig.colorbar(image_handle, ax=axis, fraction=0.046, pad=0.04)
     colorbar.set_label("Amplitude (dB)")
     add_scale_bar(axis, extent_mm)
     fig.tight_layout()
-    fig.savefig(out_path, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
+    save_styled(fig, out_path, profile=DIAGNOSTIC)
 
 
 def write_params(path, params):
@@ -737,7 +849,7 @@ def result_cache_signature(h5_path, method_name, parameters=None, *, extra_args=
             effective_parameters[name] = extra_args[index + 1]
     sources = {}
     for source_path in algorithm_source_paths(method_name, effective_parameters.get("train_root")):
-        sources[str(source_path.resolve())] = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        sources[str(source_path.resolve())] = sha256_file(source_path)
     dependencies = {}
     for name, value in effective_parameters.items():
         normalized_name = str(name).lower().replace("-", "_")
@@ -781,14 +893,20 @@ def algorithm_source_paths(method_name, train_root=None):
         "gcfmv": (algorithm_dir / "mv.py",),
         "cmsaw": (algorithm_dir / "mv.py",),
     }
+    beamforming_sources = (algorithm_dir / "shared_core/beamforming.py",)
     return (
         algorithm_dir / f"{method_name}.py",
         script_path,
+        PROJECT_ROOT / "shared_core/geometry.py",
+        PROJECT_ROOT / "shared_core/hashing.py",
         PROJECT_ROOT / "shared_core/images.py",
+        PROJECT_ROOT / "shared_core/numerics.py",
+        PROJECT_ROOT / "shared_core/phase.py",
+        PROJECT_ROOT / "shared_core/selection.py",
         PROJECT_ROOT / "shared_core/signals.py",
         PROJECT_ROOT / "shared_core/normalization.py",
         PROJECT_ROOT / "shared_core/data.py",
         PROJECT_ROOT / "shared_core/h5_schema.py",
-        algorithm_dir / "shared_core/beamforming.py",
+        *beamforming_sources,
         *dependencies.get(method_name, ()),
     )

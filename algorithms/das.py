@@ -7,12 +7,16 @@ import argparse
 import numpy as np
 import torch
 
+
 if __package__:
     from algorithms.bootstrap import initialize_project_path
 else:
     from bootstrap import initialize_project_path
 
 PROJECT_ROOT = initialize_project_path(__file__)
+
+from shared_core.geometry import plane_wave_distance, receive_distance
+from shared_core.phase import carrier_phase, phase_factors, rotate_components
 
 from algorithms.shared_core.beamforming import (
     aperture_start_indices,
@@ -23,6 +27,7 @@ from algorithms.shared_core.beamforming import (
     interpolate_channel_samples,
 )
 from algorithms.shared_core.common import (
+    build_beamformer,
     resolve_device,
     add_common_arguments,
     add_io_arguments,
@@ -87,7 +92,7 @@ class DASBeamformerIQ:
         x_mesh, z_mesh = torch.meshgrid(self.x_grid, self.z_grid, indexing="xy")
         self.x_mesh, self.z_mesh = x_mesh, z_mesh
         self.drs = (
-            torch.sqrt((x_mesh[..., None] - self.ep) ** 2 + z_mesh[..., None] ** 2)
+            receive_distance(x_mesh[..., None], z_mesh[..., None], self.ep)
             * self.sc
         )
 
@@ -167,12 +172,11 @@ class DASBeamformerIQ:
                 (z1 - z0, self.width), dtype=torch.float32, device=self.device
             )
 
-            phi_rx = 2.0 * np.pi * self.fc * (drs_b / fs) if self.signal_domain == "iq" else torch.zeros_like(drs_b)
-            cos_rx = torch.cos(phi_rx)
-            sin_rx = torch.sin(phi_rx)
+            phi_rx = carrier_phase(self.fc, drs_b / fs) if self.signal_domain == "iq" else torch.zeros_like(drs_b)
+            cos_rx, sin_rx = phase_factors(phi_rx)
 
             for i in range(n_a):
-                tx_samples = tx_z * cos_a[i] + tx_x * sin_a[i]
+                tx_samples = plane_wave_distance(tx_x, tx_z, cos_a[i], sin_a[i])
                 sample = tx_samples.unsqueeze(-1) + drs_b - t_starts_t[i]
                 valid = (sample >= 0) & (sample <= max_sample)
                 sample.clamp_(0.0, max_sample)
@@ -189,16 +193,15 @@ class DASBeamformerIQ:
 
                 valid_w = valid.float() * weights_b
                 valid_w = valid_w / (valid_w.sum(dim=-1, keepdim=True) + 1e-9)
-                i_rx = i_center * cos_rx - q_center * sin_rx
-                q_rx = i_center * sin_rx + q_center * cos_rx
+                i_rx, q_rx = rotate_components(i_center, q_center, cos_rx, sin_rx)
                 i_sum = (i_rx * valid_w).sum(dim=-1)
                 q_sum = (q_rx * valid_w).sum(dim=-1)
 
-                phi_tx = 2.0 * np.pi * self.fc * (tx_samples / fs) if self.signal_domain == "iq" else torch.zeros_like(tx_samples)
-                cos_tx = torch.cos(phi_tx)
-                sin_tx = torch.sin(phi_tx)
-                i_block.add_(i_sum * cos_tx - q_sum * sin_tx)
-                q_block.add_(i_sum * sin_tx + q_sum * cos_tx)
+                phi_tx = carrier_phase(self.fc, tx_samples / fs) if self.signal_domain == "iq" else torch.zeros_like(tx_samples)
+                cos_tx, sin_tx = phase_factors(phi_tx)
+                i_rot, q_rot = rotate_components(i_sum, q_sum, cos_tx, sin_tx)
+                i_block.add_(i_rot)
+                q_block.add_(q_rot)
 
             i_output[z0:z1] = i_block / n_a
             q_output[z0:z1] = q_block / n_a
@@ -273,7 +276,10 @@ def main(argv=None):
         ],
     )
 
-    bf = DASBeamformerIQ(compute_z, x_grid, n_elem, pitch, c, fc, fs, t0_sub, angles_all, options=args, device=device)
+    bf = build_beamformer(
+        DASBeamformerIQ, compute_z, x_grid, n_elem, pitch, c, fc, fs,
+        t0_sub, angles_all, args, device,
+    )
 
     print("Processing DAS...")
     i_out, q_out, dt = run_beamformer(

@@ -3,7 +3,6 @@
 # ruff: noqa: E402
 
 import numpy as np
-import torch
 
 if __package__:
     from algorithms.bootstrap import initialize_project_path
@@ -13,8 +12,9 @@ else:
 PROJECT_ROOT = initialize_project_path(__file__)
 
 from algorithms import mv
-from algorithms.shared_core.beamforming import generalized_coherence_factor
+from algorithms.shared_core.beamforming import generalized_coherence_factor, generalized_coherence_factor_nd
 from algorithms.shared_core.common import (
+    build_beamformer,
     resolve_device,
     beamforming_depth_grid,
     beamformed_image_db,
@@ -84,17 +84,7 @@ class RowDynamicMVBeamformerIQ(mv.RowDynamicMVBeamformerIQ):
 
 
 def generalized_coherence_factor_2d(data, tx_low_bins, rx_low_bins):
-    scale = data.abs().amax(dim=(-2, -1), keepdim=True)
-    data = data / scale.clamp_min(torch.finfo(data.real.dtype).tiny)
-    spectrum = torch.fft.fftshift(
-        torch.fft.fft2(data, dim=(-2, -1)), dim=(-2, -1),
-    ).abs().square()
-    tx_center, rx_center = spectrum.shape[-2] // 2, spectrum.shape[-1] // 2
-    tx_slice = slice(max(0, tx_center - tx_low_bins), min(spectrum.shape[-2], tx_center + tx_low_bins + 1))
-    rx_slice = slice(max(0, rx_center - rx_low_bins), min(spectrum.shape[-1], rx_center + rx_low_bins + 1))
-    low = spectrum[..., tx_slice, rx_slice].sum(dim=(-2, -1))
-    total = spectrum.sum(dim=(-2, -1))
-    return (low / total.clamp_min(torch.finfo(total.dtype).tiny)).clamp(0, 1)
+    return generalized_coherence_factor_nd(data, (tx_low_bins, rx_low_bins))
 
 
 # ================= 主程序 =================
@@ -188,20 +178,10 @@ def main(argv=None):
     )
 
     # 初始化 GCF-MV + FBSS 波束合成器
-    bf = RowDynamicMVBeamformerIQ(
-        compute_z,
-        x_grid,
-        n_elem,
-        pitch,
-        c,
-        fc,
-        fs,
-        t0_sub,
-        angles_all,
-        mv_dl=args.mv_dl,
-        fbss=args.fbss,
-        subarray_ratio=args.subarray_ratio,
-        temporal_win=args.temporal_win, options=args, device=device)
+    bf = build_beamformer(
+        RowDynamicMVBeamformerIQ, compute_z, x_grid, n_elem, pitch, c, fc, fs,
+        t0_sub, angles_all, args, device,
+    )
 
     print(
         f"Processing GCF-MV {beamforming_mode} (DL={args.mv_dl}, GCF bins={args.gcf_low_bins}, power={args.gcf_power})...",

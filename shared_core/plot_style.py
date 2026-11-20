@@ -13,6 +13,7 @@ so that migrating that figure is visually neutral.
 from __future__ import annotations
 
 import functools
+import math
 import re
 import unicodedata
 import uuid
@@ -404,6 +405,54 @@ def style_axes(
     axis.set_axisbelow(True)
 
 
+def draw_bmode(
+    axis: plt.Axes,
+    image_db,
+    extent_mm,
+    dynamic_range: float = 60.0,
+    *,
+    aspect: str = "equal",
+    interpolation: str | None = None,
+):
+    dynamic_range = float(dynamic_range)
+    if not math.isfinite(dynamic_range) or dynamic_range <= 0:
+        raise ValueError("B-mode dynamic range must be a finite positive number")
+    return draw_gray_image(
+        axis,
+        image_db,
+        extent_mm,
+        vmin=-dynamic_range,
+        vmax=0.0,
+        aspect=aspect,
+        interpolation=interpolation,
+    )
+
+
+def draw_gray_image(
+    axis: plt.Axes,
+    image,
+    extent,
+    *,
+    vmin: float,
+    vmax: float,
+    aspect: str = "equal",
+    interpolation: str | None = None,
+    origin: str | None = None,
+):
+    options = {
+        "cmap": "gray",
+        "vmin": vmin,
+        "vmax": vmax,
+        "extent": extent,
+        "aspect": aspect,
+    }
+    if interpolation is not None:
+        options["interpolation"] = interpolation
+    if origin is not None:
+        options["origin"] = origin
+    return axis.imshow(image, **options)
+
+
 def style_legend(legend, *, fontsize: float | None = None) -> None:
     """Normalise a legend created with per-call settings."""
 
@@ -478,7 +527,7 @@ def save_figure(
                 fig.savefig(
                     temporary,
                     dpi=profile.dpi if dpi is None else dpi,
-                    bbox_inches=None if profile.name == PAPER.name else "tight",
+                    bbox_inches=fig.bbox_inches if profile.name == PAPER.name else "tight",
                     facecolor="white",
                 )
                 temporary.replace(target)

@@ -1,14 +1,12 @@
 import argparse
 import contextlib
-import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -502,6 +500,10 @@ class BeamformerRegressionTests(unittest.TestCase):
         actual = envelope_to_db(values, np.zeros_like(values), [0.0, 1.0], 5e6, True, 10.0)
         self.assertTrue(np.isfinite(actual).all())
         self.assertEqual(actual.max(), 0.0)
+        values[1, 0] = 0.0
+        actual = envelope_to_db(values, np.zeros_like(values), [0.0, 1.0], 5e6, True, 10.0)
+        self.assertEqual(actual[1, 0], -240.0)
+        self.assertEqual(actual[1, 1], 0.0)
 
     def test_ccmv_honors_its_device_independently_of_mv(self):
         with patch("algorithms.shared_core.common.torch.cuda.is_available", side_effect=AssertionError("explicit device must not probe CUDA")):
