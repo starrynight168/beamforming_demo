@@ -21,7 +21,7 @@ DATA_DIR = Path(__file__).resolve().parent
 ROOT = DATA_DIR.parent
 sys.path.insert(0, str(ROOT))
 
-from shared_core.data import load_input_from_h5
+from shared_core.data import embedded_config, load_input_from_h5
 from data.h5_schema import require_h5_schema
 from shared_core.normalization import storage_normalization_mode
 LOG_DIR = DATA_DIR / "logs"
@@ -529,12 +529,18 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
         require_h5_schema(hf)
     except ValueError as exc:
         problems.append(str(exc))
+    config = None
     stored_inputs = {}
     if "config_yaml" in hf:
         try:
-            stored_inputs = yaml.safe_load(decode_value(hf["config_yaml"][()])).get("generation", {}).get("storage", {}).get("inputs", {})
-        except (AttributeError, TypeError, yaml.YAMLError):
-            pass
+            config = embedded_config(hf)
+        except (AttributeError, TypeError, ValueError) as exc:
+            problems.append(f"config_yaml 不是合法 YAML: {exc}")
+        else:
+            generation = config.get("generation")
+            storage = generation.get("storage") if isinstance(generation, dict) else None
+            if isinstance(storage, dict):
+                stored_inputs = storage.get("inputs", {})
     if not isinstance(stored_inputs, dict):
         stored_inputs = {}
     required = REQUIRED_FIELDS if "iq" in stored_inputs or not stored_inputs else tuple(
@@ -712,127 +718,118 @@ def run_checks(hf: h5py.File) -> tuple[str, list[str]]:
             if value is None or not np.isfinite(value) or value <= 0:
                 problems.append(f"{key} 必须是有限正数")
 
-    if "config_yaml" in hf:
-        value = decode_value(hf["config_yaml"][()])
-        try:
-            config = yaml.safe_load(value) or {}
-        except (AttributeError, TypeError, yaml.YAMLError) as exc:
-            problems.append(f"config_yaml 不是合法 YAML: {exc}")
+    if config is not None:
+        problems.extend(
+            f"config_yaml 缺少顶层字段 {key}"
+            for key in (
+                "schema_version",
+                "dataset",
+                "provenance",
+                "h5_schema",
+                "generation",
+                "source_samples",
+            )
+            if key not in config
+        )
+        validate_config_schema(config, hf, problems)
+        samples = config.get("source_samples")
+        n_samples = hf["reference_iq_db"].shape[0] if "reference_iq_db" in hf else 0
+        if not isinstance(samples, list) or len(samples) != n_samples:
+            problems.append(
+                "config_yaml.source_samples 数量必须与 H5 样本数一致",
+            )
         else:
-            if not isinstance(config, dict):
-                problems.append("config_yaml 顶层必须是字典")
-            else:
-                problems.extend(
-                    f"config_yaml 缺少顶层字段 {key}"
-                    for key in (
-                        "schema_version",
-                        "dataset",
-                        "provenance",
-                        "h5_schema",
-                        "generation",
-                        "source_samples",
-                    )
-                    if key not in config
-                )
-                validate_config_schema(config, hf, problems)
-                samples = config.get("source_samples")
-                n_samples = hf["reference_iq_db"].shape[0] if "reference_iq_db" in hf else 0
-                if not isinstance(samples, list) or len(samples) != n_samples:
+            for index, sample in enumerate(samples):
+                if not isinstance(sample, dict):
+                    problems.append(f"source_samples[{index}] 必须是字典")
+                    continue
+                if sample.get("sample_index") != index:
                     problems.append(
-                        "config_yaml.source_samples 数量必须与 H5 样本数一致",
+                        f"source_samples[{index}].sample_index 应为 {index}",
                     )
-                else:
-                    for index, sample in enumerate(samples):
-                        if not isinstance(sample, dict):
-                            problems.append(f"source_samples[{index}] 必须是字典")
-                            continue
-                        if sample.get("sample_index") != index:
+                if not str(sample.get("id") or "").strip():
+                    problems.append(f"source_samples[{index}].id 不能为空")
+                for key in (
+                    "id",
+                    "phantom_mode",
+                    "phantom_source",
+                    "iq_path",
+                    "scan_path",
+                    "phantom_path",
+                    "gt_path",
+                ):
+                    if key not in sample:
+                        problems.append(f"source_samples[{index}] 缺少 {key}")
+                        continue
+                    path = str(sample[key] or "")
+                    if key in {"iq_path", "scan_path", "gt_path"} and not path:
+                        problems.append(
+                            f"source_samples[{index}].{key} 不能为空"
+                        )
+                    if (
+                        key.endswith("_path")
+                        and path
+                        and Path(path).is_absolute()
+                    ):
+                        problems.append(
+                            f"source_samples[{index}].{key} 必须是相对路径",
+                        )
+                mode = sample.get("phantom_mode")
+                source = sample.get("phantom_source")
+                if (
+                    mode in ("contrast_speckle", "resolution_distortion")
+                    and source in ("simulation", "experiments")
+                ):
+                    phantom_path = sample.get("phantom_path")
+                    if (
+                        not isinstance(phantom_path, str)
+                        or not phantom_path.strip()
+                    ):
+                        problems.append(
+                            f"source_samples[{index}].phantom_path 必须是非空字符串"
+                        )
+                    else:
+                        picmus_root = (DATA_DIR / "PICMUS").resolve()
+                        phantom_file = (picmus_root / phantom_path).resolve()
+                        if not phantom_file.is_relative_to(picmus_root):
                             problems.append(
-                                f"source_samples[{index}].sample_index 应为 {index}",
+                                f"source_samples[{index}].phantom_path 必须指向 PICMUS 目录内文件: {phantom_path}"
                             )
-                        if not str(sample.get("id") or "").strip():
-                            problems.append(f"source_samples[{index}].id 不能为空")
-                        for key in (
-                            "id",
-                            "phantom_mode",
-                            "phantom_source",
-                            "iq_path",
-                            "scan_path",
-                            "phantom_path",
-                            "gt_path",
-                        ):
-                            if key not in sample:
-                                problems.append(f"source_samples[{index}] 缺少 {key}")
-                                continue
-                            path = str(sample[key] or "")
-                            if key in {"iq_path", "scan_path", "gt_path"} and not path:
-                                problems.append(
-                                    f"source_samples[{index}].{key} 不能为空"
-                                )
-                            if (
-                                key.endswith("_path")
-                                and path
-                                and Path(path).is_absolute()
-                            ):
-                                problems.append(
-                                    f"source_samples[{index}].{key} 必须是相对路径",
-                                )
-                        mode = sample.get("phantom_mode")
-                        source = sample.get("phantom_source")
-                        if (
-                            mode in ("contrast_speckle", "resolution_distortion")
-                            and source in ("simulation", "experiments")
-                        ):
-                            phantom_path = sample.get("phantom_path")
-                            if (
-                                not isinstance(phantom_path, str)
-                                or not phantom_path.strip()
-                            ):
-                                problems.append(
-                                    f"source_samples[{index}].phantom_path 必须是非空字符串"
-                                )
-                            else:
-                                picmus_root = (DATA_DIR / "PICMUS").resolve()
-                                phantom_file = (picmus_root / phantom_path).resolve()
-                                if not phantom_file.is_relative_to(picmus_root):
-                                    problems.append(
-                                        f"source_samples[{index}].phantom_path 必须指向 PICMUS 目录内文件: {phantom_path}"
-                                    )
-                                elif not phantom_file.is_file():
-                                    problems.append(
-                                        f"source_samples[{index}].phantom_path 模体文件不存在: {phantom_path}"
-                                    )
-                        elif (mode, source) != ("in_vivo", "in_vivo"):
+                        elif not phantom_file.is_file():
                             problems.append(
-                                f"source_samples[{index}] 不支持的模体组合: mode={mode}, source={source}"
+                                f"source_samples[{index}].phantom_path 模体文件不存在: {phantom_path}"
                             )
-                        expected_path_roles = {
-                            **({"rf_path": "read_input"} if set(stored_inputs) & {"rf", "analytic_rf"} else {}),
-                            "iq_path": "read_input",
-                            "scan_path": "read_input",
-                            "phantom_path": "reference_only_not_read",
-                            "gt_path": (
-                                "generated_not_read"
-                                if str(sample.get("gt_path") or "").startswith(
-                                    "generated:"
-                                )
-                                else "read_input"
-                            ),
-                        }
-                        if sample.get("path_roles") != expected_path_roles:
-                            problems.append(
-                                f"source_samples[{index}].path_roles 未准确记录路径用途",
-                            )
-                convention = _config_mapping(
-                    config,
-                    "path_convention",
-                    "config_yaml.path_convention",
-                    problems,
-                )
-                if convention.get("type") != "relative":
-                    problems.append("config_yaml.path_convention.type 应为 relative")
-                if convention.get("base") != "PICMUS_ROOT":
-                    problems.append("config_yaml.path_convention.base 应为 PICMUS_ROOT")
+                elif (mode, source) != ("in_vivo", "in_vivo"):
+                    problems.append(
+                        f"source_samples[{index}] 不支持的模体组合: mode={mode}, source={source}"
+                    )
+                expected_path_roles = {
+                    **({"rf_path": "read_input"} if set(stored_inputs) & {"rf", "analytic_rf"} else {}),
+                    "iq_path": "read_input",
+                    "scan_path": "read_input",
+                    "phantom_path": "reference_only_not_read",
+                    "gt_path": (
+                        "generated_not_read"
+                        if str(sample.get("gt_path") or "").startswith(
+                            "generated:"
+                        )
+                        else "read_input"
+                    ),
+                }
+                if sample.get("path_roles") != expected_path_roles:
+                    problems.append(
+                        f"source_samples[{index}].path_roles 未准确记录路径用途",
+                    )
+        convention = _config_mapping(
+            config,
+            "path_convention",
+            "config_yaml.path_convention",
+            problems,
+        )
+        if convention.get("type") != "relative":
+            problems.append("config_yaml.path_convention.type 应为 relative")
+        if convention.get("base") != "PICMUS_ROOT":
+            problems.append("config_yaml.path_convention.base 应为 PICMUS_ROOT")
 
     domain_fields = {"iq": ("iq_i", "iq_q"), "rf": ("rf",), "analytic_rf": ("ar_i", "ar_q")}
     count = len(hf["reference_iq_db"]) if "reference_iq_db" in hf else 0
@@ -915,7 +912,7 @@ def inspect_file(path: Path) -> bool:
             config_dataset = hf.get("config_yaml")
             if isinstance(config_dataset, h5py.Dataset):
                 try:
-                    config = yaml.safe_load(decode_value(config_dataset[()])) or {}
+                    config = embedded_config(hf)
                     generation = config.get("generation", {}) or {}
                     gt_reference_fs = (generation.get("ground_truth", {}) or {}).get(
                         "reference_sampling_frequency_hz"
@@ -923,7 +920,7 @@ def inspect_file(path: Path) -> bool:
                     decimation = (generation.get("input_iq", {}) or {}).get(
                         "decimation_factor"
                     )
-                except (AttributeError, TypeError, yaml.YAMLError):
+                except (AttributeError, TypeError, ValueError):
                     gt_reference_fs = None
                     decimation = None
 

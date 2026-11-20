@@ -37,13 +37,15 @@ def resolve(path):
 
 def h5_embedded_config(hf):
     """Execute h5 embedded config."""
-    from shared_core.data import embedded_config, source_sample_details
+    from shared_core.data import embedded_config
 
     return embedded_config(hf)
 
 
 def read_sample_meta(h5_path, sample_idx):
     """Read sample meta."""
+    from shared_core.data import source_sample_details
+
     with h5py.File(h5_path, "r") as hf:
         require_h5_schema(hf)
         config = h5_embedded_config(hf)

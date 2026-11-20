@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 
 from algorithms import mv
 from evaluation.evaluate import target_resolution
-from shared_core.plot_style import DIAGNOSTIC, apply_style, save_figure
+from shared_core.plot_style import DIAGNOSTIC, apply_style, save_figure, style_axes
 from tools.shared.scenes import resolve_project_path as resolve_path
 from tools.shared.run_output import (
     ToolOutput,
@@ -270,7 +270,7 @@ def main(argv=None):
     summaries = summarize(target_rows)
     x = np.arange(len(summaries))
     labels = [f"{row['mv_dl']:g}" for row in summaries]
-    fig, axes = plt.subplots(1, 3, figsize=(13, 4), dpi=160)
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4))
     axes[0].errorbar(
         x,
         [r["FWHM_lateral_mean_mm"] for r in summaries],
@@ -288,7 +288,7 @@ def main(argv=None):
     for ax in axes:
         ax.set_xticks(x, labels)
         ax.set_xlabel("MV diagonal loading (dl)")
-        ax.grid(alpha=0.25)
+        style_axes(ax, grid=True)
     fig.suptitle(
         f"PICMUS sample {args.sample_index}, {len(targets)} point targets, "
         f"{args.grid_factor}x grid; sub={args.subarray_ratio}, temporal win={args.temporal_win}"

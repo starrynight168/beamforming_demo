@@ -14,9 +14,9 @@ from shared_core.geometry import (
     plane_wave_distance,
     receive_distance,
 )
+from shared_core.phase import rotate_iq_by_travel_time
 from algorithms.shared_core import common
 from algorithms.shared_core.beamforming import interpolate_channel_samples
-from train.shared_core.beamforming import align_channel_signal
 from tools.shared.run_output import ToolOutput
 
 
@@ -62,11 +62,11 @@ def _sample_vectors(sample, pixels, seed, f_number, device):
             i_frame = torch.as_tensor(sample.i_data[angle_idx], dtype=torch.float32, device=device)
             q_frame = torch.as_tensor(sample.q_data[angle_idx], dtype=torch.float32, device=device)
             i_val, q_val = interpolate_channel_samples(i_frame, q_frame, positions, channel_idx, "linear")
-            i_val, q_val = align_channel_signal(
-                i_val[:, None, :], q_val[:, None, :], tof[:, None, :],
-                (tx_dist / sample.c)[:, None], sample.fc, sample.signal_domain,
-            )
-            i_val, q_val = i_val[:, 0], q_val[:, 0]
+            if sample.signal_domain == "iq":
+                receive_tof = tof - (tx_dist / sample.c)[:, None]
+                i_val, q_val = rotate_iq_by_travel_time(i_val, q_val, sample.fc, receive_tof)
+            elif sample.signal_domain not in ("rf", "analytic_rf"):
+                raise ValueError(f"不支持的 signal_domain: {sample.signal_domain}")
             result_i[angle_idx] = i_val * valid
             result_q[angle_idx] = q_val * valid
     return result_i, result_q, active

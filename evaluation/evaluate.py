@@ -38,6 +38,7 @@ from evaluation.metrics import (
     standard_speckle_quality,
     target_resolution,
 )
+from shared_core.paths import relative_path
 
 
 PASS_THRESHOLD = 0.5
@@ -731,12 +732,12 @@ def main():
 
     meta = {
         "evaluation_protocol": "picmus",
-        "comparison_npy": comparison_path,
-        "h5_path": h5_path,
+        "comparison_npy": relative_path(comparison_path),
+        "h5_path": relative_path(h5_path),
         "h5_sample_idx": args.h5_sample_idx,
         "mode": mode,
         "phantom_source": source,
-        "phantom_path": phantom_path,
+        "phantom_path": relative_path(phantom_path),
         "sample_name": meta_from_h5.get("sample_name", ""),
         "has_gt": has_gt,
         "methods": methods,

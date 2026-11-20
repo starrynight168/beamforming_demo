@@ -20,7 +20,7 @@ for path in (ROOT, CODE_DIR):
         sys.path.insert(0, str(path))
 
 import run_ablation as workflow
-from shared_core.plot_style import DIAGNOSTIC, apply_style, save_figure
+from shared_core.plot_style import DIAGNOSTIC, apply_style, save_figure, style_axes
 from tools.shared.run_output import (
     emit,
     prepare_output_tree,
@@ -217,6 +217,7 @@ def save_c_sweep_curve(records, scenes, output_dir):
         ax.set_title(label)
         ax.set_xlabel("Sound speed used by MV (m/s)")
         ax.set_ylabel(label)
+        style_axes(ax)
         if plotted or nominal_speeds:
             ax.legend()
     for ax in list(axes.flat)[len(available):]:

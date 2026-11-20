@@ -3,7 +3,7 @@ import unittest
 
 import h5py
 
-from data.checks.check_data import check_time_axis
+from data.check_data import run_checks
 from shared_core.data import embedded_config
 
 
@@ -18,8 +18,8 @@ class EmbeddedConfigTests(unittest.TestCase):
             handle.create_dataset("config_yaml", data=b"dataset: patient_\xff42\n")
             with self.assertRaisesRegex(ValueError, "UTF-8"):
                 embedded_config(handle)
-            problems = []
-            check_time_axis(handle, problems)
+            status, problems = run_checks(handle)
+            self.assertEqual(status, "失败")
             self.assertTrue(any("UTF-8" in problem for problem in problems))
 
 

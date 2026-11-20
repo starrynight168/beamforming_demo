@@ -197,7 +197,7 @@ class SignalDataTests(unittest.TestCase):
         self.create_file()
         with patch("shared_core.data.ddc_lowpass_coefficients", wraps=ddc_lowpass_coefficients) as design:
             result = load_input(self.path, 0, "iq")
-        design.assert_called_once_with(20e6, 5e6, taps=32, cutoff_hz=3e6)
+        design.assert_called_once_with(20e6, 5e6, taps=32, cutoff_hz=3e6, window="hamming")
         expected = rf_to_iq(self.rf, 20e6, 5e6, self.starts, firwin(32, 0.3), 2)
         np.testing.assert_array_equal(result["real"], expected[0] / 3.0)
         np.testing.assert_array_equal(result["imag"], expected[1] / 3.0)

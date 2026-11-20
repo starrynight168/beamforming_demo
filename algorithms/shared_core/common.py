@@ -820,7 +820,8 @@ def save_figure(
     image_handle = draw_bmode(axis, image_db, extent_mm, dr)
     axis.set_xlabel("Lateral (mm)")
     axis.set_ylabel("Depth (mm)")
-    axis.set_title(f"{format_method_name(method_name)}\n{title_str}", pad=10)
+    title = title_str if method_name is None else f"{format_method_name(method_name)}\n{title_str}"
+    axis.set_title(title, pad=10)
     style_axes(axis)
     colorbar = fig.colorbar(image_handle, ax=axis, fraction=0.046, pad=0.04)
     colorbar.set_label("Amplitude (dB)")
@@ -887,13 +888,45 @@ def result_cache_signature(h5_path, method_name, parameters=None, *, extra_args=
 def algorithm_source_paths(method_name, train_root=None):
     script_path = Path(__file__).resolve()
     algorithm_dir = script_path.parent.parent
+    mban_sources = (
+        "eval_core/inference.py",
+        "eval_core/models.py",
+        "eval_core/calibration.py",
+        "eval_core/hardware.py",
+        "shared_core/beamforming.py",
+        "shared_core/checkpoints.py",
+        "shared_core/config.py",
+        "shared_core/config_schema.py",
+        "shared_core/controls.py",
+        "shared_core/crossbar.py",
+        "shared_core/data.py",
+        "shared_core/geometry.py",
+        "shared_core/hardware.py",
+        "shared_core/hardware_config.py",
+        "shared_core/hardware_layers.py",
+        "shared_core/hashing.py",
+        "shared_core/interpolation.py",
+        "shared_core/model.py",
+        "shared_core/operators.py",
+        "shared_core/runtime.py",
+        "shared_core/signal_chain.py",
+        "shared_core/signals.py",
+        "shared_core/images.py",
+        "shared_core/splits.py",
+    )
+    train_root = Path(resolve_project_path(train_root, PROJECT_ROOT)) if train_root else PROJECT_ROOT / "train"
     dependencies = {
         "ccmv": (algorithm_dir / "mv.py",),
         "esbmv": (algorithm_dir / "mv.py",),
         "gcfmv": (algorithm_dir / "mv.py",),
         "cmsaw": (algorithm_dir / "mv.py",),
+        "mban": tuple(train_root / source for source in mban_sources),
     }
-    beamforming_sources = (algorithm_dir / "shared_core/beamforming.py",)
+    beamforming_sources = (
+        ()
+        if method_name == "mban"
+        else (algorithm_dir / "shared_core/beamforming.py",)
+    )
     return (
         algorithm_dir / f"{method_name}.py",
         script_path,

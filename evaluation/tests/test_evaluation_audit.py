@@ -591,7 +591,8 @@ class EvaluationInputTests(unittest.TestCase):
                 picmus_distortion_z_offset_mm(path, "simulation")
 
     def test_evaluation_and_plotting_smoke(self):
-        with tempfile.TemporaryDirectory() as directory:
+        project_root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory(dir=project_root) as directory:
             root = Path(directory)
             h5_path = write_picmus_sample(root)
             comparison_path = root / "comparison.npy"
@@ -616,20 +617,23 @@ class EvaluationInputTests(unittest.TestCase):
             ]
             subprocess.run(
                 command,
-                cwd=Path(__file__).resolve().parents[2],
+                cwd=project_root,
                 check=True,
                 capture_output=True,
                 text=True,
             )
-            plot_args = SimpleNamespace(
-                metrics_dir=str(metrics_dir),
-                dr=None,
-                reference_mode="auto",
-                profile_roi_index=None,
-                profile_target_index=None,
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(project_root / "evaluation/plot_metrics.py"),
+                    "--metrics_dir",
+                    str(metrics_dir),
+                ],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
             )
-            with patch("evaluation.plot_metrics.parse_args", return_value=plot_args):
-                plot_main()
             for name in (
                 "summary_metrics.csv",
                 "evaluation_meta.json",
@@ -647,6 +651,13 @@ class EvaluationInputTests(unittest.TestCase):
                 float(model_row["PSNR_dB_vs_GT"]), 20 * np.log10(60.0)
             )
             metadata = json.loads((metrics_dir / "evaluation_meta.json").read_text())
+            self.assertEqual(
+                metadata["comparison_npy"], comparison_path.relative_to(project_root).as_posix()
+            )
+            self.assertEqual(
+                metadata["h5_path"], h5_path.relative_to(project_root).as_posix()
+            )
+            self.assertTrue(metadata["phantom_path"].startswith("data/PICMUS/"))
             self.assertEqual(metadata["sample_name"], "renamed_sample")
             self.assertEqual(metadata["evaluation_protocol"], "picmus")
             self.assertEqual(len(metadata["contrast_rois"]), 9)

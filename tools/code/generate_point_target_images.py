@@ -14,7 +14,7 @@ from algorithms import das, mv
 from algorithms.shared_core import common
 from evaluation.context import load_picmus_context, read_sample_meta
 from evaluation.metrics import build_square_label_map, target_resolution
-from shared_core.plot_style import DIAGNOSTIC, apply_style, draw_bmode
+from shared_core.plot_style import DIAGNOSTIC, apply_style, draw_bmode, style_axes
 from tools.shared.run_output import ToolOutput
 
 
@@ -132,6 +132,7 @@ def evaluate_scene(scene, args, device, output):
         axis.set_title(f"{method.upper()} | {scene['id']}")
         axis.set_xlabel("Lateral position (mm)")
         axis.set_ylabel("Depth (mm)")
+        style_axes(axis)
     fig.tight_layout()
     output.figure(f"point_targets_{scene['id']}.png", fig)
     np.savez_compressed(

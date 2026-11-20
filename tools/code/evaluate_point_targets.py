@@ -20,7 +20,7 @@ from tools.shared.rf_beamforming import (
     rf_mv_signed_and_envelope,
     stft_frequency_mv,
 )
-from shared_core.plot_style import DIAGNOSTIC, apply_style
+from shared_core.plot_style import DIAGNOSTIC, apply_style, style_axes
 from tools.shared.run_output import ToolOutput
 import matplotlib.pyplot as plt
 
@@ -535,7 +535,7 @@ def main():
     )
 
     apply_style(DIAGNOSTIC)
-    fig, ax = plt.subplots(figsize=(9, 5), dpi=160)
+    fig, ax = plt.subplots(figsize=(9, 5))
     for method in args.methods:
         for loading in args.loadings:
             values = []
@@ -548,7 +548,7 @@ def main():
     ax.set_xticks(args.grid_scales)
     ax.set_xlabel("Lateral grid scale")
     ax.set_ylabel("Median lateral FWHM (mm)")
-    ax.grid(alpha=0.25)
+    style_axes(ax, grid=True)
     ax.legend(ncol=2)
     fig.tight_layout()
     output.figure("lateral_fwhm_vs_grid.png", fig)

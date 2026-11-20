@@ -253,6 +253,7 @@ def save_bmode(
     frame: int,
     output_dir: Path,
 ) -> None:
+    apply_style(PAPER)
     fig, axis = plt.subplots(figsize=(5.0, 4.0))
     extent = [x_range[0], x_range[1], z_range[1], z_range[0]]
     handle = draw_bmode(axis, image, extent, 60.0, interpolation="nearest")
@@ -280,10 +281,11 @@ def save_bmode(
 def save_grid_comparison(
     results: list[dict], output_dir: Path, source_label: str, frame: int
 ) -> None:
+    apply_style(DIAGNOSTIC)
     cols = min(3, len(results))
     rows = math.ceil(len(results) / cols)
     fig, axes = plt.subplots(
-        rows, cols, figsize=(3.3 * cols, 3.5 * rows), squeeze=False
+        rows, cols, figsize=(3.3 * cols, 3.5 * rows), squeeze=False, constrained_layout=True
     )
     handle = None
     for axis, result in zip(axes.flat, results):
@@ -429,7 +431,6 @@ def main() -> None:
     else:
         output_root = resolve_output_dir("rebeamform_invivo_grid", resolve_path(args.output_dir))
     prepare_output_tree(output_root)
-    apply_style(DIAGNOSTIC)
     emit(output_root, "prepare", f"DAS 扫描 {len(grids)} 个网格；样本 {sample_tag}，帧 {args.frame}。")
     write_json(
         output_root / "run_config.json",

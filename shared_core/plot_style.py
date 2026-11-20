@@ -563,6 +563,8 @@ __all__ = [
     "TOKENS",
     "apply_style",
     "check_figure_glyphs",
+    "draw_bmode",
+    "draw_gray_image",
     "find_missing_glyphs",
     "panel_label",
     "require_font_family",

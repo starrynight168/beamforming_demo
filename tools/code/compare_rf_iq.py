@@ -23,7 +23,7 @@ from tools.shared.rf_beamforming import (
     rf_mv_signed_and_envelope,
     stft_frequency_mv,
 )
-from shared_core.plot_style import DIAGNOSTIC, apply_style, draw_bmode
+from shared_core.plot_style import DIAGNOSTIC, apply_style, draw_bmode, style_axes
 from tools.shared.run_output import ToolOutput
 
 
@@ -321,6 +321,7 @@ def main():
     for ax, image, title in zip(axes, db, titles):
         panel = draw_bmode(ax, image, extent, args.dr)
         ax.set(title=title, xlabel="Lateral (mm)", ylabel="Depth (mm)")
+        style_axes(ax)
     aperture_label = (
         f"dynamic aperture F/{args.f_number:g}" if dynamic else "full aperture"
     )

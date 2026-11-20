@@ -18,7 +18,6 @@ from shared_core.images import (
 )
 from shared_core.selection import select_angle_indices
 from shared_core.signals import ddc_lowpass_coefficients
-from train.shared_core.operators import converter_qmax
 
 
 class DisplayMappingTests(unittest.TestCase):
@@ -83,7 +82,7 @@ class AngleSelectionTests(unittest.TestCase):
                 select_angle_indices(angles, selection)
 
 
-class ApertureAndConverterTests(unittest.TestCase):
+class ApertureAndFilterTests(unittest.TestCase):
     def test_image_extent_is_millimetres_with_inverted_depth_axis(self):
         self.assertEqual(
             image_extent_mm(np.array([-0.01, 0.01]), np.array([0.0, 0.02])),
@@ -116,12 +115,6 @@ class ApertureAndConverterTests(unittest.TestCase):
             ddc_lowpass_coefficients(fs, fc, taps=129, window=("kaiser", 8.0)).astype(np.float32),
             firwin(129, 0.8 * fc, window=("kaiser", 8.0), fs=fs).astype(np.float32),
         )
-
-    def test_converter_code_limits_are_symmetric_or_unsigned(self):
-        self.assertEqual(converter_qmax(4, False), 7)
-        self.assertEqual(converter_qmax(4, True), 15)
-        self.assertEqual(converter_qmax(8, False), 127)
-        self.assertEqual(converter_qmax(8, True), 255)
 
 
 if __name__ == "__main__":

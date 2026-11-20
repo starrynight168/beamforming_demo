@@ -1051,6 +1051,10 @@ def main():
     comparison_path = meta.get("comparison_npy")
     h5_path = meta.get("h5_path")
     phantom_path = meta.get("phantom_path")
+    if comparison_path:
+        comparison_path = resolve(comparison_path)
+    if h5_path:
+        h5_path = resolve(h5_path)
     if comparison_path and h5_path and os.path.exists(comparison_path) and os.path.exists(h5_path):
         comparison = np.load(comparison_path).astype(np.float64)
         x_mm, z_mm = load_grids(h5_path)
@@ -1065,7 +1069,7 @@ def main():
         ):
             raise ValueError(f"comparison 数值/形状或 methods 非法: shape={comparison.shape}, methods={methods}")
         phantom = (
-            read_phantom(phantom_path)
+            read_phantom(resolve(phantom_path))
             if phantom_path and phantom_path != "none"
             else {
                 "contrast_rois": [],
